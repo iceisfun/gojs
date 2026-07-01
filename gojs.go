@@ -80,10 +80,21 @@ var (
 	WithTimeProvider  = interp.WithTimeProvider
 	WithTimerProvider = interp.WithTimerProvider
 	WithSecurity      = interp.WithSecurity
+	WithRegExpEngine  = interp.WithRegExpEngine
 
 	NewDefaultPrintProvider = interp.NewDefaultPrintProvider
 	NewDefaultTimeProvider  = interp.NewDefaultTimeProvider
 	NewDefaultTimerProvider = interp.NewDefaultTimerProvider
+)
+
+// RegExpEngine selects the RegExp backend passed to [WithRegExpEngine].
+type RegExpEngine = interp.RegExpEngine
+
+// RegExp backend choices. RegExpCompat (the default) is the ECMAScript-conformant
+// jsregexp engine; RegExpRE2 is the faster, non-conformant RE2 engine.
+const (
+	RegExpCompat = interp.RegExpCompat
+	RegExpRE2    = interp.RegExpRE2
 )
 
 // ThrownValue extracts the JavaScript value from an uncaught-exception error

@@ -75,6 +75,10 @@ type Interpreter struct {
 	limits Limits
 	steps  int64
 
+	// regexpEngine selects the RegExp backend (the ECMAScript-conformant
+	// jsregexp engine by default, or the faster RE2 engine as an opt-in).
+	regexpEngine RegExpEngine
+
 	// wellKnownSymbols
 	symIterator      *Symbol
 	symAsyncIterator *Symbol
@@ -143,6 +147,33 @@ func WithTimeProvider(p TimeProvider) Option {
 // WithTimerProvider enables setTimeout/setInterval/setImmediate backed by p.
 func WithTimerProvider(p TimerProvider) Option {
 	return func(i *Interpreter) { i.timer = p }
+}
+
+// RegExpEngine selects which regular-expression backend the VM installs.
+type RegExpEngine int
+
+const (
+	// RegExpCompat is the default: the pure-Go jsregexp engine, a full
+	// ECMAScript implementation (backreferences, lookahead/lookbehind, named
+	// groups, u/v Unicode modes) with a step budget that bounds catastrophic
+	// backtracking. Correct, sandbox-safe, and the right choice for running real
+	// or untrusted JavaScript.
+	RegExpCompat RegExpEngine = iota
+
+	// RegExpRE2 backs RegExp with Go's regexp package (RE2). It is faster and
+	// linear-time, but it is NOT ECMAScript-conformant: patterns using
+	// backreferences or lookaround fail to compile (SyntaxError), and capture,
+	// flag, and Unicode semantics follow RE2 rather than the spec. Use it only
+	// for performance-sensitive scripting over simple, trusted patterns where
+	// full conformance is not required.
+	RegExpRE2
+)
+
+// WithRegExpEngine selects the RegExp backend. The default (RegExpCompat) is the
+// ECMAScript-conformant jsregexp engine; RegExpRE2 opts into the faster,
+// non-conformant RE2 engine. See RegExpEngine for the trade-offs.
+func WithRegExpEngine(e RegExpEngine) Option {
+	return func(i *Interpreter) { i.regexpEngine = e }
 }
 
 // New creates an Interpreter with the standard global environment installed.
