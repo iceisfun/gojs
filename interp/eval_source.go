@@ -26,7 +26,9 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 		return nil, i.throwError(ctx, "EvalError", "eval is disabled in this sandbox")
 	}
 
-	prog, err := parser.Parse("<eval>", string(str))
+	// Indirect eval runs in the global scope: super, super property, and
+	// new.target are all invalid, so parse with an empty context.
+	prog, err := parser.ParseEval("<eval>", string(str), parser.EvalContext{})
 	if err != nil {
 		// A parse failure in eval surfaces as a SyntaxError thrown value.
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
@@ -58,8 +60,10 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 	}
 
 	prog, err := parser.ParseEval("<eval>", string(str), parser.EvalContext{
-		AllowSuperCall: env.inDerivedConstructor(),
-		PrivateNames:   env.privateNamesInScope(),
+		AllowSuperCall:     env.inDerivedConstructor(),
+		AllowSuperProperty: env.homeObject() != nil,
+		AllowNewTarget:     env.functionScope() != i.globalEnv,
+		PrivateNames:       env.privateNamesInScope(),
 	})
 	if err != nil {
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())

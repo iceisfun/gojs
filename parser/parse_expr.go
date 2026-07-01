@@ -221,6 +221,11 @@ func (p *parser) parseNew() ast.Expr {
 	if p.at(token.DOT) {
 		p.next()
 		p.expect(token.IDENT) // target
+		// new.target is only valid inside a function; ordinary parsing leaves it
+		// permitted (runtime resolves it), but indirect/global eval forbids it.
+		if !p.newTargetOK {
+			p.errorAt(kw.Pos, "new.target is only valid inside a function")
+		}
 		return &ast.Ident{NamePos: kw.Pos, Name: "new.target"}
 	}
 	// The callee is a member expression but NOT a call (arguments bind to the
@@ -379,10 +384,15 @@ func (p *parser) parsePrimary() ast.Expr {
 	case token.SUPER:
 		p.next()
 		// A SuperCall (super(...)) is permitted only in a derived class
-		// constructor — never in a field initializer, an ordinary method, or a
-		// base-class constructor (ECMA-262 13.3.7.1).
-		if p.at(token.LPAREN) && !p.superCallOK {
+		// constructor; a SuperProperty (super.x / super[x]) only where a
+		// [[HomeObject]] is in scope — a method, accessor, constructor, or field
+		// initializer (ECMA-262 13.3.7.1). Ordinary parsing leaves both permitted
+		// (runtime enforces); indirect/global eval forbids them.
+		switch {
+		case p.at(token.LPAREN) && !p.superCallOK:
 			p.errorAt(tk.Pos, "super() is only valid in a derived class constructor")
+		case (p.at(token.DOT) || p.at(token.LBRACKET)) && !p.superPropOK:
+			p.errorAt(tk.Pos, "'super' keyword is only valid inside a method")
 		}
 		return &ast.SuperExpr{Keyword: tk.Pos}
 	case token.IDENT:

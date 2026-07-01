@@ -85,6 +85,12 @@ type parser struct {
 	superCallOK      bool
 	classHeritage    bool
 	pendingSuperCall bool
+	// superPropOK/newTargetOK gate super.property and new.target. They default
+	// to true for ordinary parsing (which relies on runtime checks); ParseEval
+	// sets them from the caller so indirect/global eval rejects super and
+	// new.target while a direct eval in a method or function keeps them.
+	superPropOK bool
+	newTargetOK bool
 	// strict reports whether the code currently being parsed is strict-mode
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a
@@ -117,9 +123,11 @@ func Parse(sourceName, source string) (*ast.Program, error) {
 // (so `this.#x` resolves), whether a SuperCall is permitted (inside a derived
 // constructor), and whether the caller is strict-mode code.
 type EvalContext struct {
-	Strict         bool
-	AllowSuperCall bool
-	PrivateNames   []string
+	Strict             bool
+	AllowSuperCall     bool
+	AllowSuperProperty bool
+	AllowNewTarget     bool
+	PrivateNames       []string
 }
 
 // ParseEval parses the source of a direct eval, seeding the surrounding
@@ -131,6 +139,8 @@ func ParseEval(sourceName, source string, ec EvalContext) (*ast.Program, error) 
 	}
 	p.strict = ec.Strict
 	p.superCallOK = ec.AllowSuperCall
+	p.superPropOK = ec.AllowSuperProperty
+	p.newTargetOK = ec.AllowNewTarget
 	if len(ec.PrivateNames) > 0 {
 		env := &privateEnv{declared: make(map[string]bool, len(ec.PrivateNames))}
 		for _, n := range ec.PrivateNames {
@@ -155,7 +165,9 @@ func newParser(sourceName, source string) (*parser, error) {
 	if err := lex.Err(); err != nil {
 		return nil, err
 	}
-	return &parser{source: sourceName, toks: toks}, nil
+	// super.property and new.target default to permitted; only eval restricts
+	// them (see ParseEval).
+	return &parser{source: sourceName, toks: toks, superPropOK: true, newTargetOK: true}, nil
 }
 
 // ---------------------------------------------------------------------------

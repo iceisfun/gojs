@@ -386,10 +386,11 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	// initializer's restrictions do not reach in) and its own yield/await
 	// reservation determined by whether it is a generator or async.
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
-	prevSuper := p.superCallOK
+	prevSuper, prevNT := p.superCallOK, p.newTargetOK
 	p.inFieldInit = false
 	p.inGenerator, p.inAsync = def.Generator, async
 	p.superCallOK = false // a nested regular function never permits super()
+	p.newTargetOK = true  // but new.target is valid in any function
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
@@ -397,7 +398,7 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
-	p.superCallOK = prevSuper
+	p.superCallOK, p.newTargetOK = prevSuper, prevNT
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
@@ -544,13 +545,15 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	// A method establishes its own arguments/super scope and yield/await
 	// reservation (see parseFuncDef).
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
-	prevSuper := p.superCallOK
+	prevSuper, prevProp, prevNT := p.superCallOK, p.superPropOK, p.newTargetOK
 	p.inFieldInit = false
 	p.inGenerator, p.inAsync = generator, async
 	// A SuperCall is permitted only in the derived constructor; parseClassMember
-	// signals that via pendingSuperCall for exactly that one method body.
+	// signals that via pendingSuperCall for exactly that one method body. Super
+	// property and new.target are valid in any method.
 	p.superCallOK = p.pendingSuperCall
 	p.pendingSuperCall = false
+	p.superPropOK, p.newTargetOK = true, true
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
@@ -558,7 +561,7 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
-	p.superCallOK = prevSuper
+	p.superCallOK, p.superPropOK, p.newTargetOK = prevSuper, prevProp, prevNT
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
@@ -828,10 +831,11 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 	// contain `arguments` or a SuperCall (tracked via inFieldInit).
 	m.Field = true
 	if p.accept(token.ASSIGN) {
-		prev := p.inFieldInit
+		prev, prevProp := p.inFieldInit, p.superPropOK
 		p.inFieldInit = true
+		p.superPropOK = true // super.x is valid in a field initializer
 		m.Value = p.parseAssignExpr()
-		p.inFieldInit = prev
+		p.inFieldInit, p.superPropOK = prev, prevProp
 	}
 	p.expectSemicolon()
 	return m
