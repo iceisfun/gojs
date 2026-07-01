@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -72,7 +73,7 @@ func TestT262(t *testing.T) {
 				skip++
 			case Fail:
 				fail++
-				if len(failures) < failureSampleSize {
+				if failureSampleSize < 0 || len(failures) < failureSampleSize {
 					failures = append(failures, r)
 				}
 			}
@@ -94,7 +95,14 @@ func TestT262(t *testing.T) {
 }
 
 // failureSampleSize bounds how many failure lines are printed.
-const failureSampleSize = 40
+var failureSampleSize = func() int {
+	if v := os.Getenv("GOJS_T262_SAMPLES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 40
+}()
 
 // defaultDirs is a focused, high-signal slice of the suite covering areas gojs
 // implements. It intentionally avoids sprawling built-in coverage until the
