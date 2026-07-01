@@ -93,8 +93,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.SpreadElement:
 		return i.evalExpr(ctx, e.Argument, env)
 	case *ast.AwaitExpr:
-		// Synchronous approximation: await unwraps a settled value.
-		return i.evalExpr(ctx, e.Argument, env)
+		return i.evalAwait(ctx, e, env)
 	case *ast.YieldExpr:
 		return i.evalYield(ctx, e, env)
 	case *ast.SuperExpr:

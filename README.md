@@ -229,11 +229,12 @@ The root package `gojs` re-exports the common surface of `interp`.
 
 This is a first pass. Notable gaps and approximations:
 
-- **Generators** (`function*`, `yield`, `yield*`) are fully functional —
-  each instance runs on its own goroutine as a cooperative coroutine, and
-  `Close()` cleans up suspended generators.
-- **`async`/`await`** parse but run synchronously (await unwraps its
-  operand); they are not yet backed by the microtask queue.
+- **Generators** (`function*`, `yield`, `yield*`) and **`async`/`await`** are
+  fully functional. Each runs on its own goroutine as a cooperative coroutine
+  (an `await` is a `yield` to a promise-driven runner on the VM goroutine), so
+  async ordering matches real engines and `Close()` cleans up suspended
+  coroutines. Top-level `await` outside an async function is a best-effort
+  synchronous unwrap.
 - **Strings** are stored as Go UTF-8 and indexed by rune, not UTF-16 code
   units — an approximation for characters outside the BMP.
 - **Modules** (`import`/`export`) are not yet executed.

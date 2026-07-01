@@ -42,6 +42,15 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		if def.Generator && kind == kindNormal {
 			return i.makeGenerator(def, closure, homeObj, this, args)
 		}
+		// An async function returns a promise driven through the microtask
+		// queue (see asyncRun).
+		if def.Async {
+			t := this
+			if kind == kindNormal && IsNullish(t) {
+				t = i.global
+			}
+			return i.asyncRun(def, closure, homeObj, t, args, kind == kindArrow)
+		}
 		env := NewEnvironment(closure, true)
 		if kind == kindNormal {
 			// Non-strict `this` substitution: a normal function called with no

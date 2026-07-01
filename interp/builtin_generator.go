@@ -50,26 +50,36 @@ type yieldMsg struct {
 	err   error
 }
 
-// makeGenerator builds the generator-object factory: calling a generator
-// function returns a fresh generator (iterator) object without running the body.
-func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
+// startCoroutine sets up a suspendable coroutine over a function body: it binds
+// parameters, prepares the body environment (with env.gen wired so yield/await
+// can suspend), and returns the shared state plus an advance function. The body
+// runs lazily on a dedicated goroutine on first advance; advance sends a resume
+// message and blocks until the body next suspends (yield/await) or completes.
+//
+// Both generators (makeGenerator) and async functions (asyncRun) are built on
+// this. Because advance blocks the caller while the body runs and the body
+// blocks at each suspension point, only one goroutine touches interpreter state
+// at a time — cooperative coroutining, not parallelism.
+func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (*generatorState, func(resumeMsg) yieldMsg, error) {
 	gs := &generatorState{
 		resume: make(chan resumeMsg),
 		out:    make(chan yieldMsg),
 		ctx:    i.ctx,
 	}
 
-	// Prepare the body environment eagerly (parameter binding happens now, per
-	// spec), but defer running statements until the first next().
 	env := NewEnvironment(closure, true)
-	env.setThis(this)
-	if homeObj != nil {
-		env.homeObj = homeObj
+	// An async arrow inherits this/arguments lexically; a normal function/
+	// generator establishes its own.
+	if !arrow {
+		env.setThis(this)
+		if homeObj != nil {
+			env.homeObj = homeObj
+		}
+		env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 	}
 	env.gen = gs
-	env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	started := false
@@ -78,9 +88,8 @@ func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, home
 		i.wg.Add(1)
 		go func() {
 			defer i.wg.Done()
-			// Wait for the first resume (its value is ignored by spec).
 			select {
-			case <-gs.resume:
+			case <-gs.resume: // first resume value is ignored, per spec
 			case <-gs.ctx.Done():
 				return
 			}
@@ -103,10 +112,9 @@ func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, home
 		}()
 	}
 
-	// advance sends a resume message and waits for the next yield/finish.
-	advance := func(msg resumeMsg) (yieldMsg, error) {
+	advance := func(msg resumeMsg) yieldMsg {
 		if gs.done {
-			return yieldMsg{value: Undef, done: true}, nil
+			return yieldMsg{value: Undef, done: true}
 		}
 		if !started {
 			start()
@@ -115,18 +123,28 @@ func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, home
 		case gs.resume <- msg:
 		case <-gs.ctx.Done():
 			gs.done = true
-			return yieldMsg{}, gs.ctx.Err()
+			return yieldMsg{done: true, err: gs.ctx.Err()}
 		}
 		select {
 		case res := <-gs.out:
 			if res.done {
 				gs.done = true
 			}
-			return res, res.err
+			return res
 		case <-gs.ctx.Done():
 			gs.done = true
-			return yieldMsg{}, gs.ctx.Err()
+			return yieldMsg{done: true, err: gs.ctx.Err()}
 		}
+	}
+	return gs, advance, nil
+}
+
+// makeGenerator builds the generator-object factory: calling a generator
+// function returns a fresh generator (iterator) object without running the body.
+func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
+	gs, advance, err := i.startCoroutine(def, closure, homeObj, this, args, false)
+	if err != nil {
+		return nil, err
 	}
 
 	genObj := NewObject(i.generatorProto)
@@ -138,35 +156,28 @@ func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, home
 		o.SetData("done", Bool(done))
 		return o
 	}
+	step := func(msg resumeMsg) (Value, error) {
+		res := advance(msg)
+		if res.err != nil {
+			return nil, res.err
+		}
+		return result(res.value, res.done), nil
+	}
 
 	i.defineMethod(genObj, "next", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
-		res, err := advance(resumeMsg{value: arg(a, 0), mode: resumeNext})
-		if err != nil {
-			return nil, err
-		}
-		return result(res.value, res.done), nil
+		return step(resumeMsg{value: arg(a, 0), mode: resumeNext})
 	})
 	i.defineMethod(genObj, "return", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
-		if gs.done || !started {
-			gs.done = true
+		if gs.done {
 			return result(arg(a, 0), true), nil
 		}
-		res, err := advance(resumeMsg{value: arg(a, 0), mode: resumeReturn})
-		if err != nil {
-			return nil, err
-		}
-		return result(res.value, res.done), nil
+		return step(resumeMsg{value: arg(a, 0), mode: resumeReturn})
 	})
 	i.defineMethod(genObj, "throw", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
-		if gs.done || !started {
-			gs.done = true
+		if gs.done {
 			return nil, NewThrow(arg(a, 0))
 		}
-		res, err := advance(resumeMsg{value: arg(a, 0), mode: resumeThrow})
-		if err != nil {
-			return nil, err
-		}
-		return result(res.value, res.done), nil
+		return step(resumeMsg{value: arg(a, 0), mode: resumeThrow})
 	})
 	// A generator is its own iterator.
 	genObj.defineOwn(SymKey(i.symIterator), &Property{
