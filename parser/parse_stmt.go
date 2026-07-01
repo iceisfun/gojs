@@ -312,12 +312,20 @@ func (p *parser) parseSwitch() ast.Stmt {
 	p.expect(token.LBRACE)
 	stmt := &ast.SwitchStmt{Keyword: kw.Pos, Discriminant: disc}
 	p.inSwitch++
+	sawDefault := false
 	for !p.at(token.RBRACE) && !p.at(token.EOF) && p.err == nil {
 		c := &ast.SwitchCase{CasePos: p.cur().Pos}
 		switch {
 		case p.accept(token.CASE):
 			c.Test = p.parseExpression()
 		case p.accept(token.DEFAULT):
+			// A CaseBlock may contain at most one DefaultClause (early error).
+			if sawDefault {
+				p.errorAt(c.CasePos, "more than one switch default")
+				p.inSwitch--
+				return stmt
+			}
+			sawDefault = true
 			// default clause: Test stays nil.
 		default:
 			p.errorf("expected 'case' or 'default' but got %s", p.cur().Type)
@@ -333,14 +341,163 @@ func (p *parser) parseSwitch() ast.Stmt {
 	p.inSwitch--
 	rb := p.expect(token.RBRACE)
 	stmt.Rbrace = rb.Pos
-	// The CaseBlock as a whole is one lexical scope: apply the Block early-error
-	// rules across the concatenated statement lists of all clauses.
-	var all []ast.Stmt
-	for _, c := range stmt.Cases {
-		all = append(all, c.Body...)
+	// The CaseBlock as a whole is one lexical scope. checkSwitchEarlyErrors
+	// enforces the cross-clause lexical redeclaration rules (a superset of the
+	// generic Block check) plus switch-specific early errors (duplicate default).
+	if p.err == nil {
+		p.checkSwitchEarlyErrors(stmt)
 	}
-	p.checkBlockEarlyErrors(all)
 	return stmt
+}
+
+// checkSwitchEarlyErrors enforces the Static Semantics: Early Errors for a
+// SwitchStatement. The entire CaseBlock is a single lexical scope, so:
+//   - the LexicallyDeclaredNames of the CaseBlock must not contain duplicates
+//     (a let/const/class/function-declaration name repeated across ANY two
+//     clauses, including unreachable ones), and
+//   - no lexically-declared name may also be a VarDeclaredName of the CaseBlock.
+//
+// These are parse-time SyntaxErrors, checked regardless of which case matches.
+func (p *parser) checkSwitchEarlyErrors(stmt *ast.SwitchStmt) {
+	// Collect the CaseBlock's top-level lexical names across all clauses.
+	lex := map[string]token.Pos{}
+	dup := false
+	var dupPos token.Pos
+	for _, c := range stmt.Cases {
+		caseLexNames(c.Body, func(name string, pos token.Pos) {
+			if _, ok := lex[name]; ok {
+				if !dup {
+					dup, dupPos = true, pos
+				}
+			} else {
+				lex[name] = pos
+			}
+		})
+	}
+	if dup {
+		p.errorAt(dupPos, "Identifier has already been declared")
+		return
+	}
+	// A lexical name may not collide with a var-declared name in the same
+	// CaseBlock (var hoists through nested blocks, so recurse).
+	varNames := map[string]bool{}
+	for _, c := range stmt.Cases {
+		collectSwitchVarNames(c.Body, varNames)
+	}
+	for name, pos := range lex {
+		if varNames[name] {
+			p.errorAt(pos, "Identifier has already been declared")
+			return
+		}
+	}
+}
+
+// caseLexNames reports the top-level LexicallyDeclaredNames of a case clause's
+// statement list: let/const bindings, class declarations, and block-level
+// function declarations declared directly in the clause (not nested blocks).
+func caseLexNames(body []ast.Stmt, fn func(name string, pos token.Pos)) {
+	for _, s := range body {
+		switch st := s.(type) {
+		case *ast.VarDecl:
+			if st.Kind == token.LET || st.Kind == token.CONST {
+				for _, d := range st.Decls {
+					eachBoundName(d.Target, func(n string) { fn(n, d.Target.Pos()) })
+				}
+			}
+		case *ast.ClassDecl:
+			if st.Def.Name != nil {
+				fn(st.Def.Name.Name, st.Def.Name.NamePos)
+			}
+		case *ast.FuncDecl:
+			if st.Def.Name != nil {
+				fn(st.Def.Name.Name, st.Def.Name.NamePos)
+			}
+		}
+	}
+}
+
+// collectSwitchVarNames accumulates the VarDeclaredNames of a statement list:
+// names bound by `var`, recursing through nested statements (but not into
+// nested functions, which have their own scope).
+func collectSwitchVarNames(body []ast.Stmt, into map[string]bool) {
+	for _, s := range body {
+		collectSwitchVarNamesStmt(s, into)
+	}
+}
+
+func collectSwitchVarNamesStmt(s ast.Stmt, into map[string]bool) {
+	switch st := s.(type) {
+	case *ast.VarDecl:
+		if st.Kind == token.VAR {
+			for _, d := range st.Decls {
+				eachBoundName(d.Target, func(n string) { into[n] = true })
+			}
+		}
+	case *ast.BlockStmt:
+		collectSwitchVarNames(st.Body, into)
+	case *ast.IfStmt:
+		collectSwitchVarNamesStmt(st.Consequent, into)
+		if st.Alternate != nil {
+			collectSwitchVarNamesStmt(st.Alternate, into)
+		}
+	case *ast.ForStmt:
+		if vd, ok := st.Init.(*ast.VarDecl); ok {
+			collectSwitchVarNamesStmt(vd, into)
+		}
+		collectSwitchVarNamesStmt(st.Body, into)
+	case *ast.ForInStmt:
+		if vd, ok := st.Left.(*ast.VarDecl); ok {
+			collectSwitchVarNamesStmt(vd, into)
+		}
+		collectSwitchVarNamesStmt(st.Body, into)
+	case *ast.WhileStmt:
+		collectSwitchVarNamesStmt(st.Body, into)
+	case *ast.DoWhileStmt:
+		collectSwitchVarNamesStmt(st.Body, into)
+	case *ast.TryStmt:
+		collectSwitchVarNames(st.Block.Body, into)
+		if st.Handler != nil {
+			collectSwitchVarNames(st.Handler.Body.Body, into)
+		}
+		if st.Finalizer != nil {
+			collectSwitchVarNames(st.Finalizer.Body, into)
+		}
+	case *ast.SwitchStmt:
+		for _, c := range st.Cases {
+			collectSwitchVarNames(c.Body, into)
+		}
+	case *ast.LabeledStmt:
+		collectSwitchVarNamesStmt(st.Body, into)
+	}
+}
+
+// eachBoundName invokes fn for each identifier bound by a binding target
+// (identifier or destructuring pattern).
+func eachBoundName(target ast.Expr, fn func(string)) {
+	switch t := target.(type) {
+	case *ast.Ident:
+		fn(t.Name)
+	case *ast.AssignPattern:
+		eachBoundName(t.Target, fn)
+	case *ast.RestElement:
+		eachBoundName(t.Target, fn)
+	case *ast.ArrayLit:
+		for _, el := range t.Elements {
+			if el != nil {
+				eachBoundName(el, fn)
+			}
+		}
+	case *ast.ObjectLit:
+		for _, pr := range t.Properties {
+			if pr.Value != nil {
+				eachBoundName(pr.Value, fn)
+			} else if pr.Key != nil {
+				eachBoundName(pr.Key, fn)
+			}
+		}
+	case *ast.SpreadElement:
+		eachBoundName(t.Argument, fn)
+	}
 }
 
 // parseReturn parses a return statement, honoring ASI for the optional argument.

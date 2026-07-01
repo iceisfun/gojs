@@ -16,11 +16,14 @@ func (i *Interpreter) execStmts(ctx context.Context, stmts []ast.Stmt, env *Envi
 	var result Value = Undef
 	for _, s := range stmts {
 		v, err := i.evalStmt(ctx, s, env)
-		if err != nil {
-			return result, err
-		}
+		// Preserve an abrupt completion's value (e.g. a switch that ends in a
+		// `continue` carries its completion value out through the enclosing
+		// block) so callers can apply UpdateEmpty correctly.
 		if v != nil {
 			result = v
+		}
+		if err != nil {
+			return result, err
 		}
 	}
 	return result, nil

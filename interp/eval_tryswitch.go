@@ -87,14 +87,86 @@ func (i *Interpreter) evalSwitch(ctx context.Context, s *ast.SwitchStmt, env *En
 		return Undef, nil
 	}
 
+	// Track the switch's completion value V per CaseBlockEvaluation +
+	// UpdateEmpty: V accumulates the completion value of each executed clause,
+	// but an empty completion (an empty clause body, a break/continue, a bare
+	// declaration) never replaces a previous non-empty value.
+	var v Value // nil == empty
 	for idx := matched; idx < len(s.Cases); idx++ {
-		_, err := i.execStmts(ctx, s.Cases[idx].Body, scope)
+		cv, err := i.execCaseBody(ctx, s.Cases[idx].Body, scope)
+		if cv != nil {
+			v = cv
+		}
 		if err != nil {
+			// UpdateEmpty(R, V): an unlabeled break completes the switch with V.
 			if b, ok := err.(*breakSignal); ok && b.label == "" {
-				return Undef, nil
+				return orUndef(v), nil
 			}
-			return nil, err
+			// Other abrupt completions (continue, labeled break, return, throw)
+			// propagate outward carrying V as the completion value.
+			return orUndef(v), err
 		}
 	}
-	return Undef, nil
+	return orUndef(v), nil
+}
+
+// execCaseBody runs a case clause's StatementList, returning the completion
+// value per StatementListEvaluation + UpdateEmpty. The returned value is nil
+// when the list's completion is empty (an empty list, or a list of only
+// empty-completion statements such as declarations, break/continue, or empty
+// statements). On an abrupt completion the accumulated value is returned
+// alongside the control-flow error.
+func (i *Interpreter) execCaseBody(ctx context.Context, stmts []ast.Stmt, env *Environment) (Value, error) {
+	var v Value // nil == empty
+	for _, s := range stmts {
+		// A nested block is its own lexical scope; recurse so its completion
+		// emptiness is tracked correctly rather than collapsing to undefined.
+		if b, ok := s.(*ast.BlockStmt); ok {
+			scope := NewEnvironment(env, false)
+			if err := i.hoistDeclarations(ctx, b.Body, scope, false); err != nil {
+				return v, err
+			}
+			cv, err := i.execCaseBody(ctx, b.Body, scope)
+			if cv != nil {
+				v = cv
+			}
+			if err != nil {
+				return v, err
+			}
+			continue
+		}
+		cv, err := i.evalStmt(ctx, s, env)
+		if err != nil {
+			// return/throw carry their own value in the signal; break/continue
+			// return a nil (empty) value here. Preserve any non-empty value.
+			if cv != nil {
+				v = cv
+			}
+			return v, err
+		}
+		// Declarations and empty/debugger statements are empty completions and
+		// must not overwrite a previous non-empty value.
+		if cv != nil && !stmtIsEmptyCompletion(s) {
+			v = cv
+		}
+	}
+	return v, nil
+}
+
+// stmtIsEmptyCompletion reports whether a statement's normal completion is
+// always empty (produces no value), per the spec's StatementList semantics.
+func stmtIsEmptyCompletion(s ast.Stmt) bool {
+	switch s.(type) {
+	case *ast.VarDecl, *ast.FuncDecl, *ast.ClassDecl, *ast.EmptyStmt, *ast.DebuggerStmt:
+		return true
+	}
+	return false
+}
+
+// orUndef maps an empty (nil) completion value to undefined.
+func orUndef(v Value) Value {
+	if v == nil {
+		return Undef
+	}
+	return v
 }

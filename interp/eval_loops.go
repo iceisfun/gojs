@@ -46,22 +46,26 @@ func (i *Interpreter) evalWhile(ctx context.Context, s *ast.WhileStmt, env *Envi
 }
 
 func (i *Interpreter) runWhile(ctx context.Context, s *ast.WhileStmt, env *Environment, label string) (Value, error) {
+	var v Value // running completion value (nil == empty)
 	for {
 		test, err := i.evalExpr(ctx, s.Test, env)
 		if err != nil {
 			return nil, err
 		}
 		if !ToBoolean(test) {
-			return Undef, nil
+			return orUndef(v), nil
 		}
-		_, err = i.evalStmt(ctx, s.Body, env)
+		bv, err := i.evalStmt(ctx, s.Body, env)
+		if bv != nil {
+			v = bv
+		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
-			return Undef, nil
+			return orUndef(v), nil
 		case loopContinue, loopNormal:
 			continue
 		default:
-			return nil, err
+			return orUndef(v), err
 		}
 	}
 }
@@ -72,22 +76,26 @@ func (i *Interpreter) evalDoWhile(ctx context.Context, s *ast.DoWhileStmt, env *
 }
 
 func (i *Interpreter) runDoWhile(ctx context.Context, s *ast.DoWhileStmt, env *Environment, label string) (Value, error) {
+	var v Value // running completion value (nil == empty)
 	for {
-		_, err := i.evalStmt(ctx, s.Body, env)
+		bv, err := i.evalStmt(ctx, s.Body, env)
+		if bv != nil {
+			v = bv
+		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
-			return Undef, nil
+			return orUndef(v), nil
 		case loopContinue, loopNormal:
 			// fall through to the test
 		default:
-			return nil, err
+			return orUndef(v), err
 		}
 		test, err := i.evalExpr(ctx, s.Test, env)
 		if err != nil {
 			return nil, err
 		}
 		if !ToBoolean(test) {
-			return Undef, nil
+			return orUndef(v), nil
 		}
 	}
 }
@@ -115,6 +123,7 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 			}
 		}
 	}
+	var v Value // running completion value (nil == empty)
 	for {
 		if s.Test != nil {
 			test, err := i.evalExpr(ctx, s.Test, loopEnv)
@@ -122,19 +131,22 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 				return nil, err
 			}
 			if !ToBoolean(test) {
-				return Undef, nil
+				return orUndef(v), nil
 			}
 		}
 		// Each iteration runs in a copy so closures capture per-iteration lets.
 		iterEnv := i.copyLoopScope(loopEnv, env)
-		_, err := i.evalStmt(ctx, s.Body, iterEnv)
+		bv, err := i.evalStmt(ctx, s.Body, iterEnv)
+		if bv != nil {
+			v = bv
+		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
-			return Undef, nil
+			return orUndef(v), nil
 		case loopContinue, loopNormal:
 			// proceed to update
 		default:
-			return nil, err
+			return orUndef(v), err
 		}
 		i.writeBackLoopScope(loopEnv, iterEnv)
 		if s.Update != nil {
@@ -201,12 +213,16 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		}
 	}
 
-	loopErr := each(func(v Value) error {
+	var v Value // running completion value (nil == empty)
+	loopErr := each(func(item Value) error {
 		iterEnv := NewEnvironment(env, false)
-		if err := i.bindForTarget(ctx, s.Left, v, iterEnv, env); err != nil {
+		if err := i.bindForTarget(ctx, s.Left, item, iterEnv, env); err != nil {
 			return err
 		}
-		_, err := i.evalStmt(ctx, s.Body, iterEnv)
+		bv, err := i.evalStmt(ctx, s.Body, iterEnv)
+		if bv != nil {
+			v = bv
+		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
 			return errStopIteration
@@ -217,9 +233,9 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		}
 	})
 	if loopErr != nil && loopErr != errStopIteration {
-		return nil, loopErr
+		return orUndef(v), loopErr
 	}
-	return Undef, nil
+	return orUndef(v), nil
 }
 
 // bindForTarget binds a for-in/of loop value to the loop's left-hand side,
