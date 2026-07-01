@@ -212,12 +212,14 @@ func (p *parser) parseClassStringDisjunction() ClassItem {
 		p.fail("invalid \\q")
 	}
 	p.advance() // '{'
-	// Represent the disjunction as the first string; the compiler expands the
-	// full alternative set later. For now collect only until '}' / '|'.
+	// Collect each '|'-separated alternative as its own class string.
+	var alts [][]rune
 	var runes []rune
 	for !p.eof() && p.peek() != '}' {
 		if p.peek() == '|' {
 			p.advance()
+			alts = append(alts, runes)
+			runes = nil
 			continue
 		}
 		if p.peek() == '\\' {
@@ -231,5 +233,6 @@ func (p *parser) parseClassStringDisjunction() ClassItem {
 		p.fail("unterminated \\q")
 	}
 	p.advance() // '}'
-	return ClassString{Runes: runes}
+	alts = append(alts, runes)
+	return ClassStringDisjunction{Alts: alts}
 }

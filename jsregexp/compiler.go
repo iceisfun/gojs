@@ -185,11 +185,11 @@ func (c *compiler) simpleConsumer(n Node) (unitConsumer, bool) {
 	case *AnyChar:
 		return c.anyConsumer(), true
 	case *CharClass:
-		set, err := c.compileClassSet(t.Set)
-		if err != nil {
-			return nil, false // fall back so the normal path reports the error
+		cs, err := c.compileClassSet(t.Set)
+		if err != nil || len(cs.strings) > 0 {
+			return nil, false // string-bearing (or erroring) classes take the normal path
 		}
-		return c.classConsumer(set, t.Negate), true
+		return c.classConsumer(cs.set, t.Negate), true
 	}
 	return nil, false
 }
@@ -232,18 +232,24 @@ func (c *compiler) assertionMatcher(kind AssertKind) matcher {
 }
 
 func (c *compiler) classMatcher(cc *CharClass) (matcher, error) {
-	set, err := c.compileClassSet(cc.Set)
+	cs, err := c.compileClassSet(cc.Set)
 	if err != nil {
 		return nil, err
 	}
-	return consumerMatcher(c.classConsumer(set, cc.Negate)), nil
+	if len(cs.strings) > 0 {
+		if cc.Negate {
+			return nil, &SyntaxError{Msg: "negated character class may contain strings", Pos: -1}
+		}
+		return c.classStringMatcher(cs), nil
+	}
+	return consumerMatcher(c.classConsumer(cs.set, cc.Negate)), nil
 }
 
 // compileClassSet resolves a ClassSet into a runeSet, applying v-mode set
 // operations. Multi-code-point class strings are not yet representable in a
 // runeSet and are rejected here (handled in the unicode phase).
-func (c *compiler) compileClassSet(cs *ClassSet) (*runeSet, error) {
-	operand := func(item ClassItem) (*runeSet, error) {
+func (c *compiler) compileClassSet(cs *ClassSet) (charSetV, error) {
+	operand := func(item ClassItem) (charSetV, error) {
 		var b setBuilder
 		switch it := item.(type) {
 		case ClassRange:
@@ -253,65 +259,107 @@ func (c *compiler) compileClassSet(cs *ClassSet) (*runeSet, error) {
 		case ClassProperty:
 			s, err := resolveProperty(it.Name, it.Value)
 			if err != nil {
-				return nil, err
+				// May be a property of strings (v mode only).
+				if pos, ok := propertyOfStrings(it.Name); ok && it.Value == "" {
+					if it.Negate {
+						return charSetV{}, &SyntaxError{Msg: "negated property of strings", Pos: -1}
+					}
+					return pos, nil
+				}
+				return charSetV{}, err
 			}
 			if it.Negate {
 				var nb setBuilder
 				nb.addComplement(s.ranges)
-				return nb.build(), nil
+				return charSetV{set: nb.build()}, nil
 			}
-			return s, nil
+			return charSetV{set: s}, nil
 		case ClassString:
-			if len(it.Runes) != 1 {
-				return nil, &SyntaxError{Msg: "multi-character class strings not yet supported", Pos: -1}
+			switch len(it.Runes) {
+			case 1:
+				b.addRune(it.Runes[0])
+			default: // 0 (empty) or >=2 (multi-code-point)
+				return charSetV{set: &runeSet{}, strings: [][]rune{append([]rune(nil), it.Runes...)}}, nil
 			}
-			b.addRune(it.Runes[0])
+		case ClassStringDisjunction:
+			var b2 setBuilder
+			var strs [][]rune
+			for _, alt := range it.Alts {
+				if len(alt) == 1 {
+					b2.addRune(alt[0])
+				} else {
+					strs = append(strs, append([]rune(nil), alt...))
+				}
+			}
+			return charSetV{set: b2.build(), strings: strs}, nil
 		case NestedClass:
 			inner, err := c.compileClassSet(it.Set)
 			if err != nil {
-				return nil, err
+				return charSetV{}, err
 			}
 			if it.Negate {
+				if len(inner.strings) > 0 {
+					return charSetV{}, &SyntaxError{Msg: "negated character class may contain strings", Pos: -1}
+				}
 				var nb setBuilder
-				nb.addComplement(inner.ranges)
-				return nb.build(), nil
+				nb.addComplement(inner.set.ranges)
+				return charSetV{set: nb.build()}, nil
 			}
 			return inner, nil
 		}
-		return b.build(), nil
+		return charSetV{set: b.build()}, nil
 	}
 
-	sets := make([]*runeSet, 0, len(cs.Items))
+	ops := make([]charSetV, 0, len(cs.Items))
 	for _, item := range cs.Items {
 		s, err := operand(item)
 		if err != nil {
-			return nil, err
+			return charSetV{}, err
 		}
-		sets = append(sets, s)
+		if s.set == nil {
+			s.set = &runeSet{}
+		}
+		ops = append(ops, s)
 	}
-	if len(sets) == 0 {
-		return &runeSet{}, nil
+	if len(ops) == 0 {
+		return charSetV{set: &runeSet{}}, nil
 	}
 
 	switch cs.Op {
 	case SetIntersection:
-		acc := sets[0]
-		for _, s := range sets[1:] {
-			acc = intersect(acc, s)
+		acc := ops[0]
+		for _, s := range ops[1:] {
+			set := intersect(acc.set, s.set)
+			var strs [][]rune
+			for _, str := range acc.strings {
+				if stringInList(s.strings, str) {
+					strs = append(strs, str)
+				}
+			}
+			acc = charSetV{set: set, strings: strs}
 		}
 		return acc, nil
 	case SetSubtraction:
-		acc := sets[0]
-		for _, s := range sets[1:] {
-			acc = subtract(acc, s)
+		acc := ops[0]
+		for _, s := range ops[1:] {
+			set := subtract(acc.set, s.set)
+			var strs [][]rune
+			for _, str := range acc.strings {
+				if !stringInList(s.strings, str) {
+					strs = append(strs, str)
+				}
+			}
+			acc = charSetV{set: set, strings: strs}
 		}
 		return acc, nil
 	default: // union
 		var b setBuilder
-		for _, s := range sets {
-			b.ranges = append(b.ranges, s.ranges...)
+		var strs [][]rune
+		for _, s := range ops {
+			b.ranges = append(b.ranges, s.set.ranges...)
+			strs = append(strs, s.strings...)
 		}
-		return b.build(), nil
+		return charSetV{set: b.build(), strings: dedupStrings(strs)}, nil
 	}
 }
 

@@ -68,6 +68,14 @@ type NestedClass struct {
 	Set    *ClassSet
 }
 
+// ClassStringDisjunction is \q{s1|s2|...}: a set of alternative class strings,
+// each possibly empty or multi-code-point.
+type ClassStringDisjunction struct {
+	Alts [][]rune
+}
+
+func (ClassStringDisjunction) isClassItem() {}
+
 func (ClassRange) isClassItem()    {}
 func (ClassEscape) isClassItem()   {}
 func (ClassProperty) isClassItem() {}
