@@ -679,12 +679,26 @@ func (p *parser) checkClassMembers(def *ast.ClassDef) {
 	const kindOther = 4
 	privateKinds := map[string]int{}
 	for _, m := range def.Members {
-		if !m.Field && !m.Static {
-			if id, ok := m.Key.(*ast.Ident); ok && id.Name == "constructor" {
+		if priv, ok := m.Key.(*ast.PrivateIdent); ok && priv.Name == "#constructor" {
+			p.errorAt(m.KeyPos, "Classes may not declare a private element named '#constructor'")
+		}
+		if name, named := classMemberName(m); named {
+			switch {
+			case name == "constructor" && m.Field:
+				// A field (static or not) may never be named "constructor".
+				p.errorAt(m.KeyPos, "Classes may not have a field named 'constructor'")
+			case name == "constructor" && !m.Static && isSpecialClassMethod(m):
+				// The constructor must be a plain method, not an accessor,
+				// generator, or async method.
+				p.errorAt(m.KeyPos, "Class constructor may not be an accessor, generator, or async method")
+			case name == "constructor" && !m.Static && !m.Field:
 				ctorCount++
 				if ctorCount > 1 {
 					p.errorAt(m.KeyPos, "A class may only have one constructor")
 				}
+			case name == "prototype" && m.Static:
+				// A static member may never be named "prototype".
+				p.errorAt(m.KeyPos, "Classes may not have a static member named 'prototype'")
 			}
 		}
 		priv, ok := m.Key.(*ast.PrivateIdent)
@@ -708,6 +722,37 @@ func (p *parser) checkClassMembers(def *ast.ClassDef) {
 		}
 		privateKinds[name] = prev | bit
 	}
+}
+
+// classMemberName returns the static property name of a class member and true,
+// or ("", false) when the name is computed or a private name (neither of which
+// participates in the constructor/prototype static-name early errors).
+func classMemberName(m *ast.ClassMember) (string, bool) {
+	if m.Computed {
+		return "", false
+	}
+	switch k := m.Key.(type) {
+	case *ast.Ident:
+		return k.Name, true
+	case *ast.StringLit:
+		return k.Value, true
+	}
+	return "", false
+}
+
+// isSpecialClassMethod reports whether a class method is an accessor, a
+// generator, or async — the forms a "constructor" method may not take.
+func isSpecialClassMethod(m *ast.ClassMember) bool {
+	if m.Field {
+		return false
+	}
+	if m.Kind == ast.PropGet || m.Kind == ast.PropSet {
+		return true
+	}
+	if fe, ok := m.Value.(*ast.FuncExpr); ok {
+		return fe.Def.Generator || fe.Def.Async
+	}
+	return false
 }
 
 // parseClassMember parses a single class body element: a method, accessor,
