@@ -153,7 +153,7 @@ func (i *Interpreter) regexpBuiltinExec(ctx context.Context, o *Object, s string
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "RegExp.prototype.exec called on a non-RegExp object")
 	}
-	units := jsregexp.ToUnits(s)
+	units := i.toUnits(s)
 	m, err := i.regexExec(ctx, o, re, units)
 	if err != nil {
 		return nil, i.regexErr(ctx, err)
@@ -266,7 +266,7 @@ func (i *Interpreter) regexpSymbolMatch(ctx context.Context, this Value, args []
 	}
 	fullUnicode := strings.ContainsAny(flags, "uv")
 	rx.SetData("lastIndex", Number(0))
-	units := jsregexp.ToUnits(s)
+	units := i.toUnits(s)
 	var results []Value
 	for {
 		res, err := i.regExpExec(ctx, rx, s)
@@ -419,7 +419,7 @@ func (i *Interpreter) regexpStringIteratorNext(ctx context.Context, this Value, 
 			return nil, err
 		}
 		thisIndex := int(ToInteger(liN))
-		units := jsregexp.ToUnits(s)
+		units := i.toUnits(s)
 		matcher.SetData("lastIndex", Number(float64(advanceStringIndex(units, thisIndex, fullUnicode))))
 	}
 	return i.newIterResult(match, false), nil
@@ -433,7 +433,7 @@ func (i *Interpreter) regexpSymbolReplace(ctx context.Context, this Value, args 
 	if err != nil {
 		return nil, err
 	}
-	units := jsregexp.ToUnits(s)
+	units := i.toUnits(s)
 	stringLength := len(units)
 	replaceValue := arg(args, 1)
 	replFn, functionalReplace := replaceValue.(*Object)
@@ -725,7 +725,7 @@ func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []
 		return i.newArray(nil), nil
 	}
 
-	units := jsregexp.ToUnits(s)
+	units := i.toUnits(s)
 	size := len(units)
 	var out []Value
 	push := func(v Value) bool {

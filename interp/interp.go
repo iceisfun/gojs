@@ -92,6 +92,12 @@ type Interpreter struct {
 	symSplit         *Symbol
 	symSpecies       *Symbol
 
+	// unitsKey/unitsVal memoize the most recent UTF-16 encoding of a RegExp
+	// subject string (see (*Interpreter).toUnits), so match/replace/split/
+	// matchAll and repeated .test() do not re-encode the same subject per call.
+	unitsKey string
+	unitsVal []uint16
+
 	// event loop / timers
 	loop    *eventLoop
 	wg      sync.WaitGroup

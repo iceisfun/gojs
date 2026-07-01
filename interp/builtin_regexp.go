@@ -320,6 +320,24 @@ func (i *Interpreter) regExpCreate(ctx context.Context, pattern Value, flags str
 	return v.(*Object), nil
 }
 
+// toUnits encodes a RegExp subject to UTF-16 code units, memoizing the most
+// recent (string -> []uint16) result. RegExp methods re-encode the same subject
+// on every RegExpExec call — repeated .test(bigString), or a global
+// match/replace/split/matchAll loop that calls exec once per match — so a
+// single-entry cache keyed on string identity collapses that to one encode.
+// String equality short-circuits on pointer identity, so a hit is O(1). The
+// returned slice is shared and treated as read-only (matchers only read it); the
+// interpreter is single-threaded, so no aliasing race is possible.
+func (i *Interpreter) toUnits(s string) []uint16 {
+	if i.unitsVal != nil && s == i.unitsKey {
+		return i.unitsVal
+	}
+	u := jsregexp.ToUnits(s)
+	i.unitsKey = s
+	i.unitsVal = u
+	return u
+}
+
 // regexExec runs one match honoring lastIndex for global/sticky regexes, updating
 // lastIndex as ECMAScript's RegExpBuiltinExec specifies. It returns the code-unit
 // submatch offsets or nil for no match.
