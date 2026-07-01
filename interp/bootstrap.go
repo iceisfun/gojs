@@ -60,6 +60,7 @@ func (i *Interpreter) bootstrap() {
 	i.initRegExp()
 	i.initCollections()
 	i.initDate()
+	i.initPromise()
 	i.initConsole()
 	i.initGlobals()
 	i.initTimers()
