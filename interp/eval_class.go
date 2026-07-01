@@ -288,6 +288,9 @@ func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.
 	if err != nil {
 		return err
 	}
+	if err := i.forbidStaticPrototypeKey(ctx, m, key); err != nil {
+		return err
+	}
 	var v Value = Undef
 	if m.Value != nil {
 		env := NewEnvironment(classEnv, true)
@@ -306,11 +309,25 @@ func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.
 	return nil
 }
 
+// forbidStaticPrototypeKey returns a TypeError when a static class element's
+// name evaluates to "prototype", which no static element may use (ECMA-262
+// ClassDefinitionEvaluation). Non-computed forms are rejected by the parser, so
+// at evaluation time this covers computed names such as static ["prototype"].
+func (i *Interpreter) forbidStaticPrototypeKey(ctx context.Context, m *ast.ClassMember, key PropertyKey) error {
+	if m.Static && !key.IsSymbol() && key.Str == "prototype" {
+		return i.throwError(ctx, "TypeError", "Classes may not have a static property named 'prototype'")
+	}
+	return nil
+}
+
 // installClassMethod installs a method or accessor on target with home as its
 // [[HomeObject]] (for super).
 func (i *Interpreter) installClassMethod(ctx context.Context, target, home *Object, m *ast.ClassMember, classEnv *Environment) error {
 	key, err := i.classMemberKey(ctx, m, classEnv)
 	if err != nil {
+		return err
+	}
+	if err := i.forbidStaticPrototypeKey(ctx, m, key); err != nil {
 		return err
 	}
 	fnExpr := m.Value.(*ast.FuncExpr)
