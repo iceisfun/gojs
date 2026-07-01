@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // initGlobals installs the global value bindings and free functions
@@ -79,6 +80,30 @@ func (i *Interpreter) initGlobals() {
 			return nil, err
 		}
 		return String(encodeURI(s, uriUnreserved)), nil
+	})
+	i.setGlobalFunc("decodeURIComponent", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		s, err := i.argStr(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		out, ok := decodeURI(s, "")
+		if !ok {
+			return nil, i.throwError(ctx, "URIError", "URI malformed")
+		}
+		return String(out), nil
+	})
+	i.setGlobalFunc("decodeURI", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		s, err := i.argStr(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		// decodeURI preserves the reserved characters (and "#") as escapes so a
+		// decoded URI still parses into the same components.
+		out, ok := decodeURI(s, uriReserved)
+		if !ok {
+			return nil, i.throwError(ctx, "URIError", "URI malformed")
+		}
+		return String(out), nil
 	})
 }
 
@@ -199,4 +224,98 @@ func encodeURI(s, unreserved string) string {
 		}
 	}
 	return b.String()
+}
+
+// uriReserved is the set of characters decodeURI leaves escaped: the URI
+// reserved set plus "#", so that a decoded URI still splits into the same
+// components. decodeURIComponent preserves nothing (passes "").
+const uriReserved = ";/?:@&=+$,#"
+
+// hexDigit returns the value 0–15 of a hexadecimal digit rune, or -1.
+func hexDigit(c rune) int {
+	if d := digitValue(c); d >= 0 && d < 16 {
+		return d
+	}
+	return -1
+}
+
+// decodeURI implements the ECMA-262 Decode abstract operation (§19.2.6.5): it
+// unescapes "%XX" sequences, reassembling multi-byte UTF-8 octets into a code
+// point, while leaving any single-byte character in preserve escaped verbatim.
+// It returns ok=false on malformed input, letting the caller raise a URIError.
+func decodeURI(s, preserve string) (string, bool) {
+	rs := []rune(s)
+	n := len(rs)
+	var b strings.Builder
+
+	// readByte parses the two hex digits of a "%XX" whose '%' is at index p.
+	readByte := func(p int) (byte, bool) {
+		if p+2 >= n {
+			return 0, false
+		}
+		hi, lo := hexDigit(rs[p+1]), hexDigit(rs[p+2])
+		if hi < 0 || lo < 0 {
+			return 0, false
+		}
+		return byte(hi<<4 | lo), true
+	}
+
+	k := 0
+	for k < n {
+		c := rs[k]
+		if c != '%' {
+			b.WriteRune(c)
+			k++
+			continue
+		}
+		start := k
+		first, ok := readByte(k)
+		if !ok {
+			return "", false
+		}
+		k += 2 // k now indexes the second hex digit
+		if first < 0x80 {
+			if strings.IndexByte(preserve, first) >= 0 {
+				b.WriteString(string(rs[start : k+1])) // keep "%XX" verbatim
+			} else {
+				b.WriteByte(first)
+			}
+			k++
+			continue
+		}
+		// Multi-byte lead: the count of leading 1-bits is the sequence length.
+		seqLen := 0
+		for mask := byte(0x80); first&mask != 0; mask >>= 1 {
+			seqLen++
+		}
+		if seqLen < 2 || seqLen > 4 {
+			return "", false
+		}
+		octets := make([]byte, 1, 4)
+		octets[0] = first
+		for j := 1; j < seqLen; j++ {
+			k++ // advance to the expected '%'
+			if k >= n || rs[k] != '%' {
+				return "", false
+			}
+			cont, ok := readByte(k)
+			if !ok || cont&0xC0 != 0x80 { // continuation byte is 10xxxxxx
+				return "", false
+			}
+			k += 2
+			octets = append(octets, cont)
+		}
+		// utf8.DecodeRune rejects overlong forms, surrogate halves, and
+		// out-of-range code points, reporting size 1 on any of them. A size
+		// short of the octet count means the sequence was malformed — but a
+		// full-width decode to U+FFFD (which equals utf8.RuneError) is a valid
+		// character, so the size, not the rune, is what distinguishes them.
+		r, size := utf8.DecodeRune(octets)
+		if size != len(octets) {
+			return "", false
+		}
+		b.WriteRune(r)
+		k++
+	}
+	return b.String(), true
 }
