@@ -59,12 +59,10 @@ func (i *Interpreter) initError() {
 // newErrorCtor builds an Error-family constructor whose instances use proto.
 func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 	build := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var obj *Object
-		if o, ok := this.(*Object); ok && o != i.global && o.proto != nil && o != proto {
-			obj = o // called via `new` with a fresh instance
-		} else {
-			obj = NewObject(proto)
-		}
+		// Always create a fresh instance whose prototype is this constructor's
+		// error prototype. (When invoked via super() from a subclass, the
+		// caller folds this object's own properties onto the real instance.)
+		obj := NewObject(proto)
 		obj.class = "Error"
 		if m := arg(args, 0); !IsUndefined(m) {
 			s, err := i.ToStringV(ctx, m)

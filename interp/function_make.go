@@ -40,6 +40,13 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		}
 		env := NewEnvironment(closure, true)
 		if kind == kindNormal {
+			// Non-strict `this` substitution: a normal function called with no
+			// (or a nullish) receiver sees the global object as `this`.
+			// (Methods and constructors pass a concrete receiver, so this only
+			// affects plain calls like a detached `fn()`.)
+			if IsNullish(this) {
+				this = i.global
+			}
 			env.setThis(this)
 			if homeObj != nil {
 				env.homeObj = homeObj

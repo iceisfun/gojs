@@ -206,12 +206,28 @@ func (i *Interpreter) evalReturn(ctx context.Context, s *ast.ReturnStmt, env *En
 	return nil, &returnSignal{value: v}
 }
 
-// evalLabeled evaluates a labeled statement, catching break/continue that name
-// the label.
+// evalLabeled evaluates a labeled statement. When the label decorates a loop,
+// the label is threaded into the loop so that `break label` / `continue label`
+// target it directly. For any other labeled statement, only `break label` is
+// meaningful and is caught here.
 func (i *Interpreter) evalLabeled(ctx context.Context, s *ast.LabeledStmt, env *Environment) (Value, error) {
-	v, err := i.evalStmt(ctx, s.Body, env)
+	label := s.Label.Name
+	var v Value
+	var err error
+	switch body := s.Body.(type) {
+	case *ast.WhileStmt:
+		v, err = i.runWhile(ctx, body, env, label)
+	case *ast.DoWhileStmt:
+		v, err = i.runDoWhile(ctx, body, env, label)
+	case *ast.ForStmt:
+		v, err = i.runFor(ctx, body, env, label)
+	case *ast.ForInStmt:
+		v, err = i.runForIn(ctx, body, env, label)
+	default:
+		v, err = i.evalStmt(ctx, s.Body, env)
+	}
 	if err != nil {
-		if b, ok := err.(*breakSignal); ok && b.label == s.Label.Name {
+		if b, ok := err.(*breakSignal); ok && b.label == label {
 			return Undef, nil
 		}
 		return v, err

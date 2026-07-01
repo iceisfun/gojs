@@ -112,16 +112,17 @@ func (i *Interpreter) memberKey(ctx context.Context, e *ast.MemberExpr, env *Env
 // (the `this` binding for a subsequent method call). It participates in
 // optional chaining.
 func (i *Interpreter) evalMember(ctx context.Context, e *ast.MemberExpr, env *Environment) (Value, Value, error) {
+	// super.member resolves against the home object's prototype and must be
+	// handled before evaluating the base (evaluating a bare `super` throws).
+	if _, ok := e.Object.(*ast.SuperExpr); ok {
+		return i.evalSuperMember(ctx, e, env)
+	}
 	base, err := i.evalExprNamed(ctx, e.Object, env, "")
 	if err != nil {
 		return nil, nil, err
 	}
 	if isShortCircuit(base) {
 		return scSentinel, Undef, nil
-	}
-	// super.member resolves against the home object's prototype.
-	if _, ok := e.Object.(*ast.SuperExpr); ok {
-		return i.evalSuperMember(ctx, e, env)
 	}
 	if e.Optional && IsNullish(base) {
 		return scSentinel, Undef, nil

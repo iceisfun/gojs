@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/iceisfun/gojs/ast"
+	"github.com/iceisfun/gojs/token"
 )
 
 // This file implements binding-pattern destructuring, shared by parameter
@@ -26,6 +27,20 @@ func (i *Interpreter) bindPattern(ctx context.Context, target ast.Expr, value Va
 			value = def
 		}
 		return i.bindPattern(ctx, t.Target, value, env, bind)
+	case *ast.AssignExpr:
+		// A default written inside an array/parameter pattern (e.g. `[c = 3]`)
+		// parses as an assignment expression; treat `=` as a defaulting binding.
+		if t.Op == token.ASSIGN {
+			if IsUndefined(value) {
+				def, err := i.evalExpr(ctx, t.Value, env)
+				if err != nil {
+					return err
+				}
+				value = def
+			}
+			return i.bindPattern(ctx, t.Target, value, env, bind)
+		}
+		return i.throwError(ctx, "SyntaxError", "invalid binding target")
 	case *ast.ArrayLit:
 		return i.bindArrayPattern(ctx, t, value, env, bind)
 	case *ast.ObjectLit:
