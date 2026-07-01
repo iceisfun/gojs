@@ -57,6 +57,12 @@ type promiseState struct {
 	result           Value
 	fulfillReactions []promiseReaction
 	rejectReactions  []promiseReaction
+
+	// hostResolve/hostReject are the promise's resolver pair, stashed so the
+	// host-facing ResolvePromise/RejectPromise API can settle this promise
+	// object from outside the Promise implementation (see host_api.go).
+	hostResolve func(Value)
+	hostReject  func(Value)
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +395,33 @@ func (i *Interpreter) newPromise() (pObj *Object, resolve func(Value), reject fu
 	}
 
 	resolve, reject = makeResolvers()
+	// Stash a resolver pair on the state so the host-facing ResolvePromise /
+	// RejectPromise API (host_api.go) can settle this promise object directly.
+	state.hostResolve = resolve
+	state.hostReject = reject
 	return pObj, resolve, reject
+}
+
+// settleNativePromise settles a native promise object via its stashed resolver,
+// running the full resolution algorithm (including thenable adoption). It must
+// run on the VM goroutine.
+func (i *Interpreter) settleNativePromise(p *Object, value Value, isReject bool) {
+	if p == nil || p.internal == nil {
+		return
+	}
+	state, ok := p.internal["state"].(*promiseState)
+	if !ok {
+		return
+	}
+	if isReject {
+		if state.hostReject != nil {
+			state.hostReject(value)
+		}
+		return
+	}
+	if state.hostResolve != nil {
+		state.hostResolve(value)
+	}
 }
 
 // promiseState extracts the *promiseState from a Promise object.
