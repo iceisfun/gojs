@@ -1,0 +1,286 @@
+// Package test262 provides a runner for the official ECMAScript conformance
+// suite (Test262), located under reference/test262. It parses each test's YAML
+// frontmatter, assembles the required harness includes, executes the test with
+// the engine under a timeout, and classifies the outcome against the test's
+// declared expectation (positive or negative).
+//
+// It is deliberately conservative: tests using features gojs does not implement
+// (modules, async completion via $DONE, raw/generated forms, and a configurable
+// feature denylist) are reported as skipped rather than failed, so the pass
+// rate reflects real conformance of implemented features.
+package test262
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/iceisfun/gojs/interp"
+	"github.com/iceisfun/gojs/parser"
+)
+
+// root is the test262 checkout, relative to this package directory.
+const root = "../../reference/test262"
+
+// Outcome classifies a single test run.
+type Outcome int
+
+const (
+	Pass Outcome = iota
+	Fail         // engine behavior disagreed with the test's expectation
+	Skip         // test needs a feature/flag gojs does not support
+)
+
+// Meta holds the parsed subset of a test's frontmatter that the runner needs.
+type Meta struct {
+	Includes   []string
+	Flags      map[string]bool
+	Features   []string
+	NegType    string // expected error constructor name (negative tests)
+	NegPhase   string // "parse", "resolution", or "runtime"
+	IsNegative bool
+}
+
+// Result is the outcome of running one test file (one mode).
+type Result struct {
+	Path    string
+	Mode    string // "strict" or "sloppy"
+	Outcome Outcome
+	Reason  string
+}
+
+// unsupportedFeatures lists feature tags whose tests we skip wholesale. These
+// are language areas gojs does not implement yet; running them only produces
+// noise.
+var unsupportedFeatures = map[string]bool{
+	"Proxy": true, "Reflect": true, "TypedArray": true, "ArrayBuffer": true,
+	"SharedArrayBuffer": true, "Atomics": true, "WeakRef": true,
+	"FinalizationRegistry": true, "Temporal": true, "Intl": true,
+	"tail-call-optimization": true, "import-assertions": true,
+	"decorators": true, "explicit-resource-management": true,
+	"IsHTMLDDA": true, "__proto__": false,
+}
+
+// ParseMeta extracts the frontmatter metadata from a test's source.
+func ParseMeta(src string) Meta {
+	m := Meta{Flags: map[string]bool{}}
+	start := strings.Index(src, "/*---")
+	if start < 0 {
+		return m
+	}
+	end := strings.Index(src[start:], "---*/")
+	if end < 0 {
+		return m
+	}
+	block := src[start+len("/*---") : start+end]
+
+	lines := strings.Split(block, "\n")
+	for idx := 0; idx < len(lines); idx++ {
+		line := strings.TrimRight(lines[idx], " \t")
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "includes:"):
+			m.Includes = append(m.Includes, parseInlineList(trimmed[len("includes:"):])...)
+		case strings.HasPrefix(trimmed, "flags:"):
+			for _, f := range parseInlineList(trimmed[len("flags:"):]) {
+				m.Flags[f] = true
+			}
+		case strings.HasPrefix(trimmed, "features:"):
+			m.Features = append(m.Features, parseInlineList(trimmed[len("features:"):])...)
+		case trimmed == "negative:":
+			m.IsNegative = true
+			// The following indented lines carry type:/phase:.
+			for j := idx + 1; j < len(lines); j++ {
+				sub := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(sub, "type:") {
+					m.NegType = strings.TrimSpace(sub[len("type:"):])
+				} else if strings.HasPrefix(sub, "phase:") {
+					m.NegPhase = strings.TrimSpace(sub[len("phase:"):])
+				} else if sub != "" && !strings.HasPrefix(lines[j], " ") && !strings.HasPrefix(lines[j], "\t") {
+					break
+				}
+			}
+		}
+	}
+	return m
+}
+
+// parseInlineList parses a YAML flow list "[a, b, c]" or a bare scalar.
+func parseInlineList(s string) []string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		p := strings.TrimSpace(part)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// harnessCache memoizes harness include file contents.
+var harnessCache = map[string]string{}
+
+// loadHarness returns the concatenation of the named harness includes plus the
+// mandatory assert.js and sta.js.
+func loadHarness(includes []string) (string, error) {
+	var b strings.Builder
+	all := append([]string{"assert.js", "sta.js"}, includes...)
+	for _, name := range all {
+		src, ok := harnessCache[name]
+		if !ok {
+			data, err := os.ReadFile(filepath.Join(root, "harness", name))
+			if err != nil {
+				return "", err
+			}
+			src = string(data)
+			harnessCache[name] = src
+		}
+		b.WriteString(src)
+		b.WriteString("\n")
+	}
+	return b.String(), nil
+}
+
+// skipReason returns a non-empty reason when the test should be skipped based on
+// unsupported flags/features.
+func skipReason(m Meta) string {
+	if m.Flags["module"] {
+		return "module"
+	}
+	if m.Flags["async"] {
+		return "async $DONE"
+	}
+	if m.Flags["raw"] {
+		return "raw"
+	}
+	if m.Flags["CanBlockIsFalse"] || m.Flags["CanBlockIsTrue"] {
+		return "agent"
+	}
+	for _, f := range m.Features {
+		if unsupportedFeatures[f] {
+			return "feature:" + f
+		}
+	}
+	return ""
+}
+
+// Run executes a single test file, returning one Result per applicable mode
+// (strict/sloppy). It never panics; failures are captured as Fail outcomes.
+func Run(path string) []Result {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return []Result{{Path: path, Outcome: Skip, Reason: "read: " + err.Error()}}
+	}
+	src := string(data)
+	m := ParseMeta(src)
+
+	if reason := skipReason(m); reason != "" {
+		return []Result{{Path: path, Outcome: Skip, Reason: reason}}
+	}
+
+	var modes []string
+	switch {
+	case m.Flags["onlyStrict"]:
+		modes = []string{"strict"}
+	case m.Flags["noStrict"], m.Flags["raw"]:
+		modes = []string{"sloppy"}
+	default:
+		modes = []string{"sloppy", "strict"}
+	}
+
+	var results []Result
+	for _, mode := range modes {
+		results = append(results, runMode(path, src, m, mode))
+	}
+	return results
+}
+
+// runMode runs one test in one strictness mode.
+func runMode(path, src string, m Meta, mode string) Result {
+	res := Result{Path: path, Mode: mode}
+
+	// Negative parse errors must be detected by the parser directly.
+	prelude := ""
+	if mode == "strict" {
+		prelude = "\"use strict\";\n"
+	}
+
+	if m.IsNegative && m.NegPhase == "parse" {
+		_, perr := parser.Parse(path, prelude+src)
+		if perr != nil {
+			res.Outcome = Pass
+		} else {
+			res.Outcome = Fail
+			res.Reason = "expected parse error " + m.NegType
+		}
+		return res
+	}
+
+	harness, herr := loadHarness(m.Includes)
+	if herr != nil {
+		res.Outcome = Skip
+		res.Reason = "harness: " + herr.Error()
+		return res
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	vm := interp.New(
+		interp.WithContext(ctx),
+		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
+		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
+	)
+	defer vm.Close()
+
+	full := prelude + harness + "\n" + src
+	done := make(chan error, 1)
+	go func() {
+		_, err := vm.RunString(path, full)
+		done <- err
+	}()
+
+	var runErr error
+	select {
+	case runErr = <-done:
+	case <-time.After(6 * time.Second):
+		res.Outcome = Fail
+		res.Reason = "timeout"
+		return res
+	}
+
+	if m.IsNegative {
+		if runErr == nil {
+			res.Outcome = Fail
+			res.Reason = "expected " + m.NegType + " but completed"
+			return res
+		}
+		if v, ok := interp.ThrownValue(runErr); ok && strings.Contains(interp.BriefValue(v), m.NegType) {
+			res.Outcome = Pass
+		} else {
+			res.Outcome = Fail
+			res.Reason = "wanted " + m.NegType + ", got " + errString(runErr)
+		}
+		return res
+	}
+
+	if runErr != nil {
+		res.Outcome = Fail
+		res.Reason = errString(runErr)
+		return res
+	}
+	res.Outcome = Pass
+	return res
+}
+
+// errString renders an error (thrown value or host error) briefly.
+func errString(err error) string {
+	if v, ok := interp.ThrownValue(err); ok {
+		return interp.BriefValue(v)
+	}
+	return err.Error()
+}
