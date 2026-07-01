@@ -392,18 +392,44 @@ func (p Pos) String() string {
 	return fmt.Sprintf("%s:%d:%d", p.Source, p.Line, p.Column)
 }
 
-// Token is a single lexical token with its type, source text, and position.
+// Token is a single lexical token with its type, source text, and source span.
+//
+// Pos is the position of the token's first byte; End is the position just past
+// its last byte. Together they form a half-open span [Pos, End) that downstream
+// tooling (the parser, error reporter, and highlighter) uses to underline the
+// exact source range of a diagnostic.
 type Token struct {
 	Type    Type
 	Literal string // decoded/normalized text (identifier name, string contents)
 	Raw     string // exact source slice, delimiters included (for error "near" text)
-	Pos     Pos
+	Pos     Pos    // start of the token
+	End     Pos    // one past the end of the token
 
 	// NewlineBefore reports whether at least one line terminator appeared
 	// between the previous token and this one. The parser needs this to
 	// implement Automatic Semicolon Insertion (ECMA-262 §12.10).
 	NewlineBefore bool
 }
+
+// Span is a half-open range of source positions [Start, End). It is the unit of
+// location used throughout error reporting so a diagnostic can point at a range
+// rather than a single caret.
+type Span struct {
+	Start Pos
+	End   Pos
+}
+
+// String formats the span. A zero-width or single-position span renders as just
+// its start; otherwise as "start-endline:endcol".
+func (s Span) String() string {
+	if s.Start == s.End {
+		return s.Start.String()
+	}
+	return fmt.Sprintf("%s-%d:%d", s.Start, s.End.Line, s.End.Column)
+}
+
+// Span returns the token's source span.
+func (t Token) Span() Span { return Span{Start: t.Pos, End: t.End} }
 
 // String returns a debugging representation of the token.
 func (t Token) String() string {
