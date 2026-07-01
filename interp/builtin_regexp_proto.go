@@ -300,50 +300,7 @@ func (i *Interpreter) regexpSymbolMatchAll(ctx context.Context, this Value, args
 	if err != nil {
 		return nil, err
 	}
-	// Clone into a fresh matcher so iteration does not disturb rx's lastIndex.
-	matcher, err := i.cloneRegExp(ctx, rx)
-	if err != nil {
-		return nil, err
-	}
-	li, _ := i.lastIndexInt(ctx, rx)
-	matcher.SetData("lastIndex", Number(float64(li)))
-	flags, _ := i.getStrProp(ctx, rx, "flags")
-	global := strings.Contains(flags, "g")
-	fullUnicode := strings.ContainsAny(flags, "uv")
-	units := jsregexp.ToUnits(s)
-	done := false
-	return i.newIterator(func() (Value, bool) {
-		if done {
-			return Undef, false
-		}
-		res, err := i.regExpExec(ctx, matcher, s)
-		if err != nil || IsNull(res) {
-			done = true
-			return Undef, false
-		}
-		if !global {
-			done = true
-			return res, true
-		}
-		matchStr, _ := i.getStrProp(ctx, res.(*Object), "0")
-		if matchStr == "" {
-			mli, _ := i.lastIndexInt(ctx, matcher)
-			matcher.SetData("lastIndex", Number(float64(advanceStringIndex(units, mli, fullUnicode))))
-		}
-		return res, true
-	}), nil
-}
-
-// cloneRegExp builds a fresh RegExp with the same source and flags as rx.
-func (i *Interpreter) cloneRegExp(ctx context.Context, rx *Object) (*Object, error) {
-	if re, ok := regexpOf(rx); ok {
-		v, err := i.newRegExp(ctx, re.Source(), re.Flags().String())
-		if err != nil {
-			return nil, err
-		}
-		return v.(*Object), nil
-	}
-	src, err := i.getStrProp(ctx, rx, "source")
+	ctor, err := i.speciesConstructor(ctx, rx, i.regexpCtor)
 	if err != nil {
 		return nil, err
 	}
@@ -351,13 +308,122 @@ func (i *Interpreter) cloneRegExp(ctx context.Context, rx *Object) (*Object, err
 	if err != nil {
 		return nil, err
 	}
-	v, err := i.newRegExp(ctx, src, flags)
+	matcherV, err := ctor.fn.construct(ctx, ctor, []Value{rx, String(flags)})
 	if err != nil {
 		return nil, err
 	}
-	return v.(*Object), nil
+	matcher, ok := matcherV.(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "RegExp constructor returned a non-object")
+	}
+	liV, err := rx.GetStr(ctx, "lastIndex")
+	if err != nil {
+		return nil, err
+	}
+	liN, err := i.ToNumberV(ctx, liV)
+	if err != nil {
+		return nil, err
+	}
+	li := ToInteger(liN)
+	if li < 0 {
+		li = 0
+	}
+	matcher.SetData("lastIndex", Number(li))
+	global := strings.Contains(flags, "g")
+	fullUnicode := strings.ContainsAny(flags, "uv")
+	return i.newRegExpStringIterator(matcher, s, global, fullUnicode), nil
 }
 
+// newRegExpStringIterator implements CreateRegExpStringIterator (§22.2.9.1).
+func (i *Interpreter) newRegExpStringIterator(matcher *Object, s string, global, fullUnicode bool) *Object {
+	it := NewObject(i.regexpStringIteratorProto)
+	it.class = "RegExp String Iterator"
+	it.internal = map[string]any{
+		"matchAllRegExp":  matcher,
+		"matchAllString":  s,
+		"matchAllGlobal":  global,
+		"matchAllUnicode": fullUnicode,
+		"matchAllDone":    false,
+	}
+	return it
+}
+
+func (i *Interpreter) newIterResult(v Value, done bool) *Object {
+	res := NewObject(i.objectProto)
+	res.SetData("value", v)
+	res.SetData("done", Bool(done))
+	return res
+}
+
+// initRegExpStringIterator builds %RegExpStringIteratorPrototype% (§22.2.9.3).
+// Its [[Prototype]] is Object.prototype (a sibling of the engine's bare
+// iteratorProto), which keeps ancestry consistent with the array iterator.
+func (i *Interpreter) initRegExpStringIterator() {
+	proto := NewObject(i.objectProto)
+	i.regexpStringIteratorProto = proto
+
+	i.defineMethod(proto, "next", 0, i.regexpStringIteratorNext)
+
+	proto.defineOwn(SymKey(i.symIterator), &Property{
+		Value: i.newNativeFunc("[Symbol.iterator]", 0,
+			func(ctx context.Context, this Value, args []Value) (Value, error) { return this, nil }),
+		Writable: true, Enumerable: false, Configurable: true,
+	})
+	proto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value: String("RegExp String Iterator"), Writable: false, Enumerable: false, Configurable: true,
+	})
+}
+
+// regexpStringIteratorNext implements %RegExpStringIteratorPrototype%.next
+// (§22.2.9.2).
+func (i *Interpreter) regexpStringIteratorNext(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, ok := this.(*Object)
+	if !ok || o.internal == nil {
+		return nil, i.throwError(ctx, "TypeError", "next called on incompatible receiver")
+	}
+	matcher, ok := o.internal["matchAllRegExp"].(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "next called on incompatible receiver")
+	}
+	if done, _ := o.internal["matchAllDone"].(bool); done {
+		return i.newIterResult(Undef, true), nil
+	}
+	s, _ := o.internal["matchAllString"].(string)
+	global, _ := o.internal["matchAllGlobal"].(bool)
+	fullUnicode, _ := o.internal["matchAllUnicode"].(bool)
+
+	match, err := i.regExpExec(ctx, matcher, s)
+	if err != nil {
+		return nil, err
+	}
+	if IsNull(match) {
+		o.internal["matchAllDone"] = true
+		return i.newIterResult(Undef, true), nil
+	}
+	if !global {
+		o.internal["matchAllDone"] = true
+		return i.newIterResult(match, false), nil
+	}
+	mo := match.(*Object)
+	matchStr, err := i.getStrProp(ctx, mo, "0")
+	if err != nil {
+		return nil, err
+	}
+	if matchStr == "" {
+		liV, err := matcher.GetStr(ctx, "lastIndex")
+		if err != nil {
+			return nil, err
+		}
+		liN, err := i.ToNumberV(ctx, liV)
+		if err != nil {
+			return nil, err
+		}
+		thisIndex := int(ToInteger(liN))
+		units := jsregexp.ToUnits(s)
+		matcher.SetData("lastIndex", Number(float64(advanceStringIndex(units, thisIndex, fullUnicode))))
+	}
+	return i.newIterResult(match, false), nil
+}
 func (i *Interpreter) regexpSymbolReplace(ctx context.Context, this Value, args []Value) (Value, error) {
 	rx, ok := this.(*Object)
 	if !ok {

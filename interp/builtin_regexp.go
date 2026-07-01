@@ -63,11 +63,13 @@ func (i *Interpreter) initRegExp() {
 		return i.regexpFromArgs(ctx, args)
 	})
 	linkCtor(ctor, proto)
+	i.regexpCtor = ctor
 	i.setGlobalHidden("RegExp", ctor)
 
 	i.initRegExpStatics(ctor)
 	i.initRegExpAccessors(proto)
 	i.initRegExpSymbols(proto)
+	i.initRegExpStringIterator()
 	i.initStringRegex()
 }
 
@@ -458,6 +460,11 @@ func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Va
 
 // regexpFromArgs builds a RegExp from (pattern, flags) arguments.
 func (i *Interpreter) regexpFromArgs(ctx context.Context, args []Value) (Value, error) {
+	// §22.2.4.1 step 1: IsRegExp(pattern) reads pattern[@@match] once and
+	// propagates a throwing getter (observable via new RegExp / SpeciesConstructor).
+	if _, err := i.isRegExpValue(ctx, arg(args, 0)); err != nil {
+		return nil, err
+	}
 	pattern := ""
 	flags := ""
 	if src, fl, ok := regexpSourceFlags(arg(args, 0)); ok {

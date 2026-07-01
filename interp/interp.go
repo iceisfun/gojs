@@ -102,22 +102,24 @@ type Interpreter struct {
 // intrinsics holds the realm's built-in prototype and constructor objects. They
 // are created once during bootstrap and shared by all objects of a kind.
 type intrinsics struct {
-	objectProto    *Object
-	functionProto  *Object
-	arrayProto     *Object
-	stringProto    *Object
-	numberProto    *Object
-	booleanProto   *Object
-	symbolProto    *Object
-	bigintProto    *Object
-	errorProto     *Object
-	regexpProto    *Object
-	mapProto       *Object
-	setProto       *Object
-	promiseProto   *Object
-	iteratorProto  *Object
-	generatorProto *Object
-	dateProto      *Object
+	objectProto               *Object
+	functionProto             *Object
+	arrayProto                *Object
+	stringProto               *Object
+	numberProto               *Object
+	booleanProto              *Object
+	symbolProto               *Object
+	bigintProto               *Object
+	errorProto                *Object
+	regexpProto               *Object
+	regexpCtor                *Object // %RegExp% constructor (SpeciesConstructor default)
+	regexpStringIteratorProto *Object // %RegExpStringIteratorPrototype%
+	mapProto                  *Object
+	setProto                  *Object
+	promiseProto              *Object
+	iteratorProto             *Object
+	generatorProto            *Object
+	dateProto                 *Object
 
 	objectCtor   *Object
 	functionCtor *Object
