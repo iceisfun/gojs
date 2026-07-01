@@ -130,10 +130,14 @@ func (i *Interpreter) initNumber() {
 		if radix < 2 || radix > 36 {
 			return nil, i.throwError(ctx, "RangeError", "toString() radix must be between 2 and 36")
 		}
-		if f == math.Trunc(f) && !math.IsInf(f, 0) {
+		if f == math.Trunc(f) && !math.IsInf(f, 0) &&
+			f >= math.MinInt64 && f <= math.MaxInt64 {
 			return String(strconv.FormatInt(int64(f), radix)), nil
 		}
-		return String(strconv.FormatFloat(f, 'g', -1, 64)), nil
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return String(NumberToString(f)), nil
+		}
+		return String(numberToRadixString(f, radix)), nil
 	})
 	i.defineMethod(proto, "valueOf", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		f, ok := num(this)
@@ -277,6 +281,108 @@ func toFixedString(f float64, digits int) string {
 	scale := math.Pow(10, float64(digits))
 	rounded := math.Floor(f*scale+0.5) / scale
 	return strconv.FormatFloat(rounded, 'f', digits, 64)
+}
+
+// radixDigits maps a digit value (0..35) to its character for Number.toString.
+const radixDigits = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// numberToRadixString renders a finite, non-integral float64 in the given radix
+// (2..36, radix != 10), producing both integer and fractional parts in that
+// radix. It ports V8's DoubleToRadixCString: fractional digits are emitted only
+// up to the input's binary precision (bounded by a ULP-derived delta) with
+// round-to-even, and low-order integer digits beyond the double's integer
+// precision are filled with zeros. Callers handle integral values, ±Infinity,
+// and NaN before reaching here.
+func numberToRadixString(f float64, radix int) string {
+	r := float64(radix)
+	negative := f < 0
+	if negative {
+		f = -f
+	}
+	integer := math.Floor(f)
+	fraction := f - integer
+
+	// Fractional part. delta is half a ULP of f: the largest error we ignore.
+	var frac []byte
+	delta := 0.5 * (math.Nextafter(f, math.Inf(1)) - f)
+	if smallest := math.Nextafter(0, math.Inf(1)); delta < smallest {
+		delta = smallest
+	}
+	if fraction >= delta {
+		frac = append(frac, '.')
+	emit:
+		for {
+			fraction *= r
+			delta *= r
+			digit := int(fraction)
+			frac = append(frac, radixDigits[digit])
+			fraction -= float64(digit)
+			// Round to even, carrying into earlier digits (and the integer part)
+			// when the rounded value would overflow the current position.
+			if fraction > 0.5 || (fraction == 0.5 && digit&1 == 1) {
+				if fraction+delta > 1 {
+					for {
+						// frac[0] is the '.'; a carry past it bumps the integer.
+						if len(frac) == 1 {
+							integer++
+							break
+						}
+						last := frac[len(frac)-1]
+						var d int
+						if last >= 'a' {
+							d = int(last-'a') + 10
+						} else {
+							d = int(last - '0')
+						}
+						if d+1 < radix {
+							frac[len(frac)-1] = radixDigits[d+1]
+							break
+						}
+						frac = frac[:len(frac)-1]
+					}
+					break emit
+				}
+			}
+			if fraction < delta {
+				break
+			}
+		}
+		// A fraction that rounded entirely away leaves just the '.'; drop it.
+		if len(frac) == 1 {
+			frac = frac[:0]
+		}
+	}
+
+	// Integer part, least-significant digit first. For magnitudes beyond the
+	// double's integer precision, the low digits are unrepresentable and filled
+	// with zeros (matching V8), which we detect via the binary exponent.
+	var intDigits []byte
+	for {
+		if _, e := math.Frexp(integer / r); e <= 53 {
+			break
+		}
+		integer /= r
+		intDigits = append(intDigits, '0')
+	}
+	for {
+		remainder := math.Mod(integer, r)
+		intDigits = append(intDigits, radixDigits[int(remainder)])
+		integer = (integer - remainder) / r
+		if integer <= 0 {
+			break
+		}
+	}
+	for l, h := 0, len(intDigits)-1; l < h; l, h = l+1, h-1 {
+		intDigits[l], intDigits[h] = intDigits[h], intDigits[l]
+	}
+
+	var b strings.Builder
+	if negative {
+		b.WriteByte('-')
+	}
+	b.Write(intDigits)
+	b.Write(frac)
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------

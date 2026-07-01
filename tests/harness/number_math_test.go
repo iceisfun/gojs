@@ -48,6 +48,28 @@ func TestNumberToStringRadix(t *testing.T) {
 	`)
 }
 
+// TestNumberToStringRadixFraction exercises Number.prototype.toString with a
+// non-decimal radix on non-integer values, where the fractional part must also
+// be rendered in the target radix (not left in base 10).
+func TestNumberToStringRadixFraction(t *testing.T) {
+	Expect(t, `
+		// terminating fractions in binary
+		assert.sameValue((0.5).toString(2), "0.1");
+		assert.sameValue((0.25).toString(2), "0.01");
+		assert.sameValue((0.75).toString(2), "0.11");
+		assert.sameValue((5.5).toString(2), "101.1");
+		assert.sameValue((-5.5).toString(2), "-101.1");
+		// terminating fractions in hex/octal
+		assert.sameValue((255.5).toString(16), "ff.8");
+		assert.sameValue((0.5).toString(16), "0.8");
+		assert.sameValue((8.5).toString(8), "10.4");
+		// repeating fraction: 0.1 has no finite binary expansion, so the result
+		// must be a long radix-2 string beginning "0.000110011...", NOT "0.1".
+		assert.sameValue((0.1).toString(2).indexOf("0.0001100110011"), 0);
+		assert.notSameValue((0.1).toString(2), "0.1");
+	`)
+}
+
 // TestNumberToFixed exercises Number.prototype.toFixed.
 func TestNumberToFixed(t *testing.T) {
 	Expect(t, `
