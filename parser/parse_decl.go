@@ -1,0 +1,501 @@
+package parser
+
+import (
+	"math"
+	"strconv"
+	"strings"
+
+	"github.com/iceisfun/gojs/ast"
+	"github.com/iceisfun/gojs/token"
+)
+
+// This file implements parsing of functions, arrow functions, classes, object
+// literals, and binding patterns, plus numeric-literal decoding. These forms
+// are shared between the expression and statement parsers.
+
+// ---------------------------------------------------------------------------
+// Numeric literals
+// ---------------------------------------------------------------------------
+
+// parseNumber decodes a numeric literal's source text into a float64. It
+// understands decimal, hex (0x), octal (0o), binary (0b), exponent forms, and
+// numeric separators ('_'). Invalid input yields NaN, which the lexer's own
+// validation makes unreachable in practice.
+func parseNumber(raw string) float64 {
+	s := strings.ReplaceAll(raw, "_", "")
+	if len(s) >= 2 && s[0] == '0' {
+		switch s[1] {
+		case 'x', 'X':
+			if v, err := strconv.ParseUint(s[2:], 16, 64); err == nil {
+				return float64(v)
+			}
+			// Fall back to big-int-free parse for values above 64 bits.
+			return parseRadix(s[2:], 16)
+		case 'o', 'O':
+			return parseRadix(s[2:], 8)
+		case 'b', 'B':
+			return parseRadix(s[2:], 2)
+		}
+	}
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return v
+	}
+	return math.NaN()
+}
+
+// parseRadix converts a digit string in the given base to a float64 without
+// overflow (accumulating in float space for very large values).
+func parseRadix(digits string, base int) float64 {
+	var v float64
+	for _, c := range digits {
+		var d int
+		switch {
+		case c >= '0' && c <= '9':
+			d = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = int(c-'A') + 10
+		default:
+			continue
+		}
+		v = v*float64(base) + float64(d)
+	}
+	return v
+}
+
+// ---------------------------------------------------------------------------
+// Arrow functions
+// ---------------------------------------------------------------------------
+
+// tryParseArrow detects and parses an arrow function starting at the current
+// token, returning nil (without consuming input) when the upcoming tokens are
+// not an arrow function.
+func (p *parser) tryParseArrow() ast.Expr {
+	start := p.cur()
+	async := false
+	base := 0
+
+	if start.Type == token.ASYNC && !p.peek(1).NewlineBefore {
+		switch p.peek(1).Type {
+		case token.IDENT:
+			// async x => …
+			if p.peek(2).Type == token.ARROW && !p.peek(2).NewlineBefore {
+				async = true
+				base = 1
+			} else {
+				return nil
+			}
+		case token.LPAREN:
+			async = true
+			base = 1
+		default:
+			return nil
+		}
+	}
+
+	switch p.peek(base).Type {
+	case token.IDENT:
+		// single-identifier arrow: x => …
+		if p.peek(base+1).Type != token.ARROW || p.peek(base+1).NewlineBefore {
+			return nil
+		}
+	case token.LPAREN:
+		// (params) => … — verify the matching paren is followed by =>.
+		close := p.matchParen(p.idx + base)
+		if close < 0 {
+			return nil
+		}
+		after := close + 1
+		if after >= len(p.toks) || p.toks[after].Type != token.ARROW || p.toks[after].NewlineBefore {
+			return nil
+		}
+	default:
+		return nil
+	}
+
+	// Commit: this is an arrow function.
+	if async {
+		p.next() // async
+	}
+	arrow := &ast.ArrowFunc{Start: start.Pos, Async: async}
+	if p.at(token.IDENT) {
+		id := p.next()
+		arrow.Params = []ast.Expr{&ast.Ident{NamePos: id.Pos, Name: id.Literal}}
+	} else {
+		arrow.Params = p.parseParams()
+	}
+	p.expect(token.ARROW)
+	if p.at(token.LBRACE) {
+		arrow.Body = p.parseBlock()
+	} else {
+		arrow.Expression = true
+		arrow.Body = p.parseAssignExpr()
+	}
+	return arrow
+}
+
+// matchParen returns the index of the RPAREN that matches the LPAREN at index
+// openIdx, or -1 if unbalanced. It counts nesting across (), [], and {}.
+func (p *parser) matchParen(openIdx int) int {
+	depth := 0
+	for i := openIdx; i < len(p.toks); i++ {
+		switch p.toks[i].Type {
+		case token.LPAREN, token.LBRACKET, token.LBRACE:
+			depth++
+		case token.RPAREN, token.RBRACKET, token.RBRACE:
+			depth--
+			if depth == 0 {
+				if p.toks[i].Type == token.RPAREN {
+					return i
+				}
+				return -1
+			}
+		case token.EOF:
+			return -1
+		}
+	}
+	return -1
+}
+
+// ---------------------------------------------------------------------------
+// Parameter lists and binding patterns
+// ---------------------------------------------------------------------------
+
+// parseParams parses a parenthesized formal parameter list.
+func (p *parser) parseParams() []ast.Expr {
+	p.expect(token.LPAREN)
+	var params []ast.Expr
+	for !p.at(token.RPAREN) && !p.at(token.EOF) {
+		params = append(params, p.parseBindingElement())
+		if !p.accept(token.COMMA) {
+			break
+		}
+	}
+	p.expect(token.RPAREN)
+	return params
+}
+
+// parseBindingElement parses a single binding element: a rest element, a
+// pattern, or a target with an optional default value.
+func (p *parser) parseBindingElement() ast.Expr {
+	if p.at(token.ELLIPSIS) {
+		ell := p.next()
+		return &ast.RestElement{Ellipsis: ell.Pos, Target: p.parseBindingTarget()}
+	}
+	target := p.parseBindingTarget()
+	if p.accept(token.ASSIGN) {
+		def := p.parseAssignExpr()
+		return &ast.AssignPattern{Target: target, Default: def}
+	}
+	return target
+}
+
+// parseBindingTarget parses an identifier or a destructuring pattern (array or
+// object). Patterns are represented by the same ArrayLit/ObjectLit nodes used
+// for literals; the interpreter distinguishes them by context.
+func (p *parser) parseBindingTarget() ast.Expr {
+	switch p.cur().Type {
+	case token.LBRACKET:
+		return p.parseArrayLit()
+	case token.LBRACE:
+		return p.parseObjectLit()
+	case token.IDENT:
+		id := p.next()
+		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
+	default:
+		// Contextual keywords are valid binding names.
+		if p.cur().Type.IsKeyword() {
+			id := p.next()
+			return &ast.Ident{NamePos: id.Pos, Name: identText(id)}
+		}
+		p.errorf("expected binding name but got %s", p.cur().Type)
+		return &ast.Ident{NamePos: p.cur().Pos}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Functions
+// ---------------------------------------------------------------------------
+
+// parseFuncDef parses the star/name/params/body of a function following the
+// `function` keyword (already consumed by the caller position-wise via kwPos).
+func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
+	def := &ast.FuncDef{}
+	if p.accept(token.STAR) {
+		def.Generator = true
+	}
+	if p.at(token.IDENT) || (p.cur().Type.IsKeyword() && !p.at(token.LPAREN)) {
+		if p.at(token.IDENT) {
+			id := p.next()
+			def.Name = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
+		} else if requireName {
+			id := p.next()
+			def.Name = &ast.Ident{NamePos: id.Pos, Name: identText(id)}
+		}
+	}
+	if requireName && def.Name == nil {
+		p.errorf("function declaration requires a name")
+	}
+	def.Params = p.parseParams()
+	p.inFunction++
+	def.Body = p.parseBlock()
+	p.inFunction--
+	return def
+}
+
+// parseFunctionExpr parses a function expression. The async flag is applied by
+// the caller for `async function`.
+func (p *parser) parseFunctionExpr(async bool) *ast.FuncExpr {
+	kw := p.expect(token.FUNCTION)
+	def := p.parseFuncDef(false)
+	def.Async = async
+	return &ast.FuncExpr{Keyword: kw.Pos, Def: def}
+}
+
+// parseFunctionDecl parses a function declaration statement.
+func (p *parser) parseFunctionDecl(async bool) *ast.FuncDecl {
+	kw := p.expect(token.FUNCTION)
+	def := p.parseFuncDef(true)
+	def.Async = async
+	return &ast.FuncDecl{Keyword: kw.Pos, Def: def}
+}
+
+// ---------------------------------------------------------------------------
+// Object literals
+// ---------------------------------------------------------------------------
+
+// parseObjectLit parses an object literal or (in binding context) an object
+// destructuring pattern.
+func (p *parser) parseObjectLit() ast.Expr {
+	lb := p.expect(token.LBRACE)
+	obj := &ast.ObjectLit{Lbrace: lb.Pos}
+	for !p.at(token.RBRACE) && !p.at(token.EOF) {
+		obj.Properties = append(obj.Properties, p.parseProperty())
+		if !p.accept(token.COMMA) {
+			break
+		}
+	}
+	rb := p.expect(token.RBRACE)
+	obj.Rbrace = rb.Pos
+	return obj
+}
+
+// parseProperty parses one object-literal member: spread, shorthand, key:value,
+// method, or get/set accessor.
+func (p *parser) parseProperty() *ast.Property {
+	tk := p.cur()
+
+	// Spread: ...expr
+	if tk.Type == token.ELLIPSIS {
+		p.next()
+		arg := p.parseAssignExpr()
+		return &ast.Property{KeyPos: tk.Pos, Value: arg, Kind: ast.PropSpread}
+	}
+
+	// Accessors and async/generator methods: get/set/async prefixes are only
+	// treated specially when followed by a property key (not ':' or '(').
+	if tk.Type == token.GET || tk.Type == token.SET {
+		next := p.peek(1).Type
+		if next != token.COLON && next != token.COMMA && next != token.RBRACE &&
+			next != token.LPAREN && next != token.ASSIGN {
+			p.next() // get/set
+			kind := ast.PropGet
+			if tk.Type == token.SET {
+				kind = ast.PropSet
+			}
+			key, computed := p.parsePropertyKey()
+			fn := p.parseMethodBody(false, false)
+			return &ast.Property{KeyPos: tk.Pos, Key: key, Value: fn, Kind: kind, Computed: computed, Method: true}
+		}
+	}
+	async := false
+	generator := false
+	if tk.Type == token.ASYNC && p.peek(1).Type != token.COLON &&
+		p.peek(1).Type != token.COMMA && p.peek(1).Type != token.LPAREN &&
+		p.peek(1).Type != token.RBRACE && !p.peek(1).NewlineBefore {
+		p.next()
+		async = true
+	}
+	if p.at(token.STAR) {
+		p.next()
+		generator = true
+	}
+
+	key, computed := p.parsePropertyKey()
+
+	switch {
+	case p.at(token.LPAREN):
+		// Method definition.
+		fn := p.parseMethodBody(async, generator)
+		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: fn, Kind: ast.PropInit, Computed: computed, Method: true}
+	case p.accept(token.COLON):
+		val := p.parseAssignExpr()
+		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: val, Kind: ast.PropInit, Computed: computed}
+	case p.at(token.ASSIGN):
+		// Shorthand with default, only valid in destructuring: { x = 1 }.
+		p.next()
+		def := p.parseAssignExpr()
+		val := &ast.AssignPattern{Target: key, Default: def}
+		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: val, Kind: ast.PropInit, Shorthand: true}
+	default:
+		// Shorthand: { x }.
+		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: key, Kind: ast.PropInit, Shorthand: true}
+	}
+}
+
+// parsePropertyKey parses an object/class member key, returning the key
+// expression and whether it was computed ([expr]).
+func (p *parser) parsePropertyKey() (ast.Expr, bool) {
+	tk := p.cur()
+	switch tk.Type {
+	case token.LBRACKET:
+		p.next()
+		expr := p.parseAssignExpr()
+		p.expect(token.RBRACKET)
+		return expr, true
+	case token.STRING:
+		p.next()
+		return &ast.StringLit{ValuePos: tk.Pos, Value: tk.Literal, Raw: tk.Raw}, false
+	case token.NUMBER:
+		p.next()
+		return &ast.NumberLit{ValuePos: tk.Pos, Value: parseNumber(tk.Literal), Raw: tk.Raw}, false
+	case token.PRIVATE:
+		p.next()
+		return &ast.PrivateIdent{NamePos: tk.Pos, Name: tk.Literal}, false
+	case token.IDENT:
+		p.next()
+		return &ast.Ident{NamePos: tk.Pos, Name: tk.Literal}, false
+	default:
+		if tk.Type.IsKeyword() {
+			p.next()
+			return &ast.Ident{NamePos: tk.Pos, Name: identText(tk)}, false
+		}
+		p.errorf("expected property key but got %s", tk.Type)
+		p.next()
+		return &ast.Ident{NamePos: tk.Pos}, false
+	}
+}
+
+// parseMethodBody parses the parameter list and body of a concise method,
+// returning it as a function expression.
+func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
+	start := p.cur()
+	def := &ast.FuncDef{Async: async, Generator: generator}
+	def.Params = p.parseParams()
+	p.inFunction++
+	def.Body = p.parseBlock()
+	p.inFunction--
+	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
+}
+
+// ---------------------------------------------------------------------------
+// Classes
+// ---------------------------------------------------------------------------
+
+// parseClassExpr parses a class expression.
+func (p *parser) parseClassExpr() ast.Expr {
+	kw := p.expect(token.CLASS)
+	def := p.parseClassDef()
+	return &ast.ClassExpr{Keyword: kw.Pos, Def: def}
+}
+
+// parseClassDecl parses a class declaration statement.
+func (p *parser) parseClassDecl() *ast.ClassDecl {
+	kw := p.expect(token.CLASS)
+	def := p.parseClassDef()
+	if def.Name == nil {
+		p.errorAt(kw.Pos, "class declaration requires a name")
+	}
+	return &ast.ClassDecl{Keyword: kw.Pos, Def: def}
+}
+
+// parseClassDef parses the shared body of a class (name, extends, members).
+func (p *parser) parseClassDef() *ast.ClassDef {
+	def := &ast.ClassDef{}
+	if p.at(token.IDENT) {
+		id := p.next()
+		def.Name = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
+	}
+	if p.accept(token.EXTENDS) {
+		def.SuperClass = p.parseLeftHandSide()
+	}
+	lb := p.expect(token.LBRACE)
+	def.Lbrace = lb.Pos
+	for !p.at(token.RBRACE) && !p.at(token.EOF) {
+		if p.accept(token.SEMICOLON) {
+			continue // stray semicolons between members are allowed
+		}
+		def.Members = append(def.Members, p.parseClassMember())
+	}
+	rb := p.expect(token.RBRACE)
+	def.Rbrace = rb.Pos
+	return def
+}
+
+// parseClassMember parses a single class body element: a method, accessor,
+// field, or their static variants.
+func (p *parser) parseClassMember() *ast.ClassMember {
+	start := p.cur()
+	m := &ast.ClassMember{KeyPos: start.Pos}
+
+	// `static` modifier (unless `static` is itself the member name, e.g.
+	// `static() {}` or `static = 1`).
+	if p.at(token.STATIC) && p.peek(1).Type != token.LPAREN &&
+		p.peek(1).Type != token.ASSIGN && p.peek(1).Type != token.SEMICOLON {
+		p.next()
+		m.Static = true
+	}
+
+	async := false
+	generator := false
+	kind := ast.PropInit
+
+	if (p.at(token.GET) || p.at(token.SET)) && !isMemberEnd(p.peek(1).Type) {
+		if p.at(token.SET) {
+			kind = ast.PropSet
+		} else {
+			kind = ast.PropGet
+		}
+		p.next()
+	} else {
+		if p.at(token.ASYNC) && !p.peek(1).NewlineBefore && !isMemberEnd(p.peek(1).Type) {
+			p.next()
+			async = true
+		}
+		if p.at(token.STAR) {
+			p.next()
+			generator = true
+		}
+	}
+
+	key, computed := p.parsePropertyKey()
+	m.Key = key
+	m.Computed = computed
+	m.Kind = kind
+
+	if p.at(token.LPAREN) {
+		// Method or accessor.
+		fn := p.parseMethodBody(async, generator)
+		m.Value = fn
+		return m
+	}
+
+	// Field definition (with optional initializer).
+	m.Field = true
+	if p.accept(token.ASSIGN) {
+		m.Value = p.parseAssignExpr()
+	}
+	p.expectSemicolon()
+	return m
+}
+
+// isMemberEnd reports whether t terminates a class-member modifier position, so
+// that get/set/async can be recognized as plain member names when appropriate.
+func isMemberEnd(t token.Type) bool {
+	switch t {
+	case token.LPAREN, token.ASSIGN, token.SEMICOLON, token.RBRACE:
+		return true
+	}
+	return false
+}

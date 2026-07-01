@@ -1,0 +1,212 @@
+// Package parser implements a recursive-descent parser for JavaScript
+// (ECMAScript), producing an [ast.Program] from source text.
+//
+// # Design
+//
+// The parser first tokenizes the entire input into a slice via the [lexer]
+// package, then walks that slice with an index cursor. Buffering the whole
+// token stream (rather than pulling one token at a time) makes arbitrary
+// lookahead cheap, which the JavaScript grammar needs in several places — most
+// notably to distinguish an arrow function `(a, b) => …` from a parenthesized
+// expression `(a, b)`, and to tell a destructuring pattern from an object or
+// array literal.
+//
+// Expressions are parsed with precedence climbing (a compact form of Pratt
+// parsing); see parse_expr.go. Statements are parsed by recursive descent; see
+// parse_stmt.go.
+//
+// # Error handling
+//
+// The first error encountered stops the parse and is returned. Errors carry a
+// [token.Span] so callers can report a precise source range. Automatic
+// Semicolon Insertion (ECMA-262 §12.10) is implemented in expectSemicolon.
+//
+// ECMA-262 Reference: §13–§16.
+package parser
+
+import (
+	"fmt"
+
+	"github.com/iceisfun/gojs/ast"
+	"github.com/iceisfun/gojs/lexer"
+	"github.com/iceisfun/gojs/token"
+)
+
+// maxDepth bounds recursive-descent nesting to protect against stack overflow
+// on pathologically nested input.
+const maxDepth = 1000
+
+// parser holds the state for a single parse.
+type parser struct {
+	source string
+	toks   []token.Token // fully buffered token stream (always ends with EOF)
+	idx    int           // cursor into toks
+	err    *token.SyntaxError
+	depth  int // current recursion depth
+
+	// noIn disables the `in` operator while parsing the header of a for
+	// statement, so `for (x in y)` is not mis-parsed as a relational expr.
+	noIn bool
+	// inFunction/inLoop/inSwitch track context for validating return, break,
+	// and continue. They are simple counters saved/restored across boundaries.
+	inFunction int
+	inLoop     int
+	inSwitch   int
+}
+
+// Parse parses source into a [*ast.Program]. sourceName is used in error
+// messages and stored on the program.
+func Parse(sourceName, source string) (*ast.Program, error) {
+	p, err := newParser(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	return p.parseProgram()
+}
+
+// newParser tokenizes source and returns a ready parser, or a lexical error.
+func newParser(sourceName, source string) (*parser, error) {
+	lex := lexer.New(sourceName, source, true)
+	var toks []token.Token
+	for {
+		tk := lex.Next()
+		toks = append(toks, tk)
+		if tk.Type == token.EOF {
+			break
+		}
+	}
+	if err := lex.Err(); err != nil {
+		return nil, err
+	}
+	return &parser{source: sourceName, toks: toks}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Cursor primitives
+// ---------------------------------------------------------------------------
+
+// cur returns the current token.
+func (p *parser) cur() token.Token { return p.toks[p.idx] }
+
+// peek returns the token n positions ahead of the cursor (peek(0) == cur),
+// clamped to the trailing EOF.
+func (p *parser) peek(n int) token.Token {
+	i := p.idx + n
+	if i >= len(p.toks) {
+		return p.toks[len(p.toks)-1] // EOF
+	}
+	return p.toks[i]
+}
+
+// at reports whether the current token is of type t.
+func (p *parser) at(t token.Type) bool { return p.cur().Type == t }
+
+// next advances the cursor and returns the token that was current.
+func (p *parser) next() token.Token {
+	tk := p.toks[p.idx]
+	if p.idx < len(p.toks)-1 {
+		p.idx++
+	}
+	return tk
+}
+
+// accept consumes and reports whether the current token is of type t.
+func (p *parser) accept(t token.Type) bool {
+	if p.at(t) {
+		p.next()
+		return true
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+// errorf records a syntax error at the current token (only the first is kept).
+func (p *parser) errorf(format string, args ...any) {
+	if p.err == nil {
+		p.err = &token.SyntaxError{Pos: p.cur().Pos, Msg: fmt.Sprintf(format, args...)}
+	}
+}
+
+// errorAt records a syntax error at a specific position.
+func (p *parser) errorAt(pos token.Pos, format string, args ...any) {
+	if p.err == nil {
+		p.err = &token.SyntaxError{Pos: pos, Msg: fmt.Sprintf(format, args...)}
+	}
+}
+
+// expect consumes a token of type t, or records an error and returns the
+// current (unconsumed) token.
+func (p *parser) expect(t token.Type) token.Token {
+	if p.at(t) {
+		return p.next()
+	}
+	p.errorf("expected %s but got %s", t, p.cur().Type)
+	return p.cur()
+}
+
+// enter increments the recursion-depth guard, recording an error if the limit
+// is exceeded. Callers pair it with a deferred leave.
+func (p *parser) enter() bool {
+	p.depth++
+	if p.depth > maxDepth {
+		p.errorf("maximum nesting depth exceeded")
+		return false
+	}
+	return true
+}
+
+func (p *parser) leave() { p.depth-- }
+
+// ---------------------------------------------------------------------------
+// Automatic Semicolon Insertion
+// ---------------------------------------------------------------------------
+
+// expectSemicolon consumes a statement-terminating semicolon, applying the ASI
+// rules: a semicolon may be omitted before '}', at end of input, or when the
+// current token began on a new line.
+func (p *parser) expectSemicolon() {
+	if p.accept(token.SEMICOLON) {
+		return
+	}
+	switch {
+	case p.at(token.RBRACE), p.at(token.EOF):
+		return
+	case p.cur().NewlineBefore:
+		return
+	default:
+		p.errorf("expected ';' but got %s", p.cur().Type)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Program
+// ---------------------------------------------------------------------------
+
+// parseProgram parses the whole token stream into a program node.
+func (p *parser) parseProgram() (*ast.Program, error) {
+	prog := &ast.Program{Source: p.source}
+
+	// Directive prologue: a leading run of string-literal expression
+	// statements, one of which may be "use strict".
+	for p.err == nil && !p.at(token.EOF) {
+		stmt := p.parseStmt()
+		if p.err != nil {
+			break
+		}
+		if stmt == nil {
+			continue
+		}
+		if es, ok := stmt.(*ast.ExprStmt); ok && es.Directive == "use strict" {
+			prog.Strict = true
+		}
+		prog.Body = append(prog.Body, stmt)
+	}
+	prog.EndPos = p.cur().Pos
+	if p.err != nil {
+		return nil, p.err
+	}
+	return prog, nil
+}
