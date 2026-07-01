@@ -18,7 +18,7 @@ func (i *Interpreter) initRegExp() {
 	proto := i.regexpProto
 
 	i.defineMethod(proto, "test", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		reObj, re, ok := regexpReceiver(this)
+		o, ok := this.(*Object)
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Method RegExp.prototype.test called on incompatible receiver")
 		}
@@ -26,11 +26,11 @@ func (i *Interpreter) initRegExp() {
 		if err != nil {
 			return nil, err
 		}
-		m, err := i.regexExec(ctx, reObj, re, jsregexp.ToUnits(s))
+		res, err := i.regExpExec(ctx, o, s)
 		if err != nil {
-			return nil, i.regexErr(ctx, err)
+			return nil, err
 		}
-		return Bool(m != nil), nil
+		return Bool(!IsNull(res)), nil
 	})
 
 	i.defineMethod(proto, "exec", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -65,6 +65,7 @@ func (i *Interpreter) initRegExp() {
 	linkCtor(ctor, proto)
 	i.setGlobalHidden("RegExp", ctor)
 
+	i.initRegExpStatics(ctor)
 	i.initRegExpAccessors(proto)
 	i.initRegExpSymbols(proto)
 	i.initStringRegex()
@@ -424,14 +425,6 @@ func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Va
 	return i.newArray(out), nil
 }
 
-// regexpIsGlobal reports whether a RegExp object carries the global flag.
-func regexpIsGlobal(o *Object) bool {
-	if re, ok := regexpOf(o); ok {
-		return re.Flags().Global
-	}
-	return false
-}
-
 // regexpFromArgs builds a RegExp from (pattern, flags) arguments.
 func (i *Interpreter) regexpFromArgs(ctx context.Context, args []Value) (Value, error) {
 	pattern := ""
@@ -491,20 +484,6 @@ func regexpOf(v Value) (reEngine, bool) {
 	}
 	re, ok := o.internal["regexp"].(reEngine)
 	return re, ok
-}
-
-// regexpReceiver validates that this is a RegExp object and returns it with its
-// compiled engine.
-func regexpReceiver(this Value) (*Object, reEngine, bool) {
-	o, ok := this.(*Object)
-	if !ok {
-		return nil, nil, false
-	}
-	re, ok := regexpOf(o)
-	if !ok {
-		return nil, nil, false
-	}
-	return o, re, true
 }
 
 // regexpSourceFlags returns the source pattern and flags if v is a RegExp object.
