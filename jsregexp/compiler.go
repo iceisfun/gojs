@@ -55,20 +55,7 @@ func (c *compiler) node(n Node) (matcher, error) {
 		return c.charMatcher(t.R), nil
 
 	case *AnyChar:
-		da := c.da
-		return func(m *machine, sp int, k cont) bool {
-			if m.err != nil || !m.step() {
-				return false
-			}
-			if sp >= len(m.input) {
-				return false
-			}
-			r, w := m.codePointAt(sp)
-			if da || !isLineTerminator(r) {
-				return k(sp + w)
-			}
-			return false
-		}, nil
+		return consumerMatcher(c.anyConsumer()), nil
 
 	case *Assertion:
 		return c.assertionMatcher(t.Kind), nil
@@ -113,50 +100,98 @@ func (c *compiler) node(n Node) (matcher, error) {
 	}
 }
 
-func (c *compiler) charMatcher(r rune) matcher {
-	// In non-Unicode mode an astral literal in the pattern is itself a surrogate
-	// pair, so it must match the two code units in sequence.
-	if !c.u && r > 0xFFFF {
-		hi, lo := utf16.EncodeRune(r)
-		return c.concatMatchers(c.unitMatcher(uint16(hi)), c.unitMatcher(uint16(lo)))
-	}
-	ic := c.ic
-	u := c.u
-	cr := canonicalize(r, u)
+// unitConsumer matches a single fixed-width character at sp and returns the
+// position after it. It performs no backtracking and takes no continuation, so a
+// quantifier over a consumer can iterate instead of recurse — the key to not
+// overflowing the Go stack on long inputs.
+type unitConsumer func(m *machine, sp int) (int, bool)
+
+// consumerMatcher lifts a unitConsumer into a matcher.
+func consumerMatcher(cons unitConsumer) matcher {
 	return func(m *machine, sp int, k cont) bool {
 		if m.err != nil || !m.step() {
 			return false
 		}
+		if np, ok := cons(m, sp); ok {
+			return k(np)
+		}
+		return false
+	}
+}
+
+func (c *compiler) charConsumer(r rune) unitConsumer {
+	// A non-Unicode astral literal is itself a surrogate pair — match both units.
+	if !c.u && r > 0xFFFF {
+		hi, lo := utf16.EncodeRune(r)
+		uh, ul := uint16(hi), uint16(lo)
+		return func(m *machine, sp int) (int, bool) {
+			if sp+1 < len(m.input) && m.input[sp] == uh && m.input[sp+1] == ul {
+				return sp + 2, true
+			}
+			return 0, false
+		}
+	}
+	ic, u := c.ic, c.u
+	cr := canonicalize(r, u)
+	return func(m *machine, sp int) (int, bool) {
 		if sp >= len(m.input) {
-			return false
+			return 0, false
 		}
 		ch, w := m.codePointAt(sp)
 		if ch == r || (ic && canonicalize(ch, u) == cr) {
-			return k(sp + w)
+			return sp + w, true
 		}
-		return false
+		return 0, false
 	}
 }
 
-// unitMatcher matches a single specific code unit (used to spell out surrogate
-// halves of a non-Unicode astral literal).
-func (c *compiler) unitMatcher(unit uint16) matcher {
-	return func(m *machine, sp int, k cont) bool {
-		if m.err != nil || !m.step() {
-			return false
+func (c *compiler) anyConsumer() unitConsumer {
+	da := c.da
+	return func(m *machine, sp int) (int, bool) {
+		if sp >= len(m.input) {
+			return 0, false
 		}
-		if sp < len(m.input) && m.input[sp] == unit {
-			return k(sp + 1)
+		r, w := m.codePointAt(sp)
+		if da || !isLineTerminator(r) {
+			return sp + w, true
 		}
-		return false
+		return 0, false
 	}
 }
 
-// concatMatchers runs a then b.
-func (c *compiler) concatMatchers(a, b matcher) matcher {
-	return func(m *machine, sp int, k cont) bool {
-		return a(m, sp, func(sp2 int) bool { return b(m, sp2, k) })
+func (c *compiler) classConsumer(set *runeSet, negate bool) unitConsumer {
+	ic, u := c.ic, c.u
+	return func(m *machine, sp int) (int, bool) {
+		if sp >= len(m.input) {
+			return 0, false
+		}
+		r, w := m.codePointAt(sp)
+		if classContainsFold(set, r, ic, u) != negate {
+			return sp + w, true
+		}
+		return 0, false
 	}
+}
+
+func (c *compiler) charMatcher(r rune) matcher { return consumerMatcher(c.charConsumer(r)) }
+
+// simpleConsumer returns a unitConsumer for nodes that match exactly one
+// fixed-width character with no captures or internal backtracking, so a
+// quantifier over them can run iteratively. ok is false for anything else.
+func (c *compiler) simpleConsumer(n Node) (unitConsumer, bool) {
+	switch t := n.(type) {
+	case *Char:
+		return c.charConsumer(t.R), true
+	case *AnyChar:
+		return c.anyConsumer(), true
+	case *CharClass:
+		set, err := c.compileClassSet(t.Set)
+		if err != nil {
+			return nil, false // fall back so the normal path reports the error
+		}
+		return c.classConsumer(set, t.Negate), true
+	}
+	return nil, false
 }
 
 func (c *compiler) assertionMatcher(kind AssertKind) matcher {
@@ -201,23 +236,7 @@ func (c *compiler) classMatcher(cc *CharClass) (matcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	negate := cc.Negate
-	ic := c.ic
-	u := c.u
-	return func(m *machine, sp int, k cont) bool {
-		if m.err != nil || !m.step() {
-			return false
-		}
-		if sp >= len(m.input) {
-			return false
-		}
-		r, w := m.codePointAt(sp)
-		in := classContainsFold(set, r, ic, u)
-		if in != negate {
-			return k(sp + w)
-		}
-		return false
-	}, nil
+	return consumerMatcher(c.classConsumer(set, cc.Negate)), nil
 }
 
 // compileClassSet resolves a ClassSet into a runeSet, applying v-mode set
@@ -314,6 +333,10 @@ func (c *compiler) concat(terms []Node) (matcher, error) {
 			if i == len(ms) {
 				return k(sp)
 			}
+			if !m.enter() {
+				return false
+			}
+			defer m.leave()
 			return ms[i](m, sp, func(sp2 int) bool { return run(i+1, sp2) })
 		}
 		return run(0, sp)
@@ -413,6 +436,13 @@ func (c *compiler) backref(index int) matcher {
 // reset of captures declared inside the body and the empty-iteration guard that
 // prevents infinite loops on nullable bodies.
 func (c *compiler) quantifier(q *Quantifier) (matcher, error) {
+	// Fast path: a quantifier over a single fixed-width character with no
+	// captures runs iteratively, so long inputs (a*, \w+, [^"]* ...) never grow
+	// the Go stack.
+	if cons, ok := c.simpleConsumer(q.Body); ok {
+		return c.simpleQuantifier(cons, q.Min, q.Max, q.Greedy), nil
+	}
+
 	body, err := c.node(q.Body)
 	if err != nil {
 		return nil, err
@@ -423,9 +453,10 @@ func (c *compiler) quantifier(q *Quantifier) (matcher, error) {
 	return func(m *machine, sp int, k cont) bool {
 		var repeat func(min, max, x int) bool
 		repeat = func(min, max, x int) bool {
-			if m.err != nil || !m.step() {
+			if m.err != nil || !m.step() || !m.enter() {
 				return false
 			}
+			defer m.leave()
 			if max == 0 {
 				return k(x)
 			}
@@ -473,6 +504,55 @@ func (c *compiler) quantifier(q *Quantifier) (matcher, error) {
 		}
 		return repeat(q.Min, q.Max, sp)
 	}, nil
+}
+
+// simpleQuantifier matches a quantifier whose body consumes exactly one
+// fixed-width character (no captures) by greedily collecting the positions after
+// each repetition, then trying continuations from the longest (greedy) or
+// shortest (lazy) — all iteratively, with no recursion over the repetition count.
+func (c *compiler) simpleQuantifier(cons unitConsumer, min, max int, greedy bool) matcher {
+	return func(m *machine, sp int, k cont) bool {
+		if m.err != nil {
+			return false
+		}
+		positions := []int{sp}
+		cur := sp
+		for max < 0 || len(positions)-1 < max {
+			if !m.step() {
+				return false
+			}
+			np, ok := cons(m, cur)
+			if !ok || np == cur {
+				break
+			}
+			cur = np
+			positions = append(positions, cur)
+		}
+		count := len(positions) - 1
+		if count < min {
+			return false
+		}
+		if greedy {
+			for n := count; n >= min; n-- {
+				if k(positions[n]) {
+					return true
+				}
+				if m.err != nil {
+					return false
+				}
+			}
+		} else {
+			for n := min; n <= count; n++ {
+				if k(positions[n]) {
+					return true
+				}
+				if m.err != nil {
+					return false
+				}
+			}
+		}
+		return false
+	}
 }
 
 func (c *compiler) lookaround(l *Lookaround) (matcher, error) {

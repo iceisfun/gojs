@@ -17,6 +17,12 @@ var ErrBudget = errors.New("jsregexp: step budget exceeded")
 // patterns yet small enough to fail fast on catastrophic backtracking.
 const DefaultStepBudget = 10_000_000
 
+// maxRecursionDepth bounds the live recursion depth of the backtracking matcher
+// so a long input or huge quantifier over a complex body cannot overflow the Go
+// stack; exceeding it fails the match with ErrBudget rather than crashing the
+// host. Simple quantifiers use an iterative path and do not count against it.
+const maxRecursionDepth = 60_000
+
 // A matcher consumes input starting at sp and, on a successful partial match,
 // invokes the continuation k with the new position; it returns whether the whole
 // tail (this matcher plus k) succeeded. Matchers mutate m.caps in place and are
@@ -37,8 +43,22 @@ type machine struct {
 	ctx     context.Context
 	steps   int
 	limit   int
+	depth   int
 	err     error // set once on cancellation/budget; short-circuits all matchers
 }
+
+// enter accounts one level of matcher recursion, returning false (with m.err set)
+// when the stack-depth guard trips. Every recursive driver pairs it with leave.
+func (m *machine) enter() bool {
+	if m.depth >= maxRecursionDepth {
+		m.err = ErrBudget
+		return false
+	}
+	m.depth++
+	return true
+}
+
+func (m *machine) leave() { m.depth-- }
 
 // codePointAt returns the character at code-unit index sp and its width in code
 // units (1, or 2 for a surrogate pair). In non-Unicode mode every unit — lone
@@ -117,18 +137,29 @@ func (re *Regexp) FindSubmatchIndex(ctx context.Context, input []uint16, start i
 		}
 	}
 	p := re.prog
+	// One machine spans the whole search so the step budget and context deadline
+	// bound the entire find, not each starting position independently. Otherwise
+	// an unanchored no-match over a long input is O(n^2) work that resets steps
+	// (and the every-0x3fff ctx poll) at every position, ignoring both the ReDoS
+	// budget and a cancelled context.
+	m := &machine{
+		input:   input,
+		caps:    make([]int, 2*(p.numGroups+1)),
+		unicode: p.unicode,
+		ctx:     ctx,
+		limit:   re.stepLimit,
+	}
 	for at := start; at <= len(input); at++ {
-		m := &machine{
-			input:   input,
-			caps:    make([]int, 2*(p.numGroups+1)),
-			unicode: p.unicode,
-			ctx:     ctx,
-			limit:   re.stepLimit,
+		// Charge one step per starting position so advancing the anchor is itself
+		// bounded and periodically polls the context.
+		if !m.step() {
+			return nil, m.err
 		}
 		for i := range m.caps {
 			m.caps[i] = -1
 		}
 		m.caps[0] = at
+		m.depth = 0
 		matched := p.entry(m, at, func(end int) bool {
 			m.caps[1] = end
 			return true
