@@ -18,7 +18,16 @@ type Environment struct {
 	newTgt  Value           // new.target for this scope
 	homeObj *Object         // [[HomeObject]] for super resolution in methods
 	gen     *generatorState // active generator channels (set in generator bodies)
+
+	// superInit tracks whether super() has run in a derived constructor scope.
+	// It is non-nil only on the scope that establishes a derived constructor's
+	// `this`; reading `this` before super() (superInit.called == false) is a
+	// ReferenceError, and a second super() call is likewise rejected.
+	superInit *superInitState
 }
+
+// superInitState records whether a derived constructor has invoked super().
+type superInitState struct{ called bool }
 
 // generator returns the generator state for the nearest enclosing generator
 // body, or nil when the current scope is not inside one.
@@ -118,6 +127,18 @@ func (e *Environment) thisBinding() (Value, bool) {
 func (e *Environment) setThis(v Value) {
 	e.thisVal = v
 	e.hasThis = true
+}
+
+// thisScope returns the nearest environment that establishes a `this` binding,
+// or nil. It is used to locate a derived constructor's super-init state so that
+// reading `this` before super() can be rejected.
+func (e *Environment) thisScope() *Environment {
+	for env := e; env != nil; env = env.parent {
+		if env.hasThis {
+			return env
+		}
+	}
+	return nil
 }
 
 // homeObject returns the nearest [[HomeObject]] for super resolution.

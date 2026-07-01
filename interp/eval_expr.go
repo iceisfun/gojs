@@ -41,6 +41,12 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.Ident:
 		return i.resolveIdent(ctx, e.Name, env)
 	case *ast.ThisExpr:
+		// In a derived constructor, `this` is in the Temporal Dead Zone until
+		// super() has been called.
+		if ts := env.thisScope(); ts != nil && ts.superInit != nil && !ts.superInit.called {
+			return nil, i.throwError(ctx, "ReferenceError",
+				"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
+		}
 		v, _ := env.thisBinding()
 		return v, nil
 	case *ast.TemplateLit:
@@ -108,6 +114,11 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 func (i *Interpreter) resolveIdent(ctx context.Context, name string, env *Environment) (Value, error) {
 	if name == "undefined" {
 		return Undef, nil
+	}
+	// new.target is a meta-property, parsed as an identifier. It resolves to the
+	// nearest constructor context's [[NewTarget]] (undefined in ordinary calls).
+	if name == "new.target" {
+		return env.newTarget(), nil
 	}
 	if b := env.lookup(name); b != nil {
 		if !b.initialized {

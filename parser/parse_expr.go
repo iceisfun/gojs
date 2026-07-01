@@ -171,6 +171,15 @@ func (p *parser) parseUnary() ast.Expr {
 		token.TYPEOF, token.VOID, token.DELETE:
 		op := p.next()
 		operand := p.parseUnary()
+		// `delete obj.#priv` is an early SyntaxError: private members cannot be
+		// deleted.
+		if op.Type == token.DELETE {
+			if m, ok := operand.(*ast.MemberExpr); ok {
+				if _, ok := m.Property.(*ast.PrivateIdent); ok {
+					p.errorAt(m.Property.Pos(), "Private fields can not be deleted")
+				}
+			}
+		}
 		return &ast.UnaryExpr{OpPos: op.Pos, Op: op.Type, Operand: operand}
 	case token.INC, token.DEC:
 		op := p.next()

@@ -37,6 +37,10 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			return nil, err
 		}
 		defer i.leaveCall()
+		// Consume any pending new.target set by a [[Construct]] call. A plain call
+		// leaves it nil, so new.target reads as undefined inside the body.
+		nt := i.pendingNewTarget
+		i.pendingNewTarget = nil
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
 		if def.Generator && kind == kindNormal {
@@ -63,6 +67,12 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			env.setThis(this)
 			if homeObj != nil {
 				env.homeObj = homeObj
+			}
+			// new.target: the constructor when invoked via `new`, else undefined.
+			if nt != nil {
+				env.newTgt = nt
+			} else {
+				env.newTgt = Undef
 			}
 			env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 		}
@@ -106,6 +116,11 @@ func (i *Interpreter) makeConstruct(fnObj *Object, call CallFn) CallFn {
 			proto = i.objectProto
 		}
 		self := NewObject(proto)
+		// Publish new.target for the body (see Interpreter.pendingNewTarget).
+		if newTarget == nil {
+			newTarget = fnObj
+		}
+		i.pendingNewTarget = newTarget
 		result, err := call(ctx, self, args)
 		if err != nil {
 			return nil, err

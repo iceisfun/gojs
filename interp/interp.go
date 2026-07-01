@@ -54,6 +54,12 @@ type Interpreter struct {
 	// rng is the per-interpreter PRNG backing Math.random.
 	rng *prng
 
+	// pendingNewTarget carries the [[NewTarget]] value from an ordinary
+	// function's [[Construct]] to the [[Call]] that runs its body. It is set
+	// immediately before the call and consumed at the top of the call, so no
+	// other JS runs in between (the VM is single-threaded).
+	pendingNewTarget Value
+
 	// callDepth counts active JS function invocations; it bounds recursion so
 	// runaway/infinite recursion raises a RangeError instead of overflowing the
 	// Go goroutine stack (which would crash the host).

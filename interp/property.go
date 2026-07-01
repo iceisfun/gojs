@@ -123,6 +123,60 @@ func (o *Object) Delete(key PropertyKey) bool {
 	return true
 }
 
+// getPrivateMember reads a private class element (#name) off base, enforcing the
+// brand check: base must be an object that carries the private name, or a
+// TypeError is thrown. Private getters are invoked with base as the receiver.
+func (i *Interpreter) getPrivateMember(ctx context.Context, base Value, name string) (Value, error) {
+	obj, ok := base.(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError",
+			"Cannot read private member "+name+" from an object whose class did not declare it")
+	}
+	p, ok := obj.getPrivate(name)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError",
+			"Cannot read private member "+name+" from an object whose class did not declare it")
+	}
+	if p.Accessor {
+		if p.Get == nil {
+			return nil, i.throwError(ctx, "TypeError",
+				"'"+name+"' was defined without a getter")
+		}
+		return p.Get.fn.call(ctx, obj, nil)
+	}
+	return p.Value, nil
+}
+
+// setPrivateMember writes a private class element (#name) on base, enforcing the
+// brand check. Assigning to a private method throws, and a private setter is
+// invoked with base as the receiver.
+func (i *Interpreter) setPrivateMember(ctx context.Context, base Value, name string, v Value) error {
+	obj, ok := base.(*Object)
+	if !ok {
+		return i.throwError(ctx, "TypeError",
+			"Cannot write private member "+name+" to an object whose class did not declare it")
+	}
+	p, ok := obj.getPrivate(name)
+	if !ok {
+		return i.throwError(ctx, "TypeError",
+			"Cannot write private member "+name+" to an object whose class did not declare it")
+	}
+	if p.Accessor {
+		if p.Set == nil {
+			return i.throwError(ctx, "TypeError",
+				"'"+name+"' was defined without a setter")
+		}
+		_, err := p.Set.fn.call(ctx, obj, []Value{v})
+		return err
+	}
+	if !p.Writable {
+		return i.throwError(ctx, "TypeError",
+			"Cannot write to private method "+name)
+	}
+	p.Value = v
+	return nil
+}
+
 // DefineAccessor installs a getter/setter accessor property.
 func (o *Object) DefineAccessor(name string, get, set *Object, enumerable bool) {
 	o.defineOwn(StrKey(name), &Property{

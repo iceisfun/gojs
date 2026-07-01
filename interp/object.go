@@ -113,6 +113,36 @@ type Object struct {
 	isArray   bool
 	primitive Value          // wrapped primitive (String/Number/Boolean/Date)
 	internal  map[string]any // misc internal slots (RegExp source, Map data, ...)
+
+	// private holds ECMAScript private class elements (#fields, #methods, and
+	// private accessors), keyed by their "#name". These are not ordinary
+	// properties: they are invisible to property enumeration, [[Get]]/[[Set]],
+	// hasOwnProperty, and JSON, and are guarded by a brand check on access.
+	private map[string]*Property
+}
+
+// getPrivate returns the private-element descriptor for name (e.g. "#x"), or
+// (nil, false) when the object does not carry that private brand.
+func (o *Object) getPrivate(name string) (*Property, bool) {
+	if o.private == nil {
+		return nil, false
+	}
+	p, ok := o.private[name]
+	return p, ok
+}
+
+// hasPrivate reports whether the object carries the private brand name.
+func (o *Object) hasPrivate(name string) bool {
+	_, ok := o.getPrivate(name)
+	return ok
+}
+
+// definePrivate installs (or replaces) a private element descriptor.
+func (o *Object) definePrivate(name string, p *Property) {
+	if o.private == nil {
+		o.private = make(map[string]*Property)
+	}
+	o.private[name] = p
 }
 
 // NewObject creates a bare object with the given prototype (which may be nil).

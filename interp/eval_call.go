@@ -127,6 +127,15 @@ func (i *Interpreter) evalMember(ctx context.Context, e *ast.MemberExpr, env *En
 	if e.Optional && IsNullish(base) {
 		return scSentinel, Undef, nil
 	}
+	// Private member access (#name) resolves against per-object private storage
+	// with a brand check, not the ordinary property chain.
+	if priv, ok := e.Property.(*ast.PrivateIdent); ok && !e.Computed {
+		val, err := i.getPrivateMember(ctx, base, priv.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		return val, base, nil
+	}
 	key, err := i.memberKey(ctx, e, env)
 	if err != nil {
 		return nil, nil, err
@@ -154,6 +163,41 @@ func (i *Interpreter) evalSuperMember(ctx context.Context, e *ast.MemberExpr, en
 		return nil, nil, err
 	}
 	return val, thisVal, nil
+}
+
+// assignSuperMember implements `super.x = v`: an inherited accessor's setter is
+// invoked with `this` as the receiver; otherwise the value is written as an own
+// property of `this`.
+func (i *Interpreter) assignSuperMember(ctx context.Context, e *ast.MemberExpr, value Value, env *Environment) error {
+	home := env.homeObject()
+	if home == nil || home.proto == nil {
+		return i.throwError(ctx, "SyntaxError", "'super' keyword unexpected here")
+	}
+	key, err := i.memberKey(ctx, e, env)
+	if err != nil {
+		return err
+	}
+	thisVal, _ := env.thisBinding()
+	// Look up an accessor on the super chain; if a setter exists, run it with the
+	// current `this` as the receiver.
+	for cur := home.proto; cur != nil; cur = cur.proto {
+		p, ok := cur.getOwn(key)
+		if !ok {
+			continue
+		}
+		if p.Accessor {
+			if p.Set == nil {
+				return nil // accessor without a setter: ignore (non-strict)
+			}
+			_, err := p.Set.fn.call(ctx, thisVal, []Value{value})
+			return err
+		}
+		break
+	}
+	if obj, ok := thisVal.(*Object); ok {
+		return obj.Set(ctx, key, value)
+	}
+	return nil
 }
 
 // evalCallee resolves a call target to (function, thisArg), supporting method
@@ -317,9 +361,19 @@ func (i *Interpreter) assignTo(ctx context.Context, target ast.Expr, value Value
 	case *ast.Ident:
 		return i.assignIdent(ctx, t.Name, value, env)
 	case *ast.MemberExpr:
+		// super.x = v assigns through the home object's chain with `this` as the
+		// receiver (so an inherited setter runs, else an own property is set).
+		if _, ok := t.Object.(*ast.SuperExpr); ok {
+			return i.assignSuperMember(ctx, t, value, env)
+		}
 		base, err := i.evalExpr(ctx, t.Object, env)
 		if err != nil {
 			return err
+		}
+		// Private member assignment (#name) routes to private storage with a
+		// brand check.
+		if priv, ok := t.Property.(*ast.PrivateIdent); ok && !t.Computed {
+			return i.setPrivateMember(ctx, base, priv.Name, value)
 		}
 		key, err := i.memberKey(ctx, t, env)
 		if err != nil {

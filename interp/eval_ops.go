@@ -167,7 +167,7 @@ func (i *Interpreter) evalBinary(ctx context.Context, e *ast.BinaryExpr, env *En
 			if !ok {
 				return nil, i.throwError(ctx, "TypeError", "Cannot use 'in' operator to search in a non-object")
 			}
-			return Bool(obj.HasOwn(StrKey(priv.Name))), nil
+			return Bool(obj.hasPrivate(priv.Name)), nil
 		}
 	}
 	left, err := i.evalExpr(ctx, e.Left, env)

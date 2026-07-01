@@ -434,7 +434,49 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 	p.classDepth--
 	rb := p.expect(token.RBRACE)
 	def.Rbrace = rb.Pos
+	p.checkClassMembers(def)
 	return def
+}
+
+// checkClassMembers enforces early (static-semantic) errors on a class body:
+// at most one constructor, and no duplicate private names (a get/set pair for
+// the same private name being the only permitted repeat).
+func (p *parser) checkClassMembers(def *ast.ClassDef) {
+	ctorCount := 0
+	// privateKinds records, per private name, the accessor halves already seen
+	// (bit 1 = get, bit 2 = set) or a sentinel for a field/method.
+	const kindOther = 4
+	privateKinds := map[string]int{}
+	for _, m := range def.Members {
+		if !m.Field && !m.Static {
+			if id, ok := m.Key.(*ast.Ident); ok && id.Name == "constructor" {
+				ctorCount++
+				if ctorCount > 1 {
+					p.errorAt(m.KeyPos, "A class may only have one constructor")
+				}
+			}
+		}
+		priv, ok := m.Key.(*ast.PrivateIdent)
+		if !ok {
+			continue
+		}
+		name := priv.Name
+		var bit int
+		switch m.Kind {
+		case ast.PropGet:
+			bit = 1
+		case ast.PropSet:
+			bit = 2
+		default:
+			bit = kindOther
+		}
+		prev := privateKinds[name]
+		// A duplicate is an error unless it is the complementary accessor half.
+		if prev != 0 && !(bit != kindOther && prev != kindOther && prev&bit == 0) {
+			p.errorAt(priv.Pos(), "Duplicate private name %s", name)
+		}
+		privateKinds[name] = prev | bit
+	}
 }
 
 // parseClassMember parses a single class body element: a method, accessor,

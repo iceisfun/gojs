@@ -13,11 +13,12 @@ import (
 // classData is stashed in a class constructor's internal slots so instance
 // construction can initialize fields and locate the parent constructor.
 type classData struct {
-	def        *ast.ClassDef
-	env        *Environment
-	proto      *Object
-	superCtor  *Object // parent constructor (nil when no extends)
-	fieldInits []*ast.ClassMember
+	def            *ast.ClassDef
+	env            *Environment
+	proto          *Object
+	superCtor      *Object          // parent constructor (nil when no extends)
+	fieldInits     []*ast.ClassMember
+	privateMethods []*ast.ClassMember // instance #methods and private accessors
 }
 
 // evalClass evaluates a class definition to its constructor object.
@@ -62,6 +63,14 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 		if m.Field && !m.Static {
 			cd.fieldInits = append(cd.fieldInits, m)
 		}
+		// Instance private methods and private accessors are installed per
+		// instance (they belong to the object's private brand, not the shared
+		// prototype).
+		if !m.Field && !m.Static {
+			if _, ok := m.Key.(*ast.PrivateIdent); ok {
+				cd.privateMethods = append(cd.privateMethods, m)
+			}
+		}
 	}
 
 	ctor := i.makeClassConstructor(def, cd, ctorDef, classEnv, proto)
@@ -90,11 +99,24 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 		if id, ok := m.Key.(*ast.Ident); ok && id.Name == "constructor" && !m.Static {
 			continue // handled as the constructor
 		}
+		// Instance private methods/accessors are installed per instance during
+		// construction, not here.
+		if _, isPriv := m.Key.(*ast.PrivateIdent); isPriv && !m.Static {
+			continue
+		}
 		target := proto
 		home := proto
 		if m.Static {
 			target = ctor
 			home = ctor
+		}
+		if _, isPriv := m.Key.(*ast.PrivateIdent); isPriv && m.Static {
+			// Static private methods/accessors live in the constructor's private
+			// storage (home object is the constructor for super lookups).
+			if err := i.installPrivateMember(ctx, ctor, ctor, m, classEnv); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		if err := i.installClassMethod(ctx, target, home, m, classEnv); err != nil {
 			return nil, err
@@ -125,39 +147,60 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		env := NewEnvironment(classEnv, true)
 		env.homeObj = proto
 		env.setThis(self)
+		// new.target is the constructor originally invoked with `new` (propagated
+		// unchanged down a super() chain). Default to undefined for safety.
+		if newTarget == nil {
+			newTarget = Undef
+		}
+		env.newTgt = newTarget
 
-		// With a superclass, `this` field init and body run after super() is
-		// called; we initialize fields up front for simplicity.
+		// With a superclass, `this` field/private init and body run after super()
+		// is called; a base class initializes everything up front.
 		if cd.superCtor == nil {
+			if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
+				return nil, err
+			}
 			if err := i.initInstanceFields(ctx, self, cd, env); err != nil {
 				return nil, err
 			}
 		} else {
-			// Provide a super() binding that constructs the parent onto self.
+			// Provide a super() binding that constructs the parent onto self, and
+			// mark `this` as uninitialized until super() runs.
+			env.superInit = &superInitState{}
 			env.vars["%superctor%"] = &binding{value: cd.superCtor, mutable: false, initialized: true}
 			env.vars["%fieldinit%"] = &binding{value: i.fieldInitThunk(cd, self), mutable: false, initialized: true}
 		}
 
+		var result Value = self
 		if ctorDef != nil {
 			if err := i.bindParams(ctx, ctorDef.Params, args, env); err != nil {
 				return nil, err
 			}
-			_, err := i.runConstructorBody(ctx, ctorDef.Body, env)
+			ret, err := i.runConstructorBody(ctx, ctorDef.Body, env)
 			if err != nil {
 				return nil, err
 			}
+			// An explicit object return from a constructor replaces `this`; a
+			// primitive (or undefined) return is ignored.
+			if obj, ok := ret.(*Object); ok {
+				result = obj
+			}
 		} else if cd.superCtor != nil {
 			// Default derived constructor behaves as `constructor(...args) {
-			// super(...args); }`: construct the parent, fold its own
-			// properties onto self, then initialize this class's fields.
-			if err := i.invokeSuperOnto(ctx, self, cd.superCtor, args); err != nil {
+			// super(...args); }`: construct the parent, fold its own properties
+			// onto self, then initialize this class's private elements and fields.
+			if err := i.invokeSuperOnto(ctx, self, cd.superCtor, args, newTarget); err != nil {
+				return nil, err
+			}
+			env.superInit.called = true
+			if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
 				return nil, err
 			}
 			if err := i.initInstanceFields(ctx, self, cd, env); err != nil {
 				return nil, err
 			}
 		}
-		return self, nil
+		return result, nil
 	}
 
 	fnObj.fn = &functionData{
@@ -184,6 +227,9 @@ func (i *Interpreter) fieldInitThunk(cd *classData, self *Object) *Object {
 		env := NewEnvironment(cd.env, true)
 		env.setThis(self)
 		env.homeObj = cd.proto
+		if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
+			return Undef, err
+		}
 		return Undef, i.initInstanceFields(ctx, self, cd, env)
 	})
 }
@@ -204,6 +250,10 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 			if err != nil {
 				return err
 			}
+		}
+		if _, ok := m.Key.(*ast.PrivateIdent); ok {
+			self.definePrivate(key.Str, &Property{Value: v, Writable: true})
+			continue
 		}
 		self.writeData(key, v)
 	}
@@ -226,6 +276,10 @@ func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.
 			return err
 		}
 	}
+	if _, ok := m.Key.(*ast.PrivateIdent); ok {
+		ctor.definePrivate(key.Str, &Property{Value: v, Writable: true})
+		return nil
+	}
 	ctor.writeData(key, v)
 	return nil
 }
@@ -247,6 +301,50 @@ func (i *Interpreter) installClassMethod(ctx context.Context, target, home *Obje
 		i.mergeAccessor(target, key, nil, fn)
 	default:
 		target.defineOwn(key, &Property{Value: fn, Writable: true, Enumerable: false, Configurable: true})
+	}
+	return nil
+}
+
+// installPrivateMember installs a private method or private accessor into the
+// target object's private storage, with home as its [[HomeObject]].
+func (i *Interpreter) installPrivateMember(ctx context.Context, target, home *Object, m *ast.ClassMember, classEnv *Environment) error {
+	priv, ok := m.Key.(*ast.PrivateIdent)
+	if !ok {
+		return i.throwError(ctx, "SyntaxError", "invalid private member")
+	}
+	name := priv.Name
+	fnExpr := m.Value.(*ast.FuncExpr)
+	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
+	fn.SetHidden("name", String(name))
+	switch m.Kind {
+	case ast.PropGet:
+		p, ok := target.getPrivate(name)
+		if !ok || !p.Accessor {
+			p = &Property{Accessor: true}
+			target.definePrivate(name, p)
+		}
+		p.Get = fn
+	case ast.PropSet:
+		p, ok := target.getPrivate(name)
+		if !ok || !p.Accessor {
+			p = &Property{Accessor: true}
+			target.definePrivate(name, p)
+		}
+		p.Set = fn
+	default:
+		// A private method is non-writable, so assigning to it throws.
+		target.definePrivate(name, &Property{Value: fn, Writable: false})
+	}
+	return nil
+}
+
+// installInstancePrivateMethods installs the class's per-instance private
+// methods and accessors onto self's private storage.
+func (i *Interpreter) installInstancePrivateMethods(ctx context.Context, self *Object, cd *classData) error {
+	for _, m := range cd.privateMethods {
+		if err := i.installPrivateMember(ctx, self, cd.proto, m, cd.env); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -317,12 +415,26 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 	thisVal, _ := env.thisBinding()
 	self, _ := thisVal.(*Object)
 	fieldInit := env.lookup("%fieldinit%")
+	newTarget := env.newTarget()
+	// The super-init state lives on the derived constructor's `this` scope.
+	initState := (*superInitState)(nil)
+	if ts := env.thisScope(); ts != nil {
+		initState = ts.superInit
+	}
 
 	caller := i.newNativeFunc("super", 0, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		if err := i.invokeSuperOnto(ctx, self, superCtor, args); err != nil {
+		// super() may be called at most once in a derived constructor.
+		if initState != nil && initState.called {
+			return nil, i.throwError(ctx, "ReferenceError", "Super constructor may only be called once")
+		}
+		if err := i.invokeSuperOnto(ctx, self, superCtor, args, newTarget); err != nil {
 			return nil, err
 		}
-		// Initialize this class's instance fields after super returns.
+		if initState != nil {
+			initState.called = true
+		}
+		// Initialize this class's private elements and instance fields after
+		// super returns.
 		if fieldInit != nil {
 			if fn, ok := fieldInit.value.(*Object); ok {
 				if _, err := fn.fn.call(ctx, self, nil); err != nil {
@@ -339,8 +451,11 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 // object's own properties onto self. gojs uses a single-object instance model,
 // so a derived instance is one object; super() populates it with the fields the
 // parent constructor would have set.
-func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCtor *Object, args []Value) error {
-	result, err := superCtor.fn.construct(ctx, superCtor, args)
+func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCtor *Object, args []Value, newTarget Value) error {
+	if newTarget == nil {
+		newTarget = superCtor
+	}
+	result, err := superCtor.fn.construct(ctx, newTarget, args)
 	if err != nil {
 		return err
 	}
@@ -365,6 +480,25 @@ func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCt
 		if key.IsSymbol() {
 			self.defineOwn(key, p)
 		}
+	}
+	// Fold the parent's private brand onto self so inherited methods can access
+	// the base class's private elements through the single derived instance.
+	for name, p := range parentObj.private {
+		self.definePrivate(name, p)
+	}
+	// Carry over internal slots the parent set up (Map/Set backing storage,
+	// boxed primitives, etc.) so built-in subclassing works on the instance.
+	for k, v := range parentObj.internal {
+		if self.internal == nil {
+			self.internal = make(map[string]any)
+		}
+		self.internal[k] = v
+	}
+	if parentObj.primitive != nil {
+		self.primitive = parentObj.primitive
+	}
+	if parentObj.class != "Object" && self.class == "Object" {
+		self.class = parentObj.class
 	}
 	return nil
 }
