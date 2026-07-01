@@ -253,6 +253,19 @@ func runMode(path, src string, m Meta, mode string) Result {
 		return res
 	}
 
+	// Render a readable reason for a thrown value, running its toString so that
+	// Test262Error (and other custom errors) report their message rather than
+	// "[object Object]".
+	describe := func(err error) string {
+		if v, ok := interp.ThrownValue(err); ok {
+			if s, e := vm.ToString(v); e == nil && s != "" {
+				return s
+			}
+			return interp.BriefValue(v)
+		}
+		return err.Error()
+	}
+
 	if m.IsNegative {
 		if runErr == nil {
 			res.Outcome = Fail
@@ -263,24 +276,16 @@ func runMode(path, src string, m Meta, mode string) Result {
 			res.Outcome = Pass
 		} else {
 			res.Outcome = Fail
-			res.Reason = "wanted " + m.NegType + ", got " + errString(runErr)
+			res.Reason = "wanted " + m.NegType + ", got " + describe(runErr)
 		}
 		return res
 	}
 
 	if runErr != nil {
 		res.Outcome = Fail
-		res.Reason = errString(runErr)
+		res.Reason = describe(runErr)
 		return res
 	}
 	res.Outcome = Pass
 	return res
-}
-
-// errString renders an error (thrown value or host error) briefly.
-func errString(err error) string {
-	if v, ok := interp.ThrownValue(err); ok {
-		return interp.BriefValue(v)
-	}
-	return err.Error()
 }

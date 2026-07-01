@@ -20,7 +20,9 @@ func (i *Interpreter) bindPattern(ctx context.Context, target ast.Expr, value Va
 		return nil
 	case *ast.AssignPattern:
 		if IsUndefined(value) {
-			def, err := i.evalExpr(ctx, t.Default, env)
+			// Infer the name for an anonymous default (e.g. `{f = () => {}}`
+			// gives the function the name "f").
+			def, err := i.evalExprNamed(ctx, t.Default, env, bindingName(t.Target))
 			if err != nil {
 				return err
 			}
@@ -32,7 +34,7 @@ func (i *Interpreter) bindPattern(ctx context.Context, target ast.Expr, value Va
 		// parses as an assignment expression; treat `=` as a defaulting binding.
 		if t.Op == token.ASSIGN {
 			if IsUndefined(value) {
-				def, err := i.evalExpr(ctx, t.Value, env)
+				def, err := i.evalExprNamed(ctx, t.Value, env, bindingName(t.Target))
 				if err != nil {
 					return err
 				}

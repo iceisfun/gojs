@@ -62,7 +62,13 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.ArrowFunc:
 		return i.evalArrow(ctx, e, env, name), nil
 	case *ast.ClassExpr:
-		return i.evalClass(ctx, e.Def, env)
+		v, err := i.evalClass(ctx, e.Def, env)
+		if err == nil && e.Def.Name == nil && name != "" {
+			if o, ok := v.(*Object); ok {
+				o.SetHidden("name", String(name))
+			}
+		}
+		return v, err
 	case *ast.UnaryExpr:
 		return i.evalUnary(ctx, e, env)
 	case *ast.UpdateExpr:
