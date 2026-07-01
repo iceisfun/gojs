@@ -64,7 +64,15 @@ func (i *Interpreter) initFunction() {
 			boundArgs = append(boundArgs, args[1:]...)
 		}
 		name := "bound " + fn.fn.name
-		bound := i.newNativeFunc(name, 0, func(ctx context.Context, _ Value, callArgs []Value) (Value, error) {
+		// The bound function's length is the target's length minus the number of
+		// pre-bound arguments, floored at zero (per Function.prototype.bind).
+		boundLen := 0
+		if lenV, err := fn.GetStr(ctx, "length"); err == nil {
+			if n := int(ToInteger(ToNumber(lenV))) - len(boundArgs); n > 0 {
+				boundLen = n
+			}
+		}
+		bound := i.newNativeFunc(name, boundLen, func(ctx context.Context, _ Value, callArgs []Value) (Value, error) {
 			return fn.fn.call(ctx, boundThis, append(append([]Value{}, boundArgs...), callArgs...))
 		})
 		// A bound constructor stays constructable, ignoring boundThis on `new`.

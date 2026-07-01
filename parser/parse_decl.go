@@ -127,11 +127,13 @@ func (p *parser) tryParseArrow() ast.Expr {
 	}
 	p.expect(token.ARROW)
 	if p.at(token.LBRACE) {
-		arrow.Body = p.parseBlock()
+		arrow.Body, _ = p.parseFunctionBody()
 	} else {
 		arrow.Expression = true
 		arrow.Body = p.parseAssignExpr()
 	}
+	// Arrow functions never permit duplicate parameter names.
+	p.checkParamDuplicates(arrow.Params, true)
 	return arrow
 }
 
@@ -161,6 +163,74 @@ func (p *parser) matchParen(openIdx int) int {
 // ---------------------------------------------------------------------------
 // Parameter lists and binding patterns
 // ---------------------------------------------------------------------------
+
+// simpleParamList reports whether every parameter is a plain identifier.
+func simpleParamList(params []ast.Expr) bool {
+	for _, p := range params {
+		if _, ok := p.(*ast.Ident); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// paramBoundNames collects every identifier bound by a formal parameter list,
+// recursing through defaults, rest elements, and destructuring patterns.
+func paramBoundNames(params []ast.Expr) []string {
+	var out []string
+	var walk func(ast.Expr)
+	walk = func(e ast.Expr) {
+		switch t := e.(type) {
+		case *ast.Ident:
+			out = append(out, t.Name)
+		case *ast.RestElement:
+			walk(t.Target)
+		case *ast.AssignPattern:
+			walk(t.Target)
+		case *ast.SpreadElement:
+			walk(t.Argument)
+		case *ast.ArrayLit:
+			for _, el := range t.Elements {
+				if el != nil {
+					walk(el)
+				}
+			}
+		case *ast.ObjectLit:
+			for _, pr := range t.Properties {
+				if pr.Value != nil {
+					walk(pr.Value)
+				} else if pr.Key != nil {
+					walk(pr.Key)
+				}
+			}
+		}
+	}
+	for _, p := range params {
+		walk(p)
+	}
+	return out
+}
+
+// checkParamDuplicates enforces the early error for duplicate parameter names.
+// Duplicates are permitted only in a sloppy-mode function whose parameter list
+// is simple (identifiers only); a strict-mode function or any non-simple list
+// (defaults, rest, or destructuring) makes a repeated binding a SyntaxError.
+func (p *parser) checkParamDuplicates(params []ast.Expr, strict bool) {
+	if p.err != nil {
+		return
+	}
+	if !strict && simpleParamList(params) {
+		return
+	}
+	seen := map[string]bool{}
+	for _, name := range paramBoundNames(params) {
+		if seen[name] {
+			p.errorf("duplicate parameter name '%s' not allowed in this context", name)
+			return
+		}
+		seen[name] = true
+	}
+}
 
 // parseParams parses a parenthesized formal parameter list.
 func (p *parser) parseParams() []ast.Expr {
@@ -239,8 +309,9 @@ func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
 	}
 	def.Params = p.parseParams()
 	p.inFunction++
-	def.Body = p.parseBlock()
+	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
+	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
 }
 
@@ -384,8 +455,10 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	def := &ast.FuncDef{Async: async, Generator: generator}
 	def.Params = p.parseParams()
 	p.inFunction++
-	def.Body = p.parseBlock()
+	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
+	// A concise method's parameter list must never contain duplicates.
+	p.checkParamDuplicates(def.Params, true)
 	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
 }
 

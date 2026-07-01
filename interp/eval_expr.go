@@ -306,6 +306,11 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 			}
 			fnExpr := prop.Value.(*ast.FuncExpr)
 			fn := i.makeFunction(fnExpr.Def, env, kindNormal, obj)
+			prefix := "get"
+			if prop.Kind == ast.PropSet {
+				prefix = "set"
+			}
+			i.setFuncName(fn, key, prefix)
 			i.defineAccessorFromProp(obj, key, prop.Kind, fn)
 			continue
 		}
@@ -317,7 +322,9 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 		var val Value
 		if prop.Method {
 			fnExpr := prop.Value.(*ast.FuncExpr)
-			val = i.makeFunction(fnExpr.Def, env, kindNormal, obj)
+			m := i.makeFunction(fnExpr.Def, env, kindNormal, obj)
+			i.setFuncName(m, key, "")
+			val = m
 		} else {
 			val, err = i.evalExprNamed(ctx, prop.Value, env, key.Str)
 			if err != nil {

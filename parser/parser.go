@@ -55,6 +55,10 @@ type parser struct {
 	// classDepth is the class-body nesting depth; private names (#x) are only
 	// valid where it is > 0.
 	classDepth int
+	// strict tracks whether the code currently being parsed is in strict mode
+	// (inside a strict script/module or a function with a "use strict"
+	// prologue). It propagates lexically into nested functions.
+	strict bool
 }
 
 // Parse parses source into a [*ast.Program]. sourceName is used in error
@@ -204,6 +208,8 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 		}
 		if es, ok := stmt.(*ast.ExprStmt); ok && es.Directive == "use strict" {
 			prog.Strict = true
+			// A strict script propagates into every nested function.
+			p.strict = true
 		}
 		prog.Body = append(prog.Body, stmt)
 	}

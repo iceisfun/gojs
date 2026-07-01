@@ -100,6 +100,42 @@ func (p *parser) parseBlock() *ast.BlockStmt {
 	return blk
 }
 
+// parseFunctionBody parses a function body block, scanning its directive
+// prologue for "use strict". It reports whether the body runs in strict mode
+// (its own directive or inherited from strict-mode enclosing code) and leaves
+// p.strict set for that mode while the body (and its nested functions) parse,
+// restoring the caller's mode on return.
+func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
+	outer := p.strict
+	defer func() { p.strict = outer }()
+
+	lb := p.expect(token.LBRACE)
+	blk := &ast.BlockStmt{Lbrace: lb.Pos}
+	inPrologue := true
+	for !p.at(token.RBRACE) && !p.at(token.EOF) && p.err == nil {
+		stmt := p.parseStmt()
+		if inPrologue {
+			// The directive prologue is a leading run of string-literal
+			// expression statements; the first non-string statement ends it.
+			if es, ok := stmt.(*ast.ExprStmt); ok {
+				if _, isStr := es.X.(*ast.StringLit); isStr {
+					if es.Directive == "use strict" {
+						p.strict = true
+					}
+				} else {
+					inPrologue = false
+				}
+			} else {
+				inPrologue = false
+			}
+		}
+		blk.Body = append(blk.Body, stmt)
+	}
+	rb := p.expect(token.RBRACE)
+	blk.Rbrace = rb.Pos
+	return blk, p.strict
+}
+
 // parseExprStmt parses an expression statement, recognizing directive-prologue
 // string literals (e.g. "use strict").
 func (p *parser) parseExprStmt() ast.Stmt {

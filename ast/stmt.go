@@ -19,6 +19,10 @@ type FuncDef struct {
 	Body      *BlockStmt
 	Async     bool
 	Generator bool
+	// Strict reports whether this function's body runs in strict mode, either
+	// because it carries its own "use strict" directive prologue or because it
+	// is lexically nested in strict code (a strict script, module, or function).
+	Strict bool
 }
 
 // ClassDef holds the shared shape of a class declaration or expression.

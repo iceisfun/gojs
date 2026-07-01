@@ -29,6 +29,10 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 	fnObj := NewObject(i.functionProto)
 	fnObj.class = "Function"
 
+	// A function is strict if its body carries "use strict" or it is lexically
+	// nested in strict code; modules force strict globally.
+	strict := def.Strict || i.forceStrict()
+
 	call := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if err := i.checkContext(); err != nil {
 			return nil, err
@@ -44,26 +48,25 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
 		if def.Generator && kind == kindNormal {
-			return i.makeGenerator(def, closure, homeObj, this, args)
+			return i.makeGenerator(def, closure, homeObj, i.bindThisValue(this, strict), args)
 		}
 		// An async function returns a promise driven through the microtask
 		// queue (see asyncRun).
 		if def.Async {
 			t := this
-			if kind == kindNormal && IsNullish(t) {
-				t = i.global
+			if kind == kindNormal {
+				t = i.bindThisValue(this, strict)
 			}
 			return i.asyncRun(def, closure, homeObj, t, args, kind == kindArrow)
 		}
 		env := NewEnvironment(closure, true)
 		if kind == kindNormal {
-			// Non-strict `this` substitution: a normal function called with no
-			// (or a nullish) receiver sees the global object as `this`.
-			// (Methods and constructors pass a concrete receiver, so this only
-			// affects plain calls like a detached `fn()`.)
-			if IsNullish(this) {
-				this = i.global
-			}
+			// OrdinaryCallBindThis: in strict mode `this` is passed through
+			// unchanged (undefined stays undefined); in sloppy mode a nullish
+			// receiver becomes the global object and a primitive receiver is
+			// boxed to its wrapper object. A [[Construct]] call already supplies
+			// the fresh object, which bindThisValue leaves untouched.
+			this = i.bindThisValue(this, strict)
 			env.setThis(this)
 			if homeObj != nil {
 				env.homeObj = homeObj
@@ -74,7 +77,6 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			} else {
 				env.newTgt = Undef
 			}
-			env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 		}
 		// A named function expression can refer to itself by name.
 		if def.Name != nil && kind == kindNormal {
@@ -84,6 +86,14 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		}
 		if err := i.bindParams(ctx, def.Params, args, env); err != nil {
 			return nil, err
+		}
+		// The arguments object is created after the parameters are bound so a
+		// mapped arguments object can alias their bindings. A formal parameter
+		// (or lexical binding) literally named "arguments" shadows it.
+		if kind == kindNormal {
+			if _, exists := env.vars["arguments"]; !exists {
+				env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+			}
 		}
 		return i.runFunctionBody(ctx, def.Body, env)
 	}
@@ -103,6 +113,52 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		fnObj.fn.ctor = true
 	}
 	return fnObj
+}
+
+// setFuncName gives an (anonymous) function object its inferred name, updating
+// both the internal slot and the observable "name" own property. prefix is
+// "get"/"set" for accessors and empty otherwise. It is a no-op for a function
+// that already carries a name.
+func (i *Interpreter) setFuncName(fn *Object, key PropertyKey, prefix string) {
+	if fn == nil || fn.fn == nil || fn.fn.name != "" {
+		return
+	}
+	var base string
+	if key.IsSymbol() {
+		if key.Sym.Desc != "" {
+			base = "[" + key.Sym.Desc + "]"
+		}
+	} else {
+		base = key.Str
+	}
+	name := base
+	if prefix != "" {
+		name = prefix + " " + base
+	}
+	fn.fn.name = name
+	fn.SetHidden("name", String(name))
+}
+
+// bindThisValue implements the OrdinaryCallBindThis coercion for a normal
+// (non-arrow) function call. In strict mode the receiver is used verbatim. In
+// sloppy mode a nullish receiver becomes the global object and any primitive is
+// boxed to its wrapper object (so `typeof this` is "object"). Objects (including
+// the fresh instance of a [[Construct]] call) pass through unchanged.
+func (i *Interpreter) bindThisValue(this Value, strict bool) Value {
+	if strict {
+		return this
+	}
+	if IsNullish(this) {
+		return i.global
+	}
+	if _, ok := this.(*Object); ok {
+		return this
+	}
+	obj, err := i.ToObject(i.ctx, this)
+	if err != nil {
+		return this
+	}
+	return obj
 }
 
 // makeConstruct builds the [[Construct]] behavior for an ordinary function:
@@ -162,7 +218,15 @@ func (i *Interpreter) bindParams(ctx context.Context, params []ast.Expr, args []
 	return nil
 }
 
-// makeArguments builds a simple (array-like) arguments object.
+// makeArguments builds the arguments object for a function invocation: an
+// array-like snapshot of the actual arguments.
+//
+// gojs backs the arguments object with an Array so the ubiquitous generic
+// idioms (Array.prototype.slice.call(arguments), for-of, spread) work directly.
+// It does NOT implement the sloppy-mode "mapped" aliasing between arguments[i]
+// and the corresponding named parameter (writes to one do not appear in the
+// other). See wontfix/function-code.md for the rationale and plan. Strict-mode
+// (unmapped) behavior — where no such aliasing exists — is therefore exact.
 func (i *Interpreter) makeArguments(args []Value) *Object {
 	o := i.newArray(append([]Value{}, args...))
 	o.class = "Arguments"

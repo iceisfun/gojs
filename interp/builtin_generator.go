@@ -75,11 +75,17 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 		if homeObj != nil {
 			env.homeObj = homeObj
 		}
-		env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 	}
 	env.gen = gs
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
 		return nil, nil, err
+	}
+	// Establish the arguments object after binding parameters (so a mapped
+	// arguments object can alias them); a parameter named "arguments" shadows it.
+	if !arrow {
+		if _, exists := env.vars["arguments"]; !exists {
+			env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+		}
 	}
 
 	started := false
