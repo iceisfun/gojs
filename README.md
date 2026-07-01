@@ -238,7 +238,7 @@ Implemented intrinsics and globals (see [Limitations](#limitations) for gaps):
 | `String`      | full method set incl. `match`/`matchAll`/`replace`/`replaceAll`/`split` (regex-aware), templates, `padStart`/`padEnd` |
 | `Number`/`Math` | numeric methods, `toFixed`/`toPrecision`/`toString(radix)`, the `Math.*` surface |
 | `JSON`        | `parse`/`stringify` with replacer (function + array), reviver, `toJSON`, cycle detection |
-| `RegExp`      | RE2-backed `exec`/`test`, flags, named groups (see limits)                  |
+| `RegExp`      | RE2-backed `exec`/`test`, flags, capture groups (no backrefs/lookaround/named groups — see [Limitations](#limitations)) |
 | Collections   | `Map`, `Set`, `WeakMap`, `WeakSet`, and `Promise` (with the microtask queue) |
 | `Symbol`      | well-known symbols (`iterator`, `asyncIterator`, `hasInstance`, …)          |
 | Errors        | full `Error` hierarchy, subclassable                                        |
@@ -337,8 +337,8 @@ This is a first pass. Notable gaps and approximations:
 - **Modules** (`import`/`export`) are not yet executed.
 - **`eval` / `Function(...)`** dynamic code is intentionally unsupported
   (sandbox posture).
-- **`RegExp`** is backed by RE2, so backreferences and lookaround are not
-  supported.
+- **`RegExp`** is backed by RE2, so backreferences, lookaround, and named
+  capture groups (`(?<name>…)` / `match.groups`) are not supported.
 - No `Proxy`/`Reflect`, `TypedArray`/`ArrayBuffer`, or `Intl` yet.
 
 ## License
