@@ -27,6 +27,22 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 	// methods (for recursion) and so `extends` can be evaluated.
 	classEnv := NewEnvironment(env, false)
 
+	// Mint a fresh PrivateName identity for each distinct private element this
+	// class declares. Methods, accessors, and field initializers defined in this
+	// evaluation capture classEnv, so they resolve #names to these identities;
+	// a separate evaluation of the same class mints different identities, so
+	// their instances fail one another's brand checks.
+	for _, m := range def.Members {
+		if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+			if classEnv.privNames == nil {
+				classEnv.privNames = make(map[string]*PrivateName)
+			}
+			if _, exists := classEnv.privNames[priv.Name]; !exists {
+				classEnv.privNames[priv.Name] = &PrivateName{desc: priv.Name}
+			}
+		}
+	}
+
 	var superCtor *Object
 	protoParent := i.objectProto
 	if def.SuperClass != nil {
@@ -257,8 +273,8 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 				return err
 			}
 		}
-		if _, ok := m.Key.(*ast.PrivateIdent); ok {
-			self.definePrivate(key.Str, &Property{Value: v, Writable: true})
+		if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+			self.definePrivate(cd.env.resolvePrivate(priv.Name), &Property{Value: v, Writable: true})
 			continue
 		}
 		self.writeData(key, v)
@@ -282,8 +298,8 @@ func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.
 			return err
 		}
 	}
-	if _, ok := m.Key.(*ast.PrivateIdent); ok {
-		ctor.definePrivate(key.Str, &Property{Value: v, Writable: true})
+	if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+		ctor.definePrivate(classEnv.resolvePrivate(priv.Name), &Property{Value: v, Writable: true})
 		return nil
 	}
 	ctor.writeData(key, v)
@@ -319,27 +335,28 @@ func (i *Interpreter) installPrivateMember(ctx context.Context, target, home *Ob
 		return i.throwError(ctx, "SyntaxError", "invalid private member")
 	}
 	name := priv.Name
+	pn := classEnv.resolvePrivate(name)
 	fnExpr := m.Value.(*ast.FuncExpr)
 	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
 	fn.SetHidden("name", String(name))
 	switch m.Kind {
 	case ast.PropGet:
-		p, ok := target.getPrivate(name)
+		p, ok := target.getPrivate(pn)
 		if !ok || !p.Accessor {
 			p = &Property{Accessor: true}
-			target.definePrivate(name, p)
+			target.definePrivate(pn, p)
 		}
 		p.Get = fn
 	case ast.PropSet:
-		p, ok := target.getPrivate(name)
+		p, ok := target.getPrivate(pn)
 		if !ok || !p.Accessor {
 			p = &Property{Accessor: true}
-			target.definePrivate(name, p)
+			target.definePrivate(pn, p)
 		}
 		p.Set = fn
 	default:
 		// A private method is non-writable, so assigning to it throws.
-		target.definePrivate(name, &Property{Value: fn, Writable: false})
+		target.definePrivate(pn, &Property{Value: fn, Writable: false})
 	}
 	return nil
 }
@@ -488,9 +505,11 @@ func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCt
 		}
 	}
 	// Fold the parent's private brand onto self so inherited methods can access
-	// the base class's private elements through the single derived instance.
-	for name, p := range parentObj.private {
-		self.definePrivate(name, p)
+	// the base class's private elements through the single derived instance. The
+	// keys are the parent evaluation's PrivateName identities, so the parent's
+	// methods (which resolve to those same identities) still find them.
+	for pn, p := range parentObj.private {
+		self.definePrivate(pn, p)
 	}
 	// Carry over internal slots the parent set up (Map/Set backing storage,
 	// boxed primitives, etc.) so built-in subclassing works on the instance.

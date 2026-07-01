@@ -130,7 +130,7 @@ func (i *Interpreter) evalMember(ctx context.Context, e *ast.MemberExpr, env *En
 	// Private member access (#name) resolves against per-object private storage
 	// with a brand check, not the ordinary property chain.
 	if priv, ok := e.Property.(*ast.PrivateIdent); ok && !e.Computed {
-		val, err := i.getPrivateMember(ctx, base, priv.Name)
+		val, err := i.getPrivateMember(ctx, base, env.resolvePrivate(priv.Name), priv.Name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -373,7 +373,7 @@ func (i *Interpreter) assignTo(ctx context.Context, target ast.Expr, value Value
 		// Private member assignment (#name) routes to private storage with a
 		// brand check.
 		if priv, ok := t.Property.(*ast.PrivateIdent); ok && !t.Computed {
-			return i.setPrivateMember(ctx, base, priv.Name, value)
+			return i.setPrivateMember(ctx, base, env.resolvePrivate(priv.Name), priv.Name, value)
 		}
 		key, err := i.memberKey(ctx, t, env)
 		if err != nil {

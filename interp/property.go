@@ -126,13 +126,13 @@ func (o *Object) Delete(key PropertyKey) bool {
 // getPrivateMember reads a private class element (#name) off base, enforcing the
 // brand check: base must be an object that carries the private name, or a
 // TypeError is thrown. Private getters are invoked with base as the receiver.
-func (i *Interpreter) getPrivateMember(ctx context.Context, base Value, name string) (Value, error) {
+func (i *Interpreter) getPrivateMember(ctx context.Context, base Value, pn *PrivateName, name string) (Value, error) {
 	obj, ok := base.(*Object)
-	if !ok {
+	if !ok || pn == nil {
 		return nil, i.throwError(ctx, "TypeError",
 			"Cannot read private member "+name+" from an object whose class did not declare it")
 	}
-	p, ok := obj.getPrivate(name)
+	p, ok := obj.getPrivate(pn)
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError",
 			"Cannot read private member "+name+" from an object whose class did not declare it")
@@ -150,13 +150,13 @@ func (i *Interpreter) getPrivateMember(ctx context.Context, base Value, name str
 // setPrivateMember writes a private class element (#name) on base, enforcing the
 // brand check. Assigning to a private method throws, and a private setter is
 // invoked with base as the receiver.
-func (i *Interpreter) setPrivateMember(ctx context.Context, base Value, name string, v Value) error {
+func (i *Interpreter) setPrivateMember(ctx context.Context, base Value, pn *PrivateName, name string, v Value) error {
 	obj, ok := base.(*Object)
-	if !ok {
+	if !ok || pn == nil {
 		return i.throwError(ctx, "TypeError",
 			"Cannot write private member "+name+" to an object whose class did not declare it")
 	}
-	p, ok := obj.getPrivate(name)
+	p, ok := obj.getPrivate(pn)
 	if !ok {
 		return i.throwError(ctx, "TypeError",
 			"Cannot write private member "+name+" to an object whose class did not declare it")

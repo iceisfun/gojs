@@ -115,34 +115,47 @@ type Object struct {
 	internal  map[string]any // misc internal slots (RegExp source, Map data, ...)
 
 	// private holds ECMAScript private class elements (#fields, #methods, and
-	// private accessors), keyed by their "#name". These are not ordinary
+	// private accessors), keyed by PrivateName identity. These are not ordinary
 	// properties: they are invisible to property enumeration, [[Get]]/[[Set]],
 	// hasOwnProperty, and JSON, and are guarded by a brand check on access.
-	private map[string]*Property
+	private map[*PrivateName]*Property
 }
 
-// getPrivate returns the private-element descriptor for name (e.g. "#x"), or
-// (nil, false) when the object does not carry that private brand.
-func (o *Object) getPrivate(name string) (*Property, bool) {
+// PrivateName is the unique identity of a private class element (#x). Each
+// evaluation of a class body mints fresh PrivateNames for the names it declares,
+// so the same textual name produced by two evaluations of the same class are
+// distinct identities that fail each other's brand checks (ECMA-262 uses a
+// PrivateName value for exactly this). desc is the "#name" text, kept only for
+// diagnostics.
+type PrivateName struct {
+	desc string
+}
+
+// String returns the textual private name (e.g. "#x").
+func (p *PrivateName) String() string { return p.desc }
+
+// getPrivate returns the descriptor for the private element pn, or (nil, false)
+// when the object does not carry that private brand.
+func (o *Object) getPrivate(pn *PrivateName) (*Property, bool) {
 	if o.private == nil {
 		return nil, false
 	}
-	p, ok := o.private[name]
+	p, ok := o.private[pn]
 	return p, ok
 }
 
-// hasPrivate reports whether the object carries the private brand name.
-func (o *Object) hasPrivate(name string) bool {
-	_, ok := o.getPrivate(name)
+// hasPrivate reports whether the object carries the private element pn.
+func (o *Object) hasPrivate(pn *PrivateName) bool {
+	_, ok := o.getPrivate(pn)
 	return ok
 }
 
 // definePrivate installs (or replaces) a private element descriptor.
-func (o *Object) definePrivate(name string, p *Property) {
+func (o *Object) definePrivate(pn *PrivateName, p *Property) {
 	if o.private == nil {
-		o.private = make(map[string]*Property)
+		o.private = make(map[*PrivateName]*Property)
 	}
-	o.private[name] = p
+	o.private[pn] = p
 }
 
 // NewObject creates a bare object with the given prototype (which may be nil).

@@ -24,6 +24,26 @@ type Environment struct {
 	// `this`; reading `this` before super() (superInit.called == false) is a
 	// ReferenceError, and a second super() call is likewise rejected.
 	superInit *superInitState
+
+	// privNames is the class-body private environment: the PrivateName identity
+	// for each private element (#x) declared in the class whose scope this is.
+	// It is set only on a class's scope; a reference resolves by walking the
+	// enclosing scopes, so nested classes see their outer classes' privates.
+	privNames map[string]*PrivateName
+}
+
+// resolvePrivate returns the PrivateName identity that a textual private name
+// (#x) refers to in this scope, walking enclosing class scopes, or nil when no
+// enclosing class declares it (a case the parser already rejects).
+func (e *Environment) resolvePrivate(name string) *PrivateName {
+	for env := e; env != nil; env = env.parent {
+		if env.privNames != nil {
+			if pn, ok := env.privNames[name]; ok {
+				return pn
+			}
+		}
+	}
+	return nil
 }
 
 // superInitState records whether a derived constructor has invoked super().
