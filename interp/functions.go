@@ -12,8 +12,10 @@ func (i *Interpreter) newNativeFunc(name string, length int, fn CallFn) *Object 
 	o := NewObject(i.functionProto)
 	o.class = "Function"
 	o.fn = &functionData{call: fn, name: name, length: length}
-	o.SetHidden("length", Number(float64(length)))
-	o.SetHidden("name", String(name))
+	// Per ECMA-262 §20.2.4, a function's "length" and "name" are
+	// non-writable, non-enumerable, and configurable.
+	o.defineOwn(StrKey("length"), &Property{Value: Number(float64(length)), Writable: false, Enumerable: false, Configurable: true})
+	o.defineOwn(StrKey("name"), &Property{Value: String(name), Writable: false, Enumerable: false, Configurable: true})
 	return o
 }
 
