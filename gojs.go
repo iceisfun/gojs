@@ -45,6 +45,18 @@ type Limits = interp.Limits
 // WithLimits sets resource limits at construction.
 var WithLimits = interp.WithLimits
 
+// ModuleProvider is the interface a host implements to intercept require() and
+// serve module source (e.g. from game data files). Alias for
+// [interp.ModuleProvider].
+type ModuleProvider = interp.ModuleProvider
+
+// Module provider option and default implementations, re-exported.
+var (
+	WithModuleProvider   = interp.WithModuleProvider
+	NewMapModuleProvider = interp.NewMapModuleProvider
+	NewDirModuleProvider = interp.NewDirModuleProvider
+)
+
 // Value type aliases for building/inspecting JavaScript values from Go.
 type (
 	// Object is a JavaScript object (also arrays and functions).

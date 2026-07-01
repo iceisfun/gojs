@@ -54,6 +54,11 @@ clock, or schedule timers.
 | `PrintProvider`   | all `console.*` output                     | `NewDefaultPrintProvider()` |
 | `TimeProvider`    | `Date` / `performance.now` clock source    | `NewDefaultTimeProvider()`  |
 | `TimerProvider`   | `setTimeout` / `setInterval` scheduling    | `NewDefaultTimerProvider()` |
+| `ModuleProvider`  | `require(specifier)` module loading        | `NewMapModuleProvider`, `NewDirModuleProvider` |
+
+Resource use is bounded with `WithLimits(Limits{MaxCallDepth, MaxSteps})`:
+recursion raises a catchable `RangeError`, and the step budget is an
+uncatchable abort that stops runaway loops. See the `limits` example.
 
 Each provider is a small Go interface, so you can supply your own — route
 `console.*` through your logger, present a fixed clock for deterministic tests,
@@ -190,6 +195,8 @@ Runnable programs live under [`examples/`](examples), each with its own README:
 | [`expose_go`](examples/expose_go)       | Expose Go functions and data to JavaScript              |
 | [`call_js`](examples/call_js)           | Call script functions from Go                           |
 | [`providers`](examples/providers)       | Custom `PrintProvider` + timers on the event loop       |
+| [`modules`](examples/modules)           | Intercept `require()` with a `ModuleProvider`           |
+| [`limits`](examples/limits)             | Bound recursion and CPU with `Limits`                   |
 | [`sandbox`](examples/sandbox)           | Hardened sandbox: no I/O, no eval, timeout on runaway    |
 
 ```bash

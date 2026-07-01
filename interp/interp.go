@@ -31,6 +31,10 @@ type Interpreter struct {
 	// security holds opt-in hardening switches (see Security / WithSecurity).
 	security Security
 
+	// moduleProvider gates require(); modules caches evaluated modules by id.
+	moduleProvider ModuleProvider
+	modules        map[string]*Object
+
 	// rng is the per-interpreter PRNG backing Math.random.
 	rng *prng
 
