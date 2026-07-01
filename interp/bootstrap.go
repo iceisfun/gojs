@@ -57,6 +57,7 @@ func (i *Interpreter) bootstrap() {
 	i.initMath()
 	i.initJSON()
 	i.initRegExp()
+	i.initCollections()
 	i.initConsole()
 	i.initGlobals()
 	i.initTimers()
