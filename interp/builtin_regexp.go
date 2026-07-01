@@ -391,6 +391,37 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 	} else {
 		arr.SetData("groups", Undef)
 	}
+
+	// The d flag adds an `indices` array of [start,end] pairs (§22.2.7.7,
+	// MakeMatchIndicesIndexPairArray), parallel to the match array, with its own
+	// named-group `.groups` object.
+	if re.Flags().HasIndices {
+		pair := func(s, e int) Value {
+			if s < 0 {
+				return Undef
+			}
+			return i.newArray([]Value{Number(float64(s)), Number(float64(e))})
+		}
+		indices := make([]Value, n)
+		for g := 0; g < n; g++ {
+			indices[g] = pair(m[2*g], m[2*g+1])
+		}
+		indicesArr := i.newArray(indices)
+		if len(names) > 0 {
+			ig := NewObject(i.objectProto)
+			for name, idx := range names {
+				if idx >= n {
+					ig.SetData(name, Undef)
+				} else {
+					ig.SetData(name, pair(m[2*idx], m[2*idx+1]))
+				}
+			}
+			indicesArr.SetData("groups", ig)
+		} else {
+			indicesArr.SetData("groups", Undef)
+		}
+		arr.SetData("indices", indicesArr)
+	}
 	return arr
 }
 
