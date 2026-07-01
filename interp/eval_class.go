@@ -143,8 +143,10 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 				return nil, err
 			}
 		} else if cd.superCtor != nil {
-			// Default derived constructor: super(...args) then fields.
-			if _, err := cd.superCtor.fn.construct(ctx, cd.superCtor, args); err != nil {
+			// Default derived constructor behaves as `constructor(...args) {
+			// super(...args); }`: construct the parent, fold its own
+			// properties onto self, then initialize this class's fields.
+			if err := i.invokeSuperOnto(ctx, self, cd.superCtor, args); err != nil {
 				return nil, err
 			}
 			if err := i.initInstanceFields(ctx, self, cd, env); err != nil {
@@ -311,20 +313,8 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 	fieldInit := env.lookup("%fieldinit%")
 
 	caller := i.newNativeFunc("super", 0, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		result, err := superCtor.fn.construct(ctx, superCtor, args)
-		if err != nil {
+		if err := i.invokeSuperOnto(ctx, self, superCtor, args); err != nil {
 			return nil, err
-		}
-		// Copy the parent's own properties onto self (single-object model).
-		if parentObj, ok := result.(*Object); ok && self != nil && parentObj != self {
-			for _, name := range parentObj.OwnKeys() {
-				if p, ok := parentObj.getOwn(StrKey(name)); ok {
-					self.defineOwn(StrKey(name), p)
-				}
-			}
-			if self.proto == nil {
-				self.proto = parentObj.proto
-			}
 		}
 		// Initialize this class's instance fields after super returns.
 		if fieldInit != nil {
@@ -337,4 +327,31 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 		return Undef, nil
 	})
 	return caller, Undef, nil
+}
+
+// invokeSuperOnto constructs the parent class with args and folds the resulting
+// object's own properties onto self. gojs uses a single-object instance model,
+// so a derived instance is one object; super() populates it with the fields the
+// parent constructor would have set.
+func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCtor *Object, args []Value) error {
+	result, err := superCtor.fn.construct(ctx, superCtor, args)
+	if err != nil {
+		return err
+	}
+	parentObj, ok := result.(*Object)
+	if !ok || self == nil || parentObj == self {
+		return nil
+	}
+	for _, name := range parentObj.OwnKeys() {
+		if p, ok := parentObj.getOwn(StrKey(name)); ok {
+			self.defineOwn(StrKey(name), p)
+		}
+	}
+	// Preserve any extra own (e.g. symbol) properties too.
+	for key, p := range parentObj.props {
+		if key.IsSymbol() {
+			self.defineOwn(key, p)
+		}
+	}
+	return nil
 }
