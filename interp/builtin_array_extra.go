@@ -109,6 +109,88 @@ func (i *Interpreter) arrayAt(ctx context.Context, this Value, args []Value) (Va
 	return o.elems[idx], nil
 }
 
+// arrayCopyWithin copies a slice of the array to another position within the
+// same array (mutating in place) and returns the array.
+func (i *Interpreter) arrayCopyWithin(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.thisArray(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	n := len(o.elems)
+	target := relIndex(argIntOr(ctx, i, args, 0, 0), n)
+	start := relIndex(argIntOr(ctx, i, args, 1, 0), n)
+	end := n
+	if !IsUndefined(arg(args, 2)) {
+		end = relIndex(argIntOr(ctx, i, args, 2, n), n)
+	}
+	// Copy the source range first so overlapping ranges behave correctly.
+	src := append([]Value(nil), o.elems[start:end]...)
+	for k := 0; k < len(src) && target+k < n; k++ {
+		o.elems[target+k] = src[k]
+	}
+	return o, nil
+}
+
+// arrayToReversed returns a reversed copy without mutating the receiver.
+func (i *Interpreter) arrayToReversed(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.thisArray(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Value, len(o.elems))
+	for k, v := range o.elems {
+		out[len(o.elems)-1-k] = v
+	}
+	return i.newArray(out), nil
+}
+
+// arrayToSorted returns a sorted copy without mutating the receiver.
+func (i *Interpreter) arrayToSorted(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.thisArray(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	copyArr := i.newArray(append([]Value(nil), o.elems...))
+	if _, err := i.arraySort(ctx, copyArr, args); err != nil {
+		return nil, err
+	}
+	return copyArr, nil
+}
+
+// arrayToSpliced returns a copy with a splice applied, leaving the receiver
+// unchanged.
+func (i *Interpreter) arrayToSpliced(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.thisArray(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	copyArr := i.newArray(append([]Value(nil), o.elems...))
+	if _, err := i.arraySplice(ctx, copyArr, args); err != nil {
+		return nil, err
+	}
+	return copyArr, nil
+}
+
+// arrayWith returns a copy with a single index replaced, throwing RangeError for
+// an out-of-bounds index.
+func (i *Interpreter) arrayWith(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.thisArray(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	n := len(o.elems)
+	idx, _ := i.argInt(ctx, args, 0)
+	if idx < 0 {
+		idx += n
+	}
+	if idx < 0 || idx >= n {
+		return nil, i.throwError(ctx, "RangeError", "Invalid index")
+	}
+	out := append([]Value(nil), o.elems...)
+	out[idx] = arg(args, 1)
+	return i.newArray(out), nil
+}
+
 // arrayLastIndexOf finds the last index of a value using strict equality,
 // searching backward from an optional fromIndex (default: last element).
 func (i *Interpreter) arrayLastIndexOf(ctx context.Context, this Value, args []Value) (Value, error) {

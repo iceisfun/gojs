@@ -347,6 +347,41 @@ func (i *Interpreter) initObject() {
 	i.defineMethod(ctor, "is", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return Bool(sameValue(arg(args, 0), arg(args, 1))), nil
 	})
+	i.defineMethod(ctor, "groupBy", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		cb, ok := arg(args, 1).(*Object)
+		if !ok || !cb.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "groupBy callback is not a function")
+		}
+		// Result is an object with a null prototype, keyed by the callback's
+		// return value coerced to a property key.
+		result := NewObject(nil)
+		idx := 0
+		err := i.iterate(ctx, arg(args, 0), func(v Value) error {
+			kv, err := cb.fn.call(ctx, Undef, []Value{v, Number(float64(idx))})
+			if err != nil {
+				return err
+			}
+			key, err := i.ToPropertyKey(ctx, kv)
+			if err != nil {
+				return err
+			}
+			bucket, ok := result.props[key]
+			if !ok || bucket.Value == nil {
+				arr := i.newArray(nil)
+				result.writeData(key, arr)
+				bucket = result.props[key]
+			}
+			if arr, ok := bucket.Value.(*Object); ok {
+				arr.elems = append(arr.elems, v)
+			}
+			idx++
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	})
 
 	i.objectCtor = ctor
 	i.setGlobalHidden("Object", ctor)

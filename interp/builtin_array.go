@@ -36,9 +36,10 @@ func (i *Interpreter) initArray() {
 		var out []Value
 		mapFn, _ := arg(args, 1).(*Object)
 		idx := 0
+		thisArg := arg(args, 2)
 		apply := func(v Value) (Value, error) {
 			if mapFn != nil && mapFn.IsCallable() {
-				mv, err := mapFn.fn.call(ctx, Undef, []Value{v, Number(float64(idx))})
+				mv, err := mapFn.fn.call(ctx, thisArg, []Value{v, Number(float64(idx))})
 				if err != nil {
 					return nil, err
 				}
@@ -116,6 +117,11 @@ func (i *Interpreter) initArray() {
 		{"lastIndexOf", 1, i.arrayLastIndexOf},
 		{"findLast", 1, i.arrayFindLast},
 		{"findLastIndex", 1, i.arrayFindLastIndex},
+		{"copyWithin", 2, i.arrayCopyWithin},
+		{"toReversed", 0, i.arrayToReversed},
+		{"toSorted", 1, i.arrayToSorted},
+		{"toSpliced", 2, i.arrayToSpliced},
+		{"with", 2, i.arrayWith},
 		{"keys", 0, i.arrayKeys},
 		{"values", 0, i.arrayValues},
 		{"entries", 0, i.arrayEntries},
