@@ -149,7 +149,7 @@ func (p *parser) tryParseArrow() ast.Expr {
 	}
 	if p.at(token.IDENT) {
 		id := p.next()
-		p.checkBindingIdentifier(id.Literal, id.Pos)
+		p.checkReservedIdentifier(id.Literal, id.Pos)
 		arrow.Params = []ast.Expr{&ast.Ident{NamePos: id.Pos, Name: id.Literal}}
 	} else {
 		arrow.Params = p.parseParams()
@@ -196,7 +196,6 @@ func (p *parser) matchParen(openIdx int) int {
 // Parameter lists and binding patterns
 // ---------------------------------------------------------------------------
 
-// simpleParamList reports whether every parameter is a plain identifier.
 // checkStrictSimpleParams enforces the early error forbidding a "use strict"
 // directive in the body of a function whose parameter list is not simple — i.e.
 // contains a destructuring pattern, a default, or a rest element (ECMA-262
@@ -328,14 +327,14 @@ func (p *parser) parseBindingTarget() ast.Expr {
 		return pat
 	case token.IDENT:
 		id := p.next()
-		p.checkBindingIdentifier(id.Literal, id.Pos)
+		p.checkReservedIdentifier(id.Literal, id.Pos)
 		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 	default:
 		// Contextual keywords are valid binding names.
 		if p.cur().Type.IsKeyword() {
 			id := p.next()
 			name := identText(id)
-			p.checkBindingIdentifier(name, id.Pos)
+			p.checkReservedIdentifier(name, id.Pos)
 			return &ast.Ident{NamePos: id.Pos, Name: name}
 		}
 		p.errorf("expected binding name but got %s", p.cur().Type)
@@ -343,10 +342,11 @@ func (p *parser) parseBindingTarget() ast.Expr {
 	}
 }
 
-// checkBindingIdentifier reports the early errors for a name used as a binding
-// identifier: `yield` is a reserved word in strict-mode or generator code, and
-// `await` is reserved in async-function code, so neither may be bound there.
-func (p *parser) checkBindingIdentifier(name string, pos token.Pos) {
+// checkReservedIdentifier reports the early errors for a name used as a binding
+// identifier or an identifier reference: `yield` is a reserved word in
+// strict-mode or generator code, and `await` is reserved in async-function
+// code, so neither may be used as an identifier there.
+func (p *parser) checkReservedIdentifier(name string, pos token.Pos) {
 	switch name {
 	case "yield":
 		if p.strict || p.inGenerator {

@@ -429,10 +429,13 @@ func (p *parser) parsePrimary() ast.Expr {
 		return &ast.PrivateIdent{NamePos: tk.Pos, Name: tk.Literal}
 	default:
 		// Contextual keywords (let, of, get, set, yield, await, static) used as
-		// plain identifiers.
+		// plain identifiers. yield/await used here as an identifier reference are
+		// still reserved in a generator/async or strict context.
 		if tk.Type.IsKeyword() {
 			p.next()
-			return &ast.Ident{NamePos: tk.Pos, Name: identText(tk)}
+			name := identText(tk)
+			p.checkReservedIdentifier(name, tk.Pos)
+			return &ast.Ident{NamePos: tk.Pos, Name: name}
 		}
 		p.errorf("unexpected token %s", tk.Type)
 		p.next()

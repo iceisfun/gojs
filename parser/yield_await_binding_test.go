@@ -27,6 +27,33 @@ func TestYieldAwaitBindingReserved(t *testing.T) {
 	}
 }
 
+// yield used as an identifier reference (not the yield operator) is likewise
+// reserved in a generator or strict context.
+func TestYieldAsIdentifierReferenceReserved(t *testing.T) {
+	bad := []string{
+		`function* g() { void yield; }`,
+		`class C { *g() { void yield; } }`,
+		`class C { static async *g() { void yield; } }`,
+		`"use strict"; void yield;`,
+	}
+	for _, src := range bad {
+		if _, err := Parse("test", src); err == nil {
+			t.Errorf("expected SyntaxError for yield identifier reference: %s", src)
+		}
+	}
+	good := []string{
+		`function f() { void yield; }`,       // sloppy, non-generator
+		`void yield;`,                        // sloppy top level
+		`function* g() { yield; }`,           // yield operator (statement)
+		`function* g() { var x = yield 1; }`, // yield operator
+	}
+	for _, src := range good {
+		if _, err := Parse("test", src); err != nil {
+			t.Errorf("valid yield use wrongly rejected: %s -> %v", src, err)
+		}
+	}
+}
+
 func TestYieldAwaitUsableAsIdentifiers(t *testing.T) {
 	good := []string{
 		`function f() { var yield; }`,                        // sloppy, non-generator
