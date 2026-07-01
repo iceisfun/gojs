@@ -71,7 +71,12 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 		v, err := i.evalClass(ctx, e.Def, env)
 		if err == nil && e.Def.Name == nil && name != "" {
 			if o, ok := v.(*Object); ok {
-				o.SetHidden("name", String(name))
+				// Named evaluation supplies a name to an anonymous class, but a
+				// static member named "name" (part of the class body) takes
+				// precedence — so only fill in the empty-string default.
+				if cur, ok := o.getOwn(StrKey("name")); !ok || cur.Value == String("") {
+					o.SetHidden("name", String(name))
+				}
 			}
 		}
 		return v, err
