@@ -54,6 +54,7 @@ func (i *Interpreter) bootstrap() {
 	i.initNumber()
 	i.initBoolean()
 	i.initSymbol()
+	i.initBigInt()
 	i.initMath()
 	i.initJSON()
 	i.initRegExp()
@@ -62,14 +63,6 @@ func (i *Interpreter) bootstrap() {
 	i.initConsole()
 	i.initGlobals()
 	i.initTimers()
-}
-
-// setGlobal defines an enumerable global binding both on the global object and
-// (for lexical resolution) reachable through the global environment. Global
-// var/function bindings live on the global object; the environment falls back
-// to the global object during lookup (see resolveIdent).
-func (i *Interpreter) setGlobal(name string, v Value) {
-	i.global.SetData(name, v)
 }
 
 // setGlobalHidden defines a non-enumerable global (used for constructors and

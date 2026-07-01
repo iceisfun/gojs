@@ -2,7 +2,6 @@ package interp
 
 import (
 	"context"
-	"math/big"
 )
 
 // This file implements the context-sensitive abstract operations — those that
@@ -180,6 +179,3 @@ func (i *Interpreter) methodBySymbol(obj *Object, sym *Symbol) (*Object, bool) {
 	}
 	return nil, false
 }
-
-// bigIntToString is a small convenience used by formatting code.
-func bigIntToString(b *big.Int) string { return b.String() }

@@ -2,7 +2,6 @@ package interp
 
 import (
 	"context"
-	"math"
 	"math/big"
 
 	"github.com/iceisfun/gojs/ast"
@@ -366,12 +365,4 @@ func (i *Interpreter) evalBigIntLit(ctx context.Context, e *ast.BigIntLit) (Valu
 // evalRegexLit builds a RegExp object for a regex literal.
 func (i *Interpreter) evalRegexLit(ctx context.Context, e *ast.RegexLit) (Value, error) {
 	return i.newRegExp(ctx, e.Pattern, e.Flags)
-}
-
-// numberOrNaN converts a value to a number without error for internal math.
-func numberOrNaN(f float64) Value {
-	if math.IsNaN(f) {
-		return Number(math.NaN())
-	}
-	return Number(f)
 }
