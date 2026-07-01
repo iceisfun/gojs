@@ -378,9 +378,11 @@ func (p *parser) parsePrimary() ast.Expr {
 		return &ast.ThisExpr{Keyword: tk.Pos}
 	case token.SUPER:
 		p.next()
-		// A SuperCall (super(...)) is not allowed in a class field initializer.
-		if p.inFieldInit && p.at(token.LPAREN) {
-			p.errorAt(tk.Pos, "super() is not allowed in a class field initializer")
+		// A SuperCall (super(...)) is permitted only in a derived class
+		// constructor — never in a field initializer, an ordinary method, or a
+		// base-class constructor (ECMA-262 13.3.7.1).
+		if p.at(token.LPAREN) && !p.superCallOK {
+			p.errorAt(tk.Pos, "super() is only valid in a derived class constructor")
 		}
 		return &ast.SuperExpr{Keyword: tk.Pos}
 	case token.IDENT:

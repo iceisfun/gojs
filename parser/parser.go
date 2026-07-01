@@ -76,6 +76,15 @@ type parser struct {
 	// function boundary to that function's own kind.
 	inGenerator bool
 	inAsync     bool
+	// superCallOK is true only while parsing the body of a derived class
+	// constructor, where a SuperCall (super(...)) is allowed. It is transparent
+	// through arrow functions but reset at every other function/method boundary
+	// and at a class body. classHeritage records whether the class currently
+	// being parsed has an extends clause; pendingSuperCall carries the
+	// permission from a constructor member to its method body.
+	superCallOK      bool
+	classHeritage    bool
+	pendingSuperCall bool
 	// strict reports whether the code currently being parsed is strict-mode
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a

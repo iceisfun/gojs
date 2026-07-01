@@ -386,8 +386,10 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	// initializer's restrictions do not reach in) and its own yield/await
 	// reservation determined by whether it is a generator or async.
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
+	prevSuper := p.superCallOK
 	p.inFieldInit = false
 	p.inGenerator, p.inAsync = def.Generator, async
+	p.superCallOK = false // a nested regular function never permits super()
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
@@ -395,6 +397,7 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
+	p.superCallOK = prevSuper
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
@@ -541,8 +544,13 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	// A method establishes its own arguments/super scope and yield/await
 	// reservation (see parseFuncDef).
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
+	prevSuper := p.superCallOK
 	p.inFieldInit = false
 	p.inGenerator, p.inAsync = generator, async
+	// A SuperCall is permitted only in the derived constructor; parseClassMember
+	// signals that via pendingSuperCall for exactly that one method body.
+	p.superCallOK = p.pendingSuperCall
+	p.pendingSuperCall = false
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
@@ -550,6 +558,7 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
+	p.superCallOK = prevSuper
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
@@ -597,12 +606,18 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 	p.privateEnvStack = append(p.privateEnvStack, env)
 	prevStrict := p.strict
 	p.strict = true
+	// Entering a class body: a SuperCall is permitted only in this class's own
+	// derived constructor, not in any construct inherited from an outer scope.
+	prevHeritage, prevSuper := p.classHeritage, p.superCallOK
+	p.classHeritage = def.SuperClass != nil
+	p.superCallOK = false
 	for !p.at(token.RBRACE) && !p.at(token.EOF) {
 		if p.accept(token.SEMICOLON) {
 			continue // stray semicolons between members are allowed
 		}
 		def.Members = append(def.Members, p.parseClassMember())
 	}
+	p.classHeritage, p.superCallOK = prevHeritage, prevSuper
 	// Record this class's declared private names before popping so that
 	// references captured anywhere (including in nested classes, or textually
 	// before the declaration) can still resolve to them.
@@ -797,7 +812,13 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 	m.Kind = kind
 
 	if p.at(token.LPAREN) {
-		// Method or accessor.
+		// Method or accessor. A SuperCall is permitted in its body only if this
+		// is the class's own derived constructor: a non-static, non-computed,
+		// plain method named "constructor" in a class with a heritage.
+		if name, named := classMemberName(m); named && name == "constructor" &&
+			!m.Static && !async && !generator && kind == ast.PropInit {
+			p.pendingSuperCall = p.classHeritage
+		}
 		fn := p.parseMethodBody(async, generator)
 		m.Value = fn
 		return m
