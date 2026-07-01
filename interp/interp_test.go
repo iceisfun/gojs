@@ -1,6 +1,9 @@
 package interp
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSmoke(t *testing.T) {
 	cases := []struct{ src, want string }{
@@ -38,5 +41,41 @@ func TestSmoke(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%q = %q, want %q", c.src, got, c.want)
 		}
+	}
+}
+
+func TestGenerators(t *testing.T) {
+	i := New()
+	cases := []struct{ src, want string }{
+		{`function* g(){yield 1;yield 2;yield 3} [...g()].join(",")`, "1,2,3"},
+		{`function* g(){let x=yield 1; yield x+10} let it=g(); it.next(); it.next(5).value`, "15"},
+		{`function* inner(){yield 2;yield 3} function* o(){yield 1;yield* inner();yield 4} [...o()].join("-")`, "1-2-3-4"},
+	}
+	for _, c := range cases {
+		v, err := i.RunString("t", c.src)
+		if err != nil {
+			t.Errorf("%q: %v", c.src, err)
+			continue
+		}
+		got, _ := i.ToStringV(i.Context(), v)
+		if got != c.want {
+			t.Errorf("%q = %q want %q", c.src, got, c.want)
+		}
+	}
+}
+
+func TestGeneratorCleanupNoLeak(t *testing.T) {
+	// An unfinished infinite generator must not block Close.
+	i := New()
+	if _, err := i.RunString("t", `function* nat(){let n=0;while(true)yield n++} globalThis.g = nat(); g.next();`); err != nil {
+		t.Fatal(err)
+	}
+	// Close should cancel the suspended generator goroutine and return promptly.
+	done := make(chan struct{})
+	go func() { i.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return; generator goroutine leaked")
 	}
 }

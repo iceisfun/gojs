@@ -90,7 +90,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 		// Synchronous approximation: await unwraps a settled value.
 		return i.evalExpr(ctx, e.Argument, env)
 	case *ast.YieldExpr:
-		return nil, i.throwError(ctx, "SyntaxError", "yield is only valid inside a generator")
+		return i.evalYield(ctx, e, env)
 	case *ast.SuperExpr:
 		return nil, i.throwError(ctx, "SyntaxError", "'super' keyword unexpected here")
 	default:

@@ -12,11 +12,28 @@ package interp
 type Environment struct {
 	parent  *Environment
 	vars    map[string]*binding
-	fnScope bool    // true for function bodies and the global scope
-	thisVal Value   // `this` binding for this scope (nil = inherit from parent)
-	hasThis bool    // whether thisVal is set at this scope
-	newTgt  Value   // new.target for this scope
-	homeObj *Object // [[HomeObject]] for super resolution in methods
+	fnScope bool            // true for function bodies and the global scope
+	thisVal Value           // `this` binding for this scope (nil = inherit from parent)
+	hasThis bool            // whether thisVal is set at this scope
+	newTgt  Value           // new.target for this scope
+	homeObj *Object         // [[HomeObject]] for super resolution in methods
+	gen     *generatorState // active generator channels (set in generator bodies)
+}
+
+// generator returns the generator state for the nearest enclosing generator
+// body, or nil when the current scope is not inside one.
+func (e *Environment) generator() *generatorState {
+	for env := e; env != nil; env = env.parent {
+		if env.gen != nil {
+			return env.gen
+		}
+		// An ordinary (non-generator) function body stops the search: a yield
+		// there belongs to no generator.
+		if env.fnScope {
+			return nil
+		}
+	}
+	return nil
 }
 
 // binding is a single variable slot.
