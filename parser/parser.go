@@ -60,7 +60,8 @@ type parser struct {
 	// function level), inherited into nested functions, and always true inside a
 	// class body. Several early errors are strict-mode sensitive (e.g. duplicate
 	// block-level FunctionDeclarations, a FunctionDeclaration in a
-	// single-statement position under Annex B, or binding `eval`/`arguments`).
+	// single-statement position under Annex B, binding `eval`/`arguments`, or a
+	// LegacyOctalIntegerLiteral / octal string escape).
 	strict bool
 }
 

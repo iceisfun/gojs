@@ -61,6 +61,13 @@ type Lexer struct {
 	templateBraceStack []int
 	braceDepth         int
 
+	// legacyEscape records, while a string literal is being scanned, that it
+	// contained a legacy octal escape (\1..\7, \0 followed by a digit) or a
+	// non-octal decimal escape (\8, \9). These are legal in sloppy mode but are
+	// strict-mode early errors; scanString transfers the flag to the token's
+	// StrictError for the parser to raise when the code is strict.
+	legacyEscape string
+
 	err *token.SyntaxError
 }
 

@@ -409,6 +409,13 @@ type Token struct {
 	// between the previous token and this one. The parser needs this to
 	// implement Automatic Semicolon Insertion (ECMA-262 §12.10).
 	NewlineBefore bool
+
+	// StrictError, when non-empty, describes an early error that applies only
+	// when the token appears in strict-mode code (e.g. a LegacyOctalIntegerLiteral
+	// or an octal/non-octal escape in a string literal). The lexer cannot know
+	// the strictness of the enclosing scope, so it records the condition here and
+	// the parser raises it when the surrounding code is strict.
+	StrictError string
 }
 
 // Span is a half-open range of source positions [Start, End). It is the unit of

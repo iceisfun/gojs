@@ -36,11 +36,32 @@ func parseNumber(raw string) float64 {
 		case 'b', 'B':
 			return parseRadix(s[2:], 2)
 		}
+		// LegacyOctalIntegerLiteral: a leading 0 followed only by octal digits
+		// evaluates in base 8 (e.g. 0777 === 511). A leading zero followed by a
+		// digit 8 or 9 (NonOctalDecimalIntegerLiteral, e.g. 08) falls through to
+		// the decimal parse below.
+		if isOctalDigits(s[1:]) {
+			return parseRadix(s[1:], 8)
+		}
 	}
 	if v, err := strconv.ParseFloat(s, 64); err == nil {
 		return v
 	}
 	return math.NaN()
+}
+
+// isOctalDigits reports whether s is non-empty and consists solely of octal
+// digits (0-7).
+func isOctalDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '7' {
+			return false
+		}
+	}
+	return true
 }
 
 // parseRadix converts a digit string in the given base to a float64 without

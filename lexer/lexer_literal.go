@@ -11,54 +11,90 @@ import (
 // from the core dispatch in lexer.go for readability.
 
 // scanNumber scans a numeric literal in any of JavaScript's forms: decimal
-// (42, 3.14, .5, 1e10), hexadecimal (0xFF), octal (0o17), binary (0b1010), and
-// BigInt (123n). Numeric separators ('_') are permitted between digits.
+// (42, 3.14, .5, 1e10), hexadecimal (0xFF), octal (0o17), binary (0b1010),
+// legacy octal (0777), non-octal decimal (08), and BigInt (123n). Numeric
+// separators ('_') are permitted strictly between two digits.
+//
+// Early errors (a misplaced separator, a radix prefix with no digits, a BigInt
+// suffix on a non-integer or legacy-octal literal, etc.) are reported here.
+// Legacy octal and non-octal-decimal integers are legal only in sloppy mode, so
+// scanNumber records that condition in the token's StrictError for the parser to
+// raise when the enclosing code is strict.
 func (l *Lexer) scanNumber(start token.Pos, nl bool) token.Token {
 	begin := l.offset
 	isBigInt := false
+	bigIntAllowed := true // BigInt is only valid on an integer literal
+	strictErr := ""
 
-	if l.ch == '0' && (l.peek() == 'x' || l.peek() == 'X') {
+	if l.ch == '0' && (l.peek() == 'x' || l.peek() == 'X' ||
+		l.peek() == 'o' || l.peek() == 'O' || l.peek() == 'b' || l.peek() == 'B') {
+		// Prefixed radix literal: 0x.., 0o.., 0b..
+		prefix := l.peek()
 		l.readRune() // 0
-		l.readRune() // x
-		l.scanDigits(isHexDigit)
-	} else if l.ch == '0' && (l.peek() == 'o' || l.peek() == 'O') {
-		l.readRune()
-		l.readRune()
-		l.scanDigits(func(r rune) bool { return r >= '0' && r <= '7' })
-	} else if l.ch == '0' && (l.peek() == 'b' || l.peek() == 'B') {
-		l.readRune()
-		l.readRune()
-		l.scanDigits(func(r rune) bool { return r == '0' || r == '1' })
-	} else {
-		// Decimal integer part.
-		l.scanDigits(isDigit)
-		// Fractional part.
-		if l.ch == '.' {
-			l.readRune()
-			l.scanDigits(isDigit)
+		l.readRune() // x/o/b
+		var pred func(rune) bool
+		switch prefix {
+		case 'x', 'X':
+			pred = isHexDigit
+		case 'o', 'O':
+			pred = func(r rune) bool { return r >= '0' && r <= '7' }
+		default:
+			pred = func(r rune) bool { return r == '0' || r == '1' }
 		}
-		// Exponent part.
-		if l.ch == 'e' || l.ch == 'E' {
+		n, ok := l.scanDigitsSep(pred)
+		if !ok {
+			return l.errorf("invalid numeric separator")
+		}
+		if n == 0 {
+			return l.errorf("missing digits after numeric base prefix")
+		}
+	} else if l.ch == '0' && (isDigit(l.peek()) || l.peek() == '_') {
+		// Legacy leading-zero integer: LegacyOctalIntegerLiteral (all digits
+		// 0-7) or NonOctalDecimalIntegerLiteral (contains 8 or 9). Neither
+		// permits numeric separators or a BigInt suffix, and both are strict
+		// early errors. A lone leading zero followed by '_' (0_0) is always
+		// invalid and is rejected by the separator check below.
+		strictErr = "Octal literals are not allowed in strict mode"
+		bigIntAllowed = false
+		l.readRune() // 0
+		for isDigit(l.ch) {
 			l.readRune()
-			if l.ch == '+' || l.ch == '-' {
-				l.readRune()
+		}
+		if l.ch == '_' {
+			return l.errorf("numeric separator is not allowed in legacy octal literal")
+		}
+		// A following '.' or exponent turns this into an ordinary decimal
+		// (e.g. 08.5, 09e2); those are not integer legacy literals.
+		if l.ch == '.' || l.ch == 'e' || l.ch == 'E' {
+			strictErr = ""
+			bigIntAllowed = false
+			l.scanDecimalTail()
+		}
+	} else {
+		// Ordinary decimal: integer part, optional fraction, optional exponent.
+		if _, ok := l.scanDigitsSep(isDigit); !ok {
+			return l.errorf("invalid numeric separator")
+		}
+		if l.ch == '.' || l.ch == 'e' || l.ch == 'E' {
+			bigIntAllowed = false
+			if !l.scanDecimalTail() {
+				return l.cur()
 			}
-			if !isDigit(l.ch) {
-				return l.errorf("missing exponent in number literal")
-			}
-			l.scanDigits(isDigit)
 		}
 	}
 
 	// Optional BigInt suffix.
 	if l.ch == 'n' {
+		if !bigIntAllowed {
+			return l.errorf("invalid BigInt literal")
+		}
 		isBigInt = true
 		l.readRune()
 	}
 
 	// An identifier character immediately following a number is an error
 	// (e.g. 3in). This catches most malformed literals.
-	if isIdentStart(l.ch) {
+	if isIdentStart(l.ch) || l.ch == '_' {
 		return l.errorf("identifier starts immediately after numeric literal")
 	}
 
@@ -67,14 +103,68 @@ func (l *Lexer) scanNumber(start token.Pos, nl bool) token.Token {
 		digits := strings.ReplaceAll(strings.TrimSuffix(raw, "n"), "_", "")
 		return token.Token{Type: token.BIGINT, Literal: digits, Raw: raw, Pos: start, NewlineBefore: nl}
 	}
-	return token.Token{Type: token.NUMBER, Literal: raw, Raw: raw, Pos: start, NewlineBefore: nl}
+	return token.Token{Type: token.NUMBER, Literal: raw, Raw: raw, Pos: start, NewlineBefore: nl, StrictError: strictErr}
 }
 
-// scanDigits consumes a run of digits accepted by pred, allowing single '_'
-// separators between digits.
-func (l *Lexer) scanDigits(pred func(rune) bool) {
-	for pred(l.ch) || (l.ch == '_' && pred(l.peek())) {
+// scanDecimalTail scans an optional fractional part and optional exponent of a
+// decimal literal, enforcing separator placement. It returns false (after
+// recording an error) on a malformed exponent or misplaced separator.
+func (l *Lexer) scanDecimalTail() bool {
+	if l.ch == '.' {
 		l.readRune()
+		if _, ok := l.scanDigitsSep(isDigit); !ok {
+			l.errorf("invalid numeric separator")
+			return false
+		}
+	}
+	if l.ch == 'e' || l.ch == 'E' {
+		l.readRune()
+		if l.ch == '+' || l.ch == '-' {
+			l.readRune()
+		}
+		if !isDigit(l.ch) {
+			l.errorf("missing exponent in number literal")
+			return false
+		}
+		if _, ok := l.scanDigitsSep(isDigit); !ok {
+			l.errorf("invalid numeric separator")
+			return false
+		}
+	}
+	return true
+}
+
+// cur returns the ILLEGAL token for the current position after an error has
+// already been recorded by a helper.
+func (l *Lexer) cur() token.Token {
+	return token.Token{Type: token.ILLEGAL, Pos: l.pos()}
+}
+
+// scanDigitsSep consumes a run of digits accepted by pred, allowing single '_'
+// numeric separators only strictly between two digits. It returns the number of
+// digits consumed and whether the separator placement was valid (a leading,
+// trailing, or doubled separator is invalid).
+func (l *Lexer) scanDigitsSep(pred func(rune) bool) (int, bool) {
+	n := 0
+	prevWasSep := false
+	for {
+		switch {
+		case pred(l.ch):
+			n++
+			prevWasSep = false
+			l.readRune()
+		case l.ch == '_':
+			// A separator must sit between two digits: at least one digit must
+			// precede it, it may not follow another separator, and a digit must
+			// follow it.
+			if n == 0 || prevWasSep || !pred(l.peek()) {
+				return n, false
+			}
+			prevWasSep = true
+			l.readRune()
+		default:
+			return n, true
+		}
 	}
 }
 
@@ -84,10 +174,14 @@ func (l *Lexer) scanString(start token.Pos, nl bool) token.Token {
 	quote := l.ch
 	begin := l.offset
 	l.readRune() // opening quote
+	l.legacyEscape = ""
 
 	var b strings.Builder
 	for {
-		if l.ch == eof || isLineTerminator(l.ch) {
+		// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are permitted as
+		// literal characters in a string literal (ES2019+); only <LF> and <CR>
+		// terminate one.
+		if l.ch == eof || l.ch == '\n' || l.ch == '\r' {
 			return l.errorf("unterminated string literal")
 		}
 		if l.ch == quote {
@@ -103,7 +197,7 @@ func (l *Lexer) scanString(start token.Pos, nl bool) token.Token {
 		l.readRune()
 	}
 	raw := l.input[begin:l.offset]
-	return token.Token{Type: token.STRING, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl}
+	return token.Token{Type: token.STRING, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl, StrictError: l.legacyEscape}
 }
 
 // scanEscape decodes a single escape sequence (the backslash is already
@@ -128,14 +222,21 @@ func (l *Lexer) scanEscape(b *strings.Builder) {
 	case 'v':
 		b.WriteByte('\v')
 		l.readRune()
-	case '0':
-		// \0 not followed by a digit is a NUL character.
-		if !isDigit(l.peek()) {
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		// \0 not followed by a digit is the NUL character and is legal in strict
+		// mode. Any other octal digit run is a LegacyOctalEscapeSequence: legal
+		// in sloppy mode, a strict-mode early error.
+		if l.ch == '0' && !isDigit(l.peek()) {
 			b.WriteByte(0)
 			l.readRune()
 			return
 		}
-		// Legacy octal; consume the digit literally for simplicity.
+		l.legacyEscape = "Octal escape sequences are not allowed in strict mode"
+		l.scanOctalEscape(b)
+	case '8', '9':
+		// \8 and \9 are NonOctalDecimalEscapeSequences: in sloppy mode they
+		// denote the digit itself; in strict mode they are early errors.
+		l.legacyEscape = "\\8 and \\9 are not allowed in strict mode"
 		b.WriteRune(l.ch)
 		l.readRune()
 	case 'x':
@@ -165,6 +266,22 @@ func (l *Lexer) scanEscape(b *strings.Builder) {
 		b.WriteRune(l.ch)
 		l.readRune()
 	}
+}
+
+// scanOctalEscape decodes a LegacyOctalEscapeSequence (the leading octal digit
+// is the current rune). It consumes up to three octal digits, but only two when
+// the first is 4-7, matching ECMA-262 Annex B.1.2.
+func (l *Lexer) scanOctalEscape(b *strings.Builder) {
+	maxDigits := 3
+	if l.ch >= '4' && l.ch <= '7' {
+		maxDigits = 2
+	}
+	val := 0
+	for i := 0; i < maxDigits && l.ch >= '0' && l.ch <= '7'; i++ {
+		val = val*8 + int(l.ch-'0')
+		l.readRune()
+	}
+	b.WriteRune(rune(val))
 }
 
 // scanUnicodeEscape decodes \uXXXX or \u{XXXXXX} (the "\u" is already consumed).

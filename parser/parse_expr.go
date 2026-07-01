@@ -356,12 +356,18 @@ func (p *parser) parsePrimary() ast.Expr {
 	switch tk.Type {
 	case token.NUMBER:
 		p.next()
+		if p.strict && tk.StrictError != "" {
+			p.errorAt(tk.Pos, "%s", tk.StrictError)
+		}
 		return &ast.NumberLit{ValuePos: tk.Pos, Value: parseNumber(tk.Literal), Raw: tk.Raw}
 	case token.BIGINT:
 		p.next()
 		return &ast.BigIntLit{ValuePos: tk.Pos, Raw: tk.Raw, Digits: tk.Literal}
 	case token.STRING:
 		p.next()
+		if p.strict && tk.StrictError != "" {
+			p.errorAt(tk.Pos, "%s", tk.StrictError)
+		}
 		return &ast.StringLit{ValuePos: tk.Pos, Value: tk.Literal, Raw: tk.Raw}
 	case token.TRUE, token.FALSE:
 		p.next()
@@ -381,6 +387,10 @@ func (p *parser) parsePrimary() ast.Expr {
 	case token.REGEX:
 		p.next()
 		flags := regexFlags(tk.Raw)
+		unicode := strings.ContainsRune(flags, 'u') || strings.ContainsRune(flags, 'v')
+		if err := validateRegexpLiteral(tk.Literal, unicode); err != nil {
+			p.errorAt(tk.Pos, "%s", err.Error())
+		}
 		return &ast.RegexLit{ValuePos: tk.Pos, Pattern: tk.Literal, Flags: flags, Raw: tk.Raw}
 	case token.TEMPLATE_NOSUB, token.TEMPLATE_HEAD:
 		return p.parseTemplate()
