@@ -68,6 +68,9 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 	if err := i.checkContext(); err != nil {
 		return nil, err
 	}
+	if err := i.step(); err != nil {
+		return nil, err
+	}
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		return i.evalExpr(ctx, s.X, env)

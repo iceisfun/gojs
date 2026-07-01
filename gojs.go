@@ -38,6 +38,13 @@ type Option = interp.Option
 // Security holds the opt-in hardening switches. Alias for [interp.Security].
 type Security = interp.Security
 
+// Limits bounds script resource usage (call depth, step budget). Alias for
+// [interp.Limits].
+type Limits = interp.Limits
+
+// WithLimits sets resource limits at construction.
+var WithLimits = interp.WithLimits
+
 // Value type aliases for building/inspecting JavaScript values from Go.
 type (
 	// Object is a JavaScript object (also arrays and functions).

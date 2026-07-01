@@ -39,6 +39,11 @@ type Interpreter struct {
 	// Go goroutine stack (which would crash the host).
 	callDepth int
 
+	// limits holds the resource limits (call depth, step budget); steps is the
+	// running evaluation-step count checked against Limits.MaxSteps.
+	limits Limits
+	steps  int64
+
 	// wellKnownSymbols
 	symIterator      *Symbol
 	symAsyncIterator *Symbol
@@ -111,7 +116,7 @@ func WithTimerProvider(p TimerProvider) Option {
 
 // New creates an Interpreter with the standard global environment installed.
 func New(opts ...Option) *Interpreter {
-	i := &Interpreter{}
+	i := &Interpreter{limits: defaultLimits()}
 	for _, opt := range opts {
 		opt(i)
 	}
@@ -160,16 +165,11 @@ func (i *Interpreter) Close() error {
 	return nil
 }
 
-// maxCallDepth bounds nested JavaScript function invocations. It is well below
-// the point at which the Go goroutine stack would overflow, so deep or infinite
-// recursion becomes a catchable RangeError rather than a host crash.
-const maxCallDepth = 6000
-
-// enterCall increments the recursion counter, returning a RangeError once the
-// limit is exceeded. Pair with leaveCall via defer.
+// enterCall increments the recursion counter, returning a RangeError once
+// Limits.MaxCallDepth is exceeded. Pair with leaveCall via defer.
 func (i *Interpreter) enterCall() error {
 	i.callDepth++
-	if i.callDepth > maxCallDepth {
+	if i.limits.MaxCallDepth > 0 && i.callDepth > i.limits.MaxCallDepth {
 		return i.throwError(i.ctx, "RangeError", "Maximum call stack size exceeded")
 	}
 	return nil

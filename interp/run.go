@@ -24,6 +24,9 @@ func (i *Interpreter) RunString(sourceName, source string) (Value, error) {
 
 // RunProgram executes an already-parsed program.
 func (i *Interpreter) RunProgram(prog *ast.Program) (Value, error) {
+	// Each top-level run (including the timer/microtask tail it drains) gets a
+	// fresh step budget.
+	i.steps = 0
 	result, err := i.evalProgram(i.ctx, prog)
 	if err != nil {
 		return nil, i.normalizeError(err)
