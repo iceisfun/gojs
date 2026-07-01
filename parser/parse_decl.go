@@ -288,9 +288,13 @@ func (p *parser) parseBindingElement() ast.Expr {
 func (p *parser) parseBindingTarget() ast.Expr {
 	switch p.cur().Type {
 	case token.LBRACKET:
-		return p.parseArrayLit()
+		pat := p.parseArrayLit()
+		p.checkBindingPattern(pat)
+		return pat
 	case token.LBRACE:
-		return p.parseObjectLit()
+		pat := p.parseObjectLit()
+		p.checkBindingPattern(pat)
+		return pat
 	case token.IDENT:
 		id := p.next()
 		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
