@@ -16,7 +16,7 @@ type classData struct {
 	def            *ast.ClassDef
 	env            *Environment
 	proto          *Object
-	superCtor      *Object          // parent constructor (nil when no extends)
+	superCtor      *Object // parent constructor (nil when no extends)
 	fieldInits     []*ast.ClassMember
 	privateMethods []*ast.ClassMember // instance #methods and private accessors
 }
