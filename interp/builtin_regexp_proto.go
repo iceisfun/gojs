@@ -586,12 +586,46 @@ func (i *Interpreter) getSubstitution(ctx context.Context, matched, str []uint16
 	return jsregexp.FromUnits(out), nil
 }
 
+// speciesConstructor implements SpeciesConstructor (§7.3.22): the constructor to
+// use for derived objects, honoring a @@species override, defaulting to def.
+func (i *Interpreter) speciesConstructor(ctx context.Context, o *Object, def *Object) (*Object, error) {
+	c, err := o.GetStr(ctx, "constructor")
+	if err != nil {
+		return nil, err
+	}
+	if IsUndefined(c) {
+		return def, nil
+	}
+	co, ok := c.(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "constructor is not an object")
+	}
+	s, err := co.Get(ctx, SymKey(i.symSpecies))
+	if err != nil {
+		return nil, err
+	}
+	if IsNullish(s) {
+		return def, nil
+	}
+	if so, ok := s.(*Object); ok && so.IsConstructor() {
+		return so, nil
+	}
+	return nil, i.throwError(ctx, "TypeError", "Symbol.species value is not a constructor")
+}
+
 func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []Value) (Value, error) {
 	rx, ok := this.(*Object)
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "RegExp.prototype[Symbol.split] called on non-object")
 	}
 	s, err := i.argStr(ctx, args, 0)
+	if err != nil {
+		return nil, err
+	}
+	// C = SpeciesConstructor(rx, %RegExp%); splitter = Construct(C, «rx, newFlags»).
+	defV, _ := i.global.GetStr(ctx, "RegExp")
+	defCtor, _ := defV.(*Object)
+	c, err := i.speciesConstructor(ctx, rx, defCtor)
 	if err != nil {
 		return nil, err
 	}
@@ -604,27 +638,22 @@ func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []
 	if !strings.Contains(flags, "y") {
 		newFlags += "y"
 	}
-	// A sticky clone so RegExpExec anchors each attempt at lastIndex.
-	var splitter *Object
-	if re, ok := regexpOf(rx); ok {
-		v, err := i.newRegExp(ctx, re.Source(), newFlags)
-		if err != nil {
-			return nil, err
-		}
-		splitter = v.(*Object)
-	} else {
-		src, _ := i.getStrProp(ctx, rx, "source")
-		v, err := i.newRegExp(ctx, src, newFlags)
-		if err != nil {
-			return nil, err
-		}
-		splitter = v.(*Object)
+	splitterV, err := c.fn.construct(ctx, c, []Value{rx, String(newFlags)})
+	if err != nil {
+		return nil, err
+	}
+	splitter, ok := splitterV.(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "RegExp splitter is not an object")
 	}
 
 	lim := int64(1)<<32 - 1
 	if !IsUndefined(arg(args, 1)) {
-		n := ToInteger(ToNumber(arg(args, 1)))
-		lim = int64(uint32(int64(n)))
+		n, err := i.ToNumberV(ctx, arg(args, 1)) // ToUint32 begins with ToNumber, which may throw
+		if err != nil {
+			return nil, err
+		}
+		lim = int64(ToUint32(n))
 	}
 	if lim == 0 {
 		return i.newArray(nil), nil
@@ -652,7 +681,9 @@ func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []
 	p := 0
 	q := p
 	for q < size {
-		splitter.SetData("lastIndex", Number(float64(q)))
+		if err := splitter.SetStr(ctx, "lastIndex", Number(float64(q))); err != nil {
+			return nil, err
+		}
 		z, err := i.regExpExec(ctx, splitter, s)
 		if err != nil {
 			return nil, err
@@ -661,7 +692,18 @@ func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []
 			q = advanceStringIndex(units, q, unicodeMatching)
 			continue
 		}
-		e, _ := i.lastIndexInt(ctx, splitter)
+		liV, err := splitter.GetStr(ctx, "lastIndex")
+		if err != nil {
+			return nil, err
+		}
+		liN, err := i.ToNumberV(ctx, liV)
+		if err != nil {
+			return nil, err
+		}
+		e := int(ToInteger(liN))
+		if e < 0 {
+			e = 0
+		}
 		if e > size {
 			e = size
 		}
@@ -674,11 +716,15 @@ func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []
 		}
 		p = e
 		zo := z.(*Object)
-		numCaptures, err := i.lengthOfArrayLike(ctx, zo)
+		lenV, err := zo.GetStr(ctx, "length")
 		if err != nil {
 			return nil, err
 		}
-		numCaptures--
+		lenN, err := i.ToNumberV(ctx, lenV)
+		if err != nil {
+			return nil, err
+		}
+		numCaptures := int(ToInteger(lenN)) - 1
 		if numCaptures < 0 {
 			numCaptures = 0
 		}
