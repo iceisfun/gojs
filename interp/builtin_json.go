@@ -14,8 +14,17 @@ func (i *Interpreter) initJSON() {
 
 	i.defineMethod(j, "stringify", 3, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		indent := jsonIndent(ctx, i, arg(args, 2))
+		// Apply an optional replacer (function or key-allowlist array) before
+		// serialization.
+		value, keep, err := i.applyReplacer(ctx, arg(args, 0), arg(args, 1))
+		if err != nil {
+			return nil, err
+		}
+		if !keep {
+			return Undef, nil
+		}
 		var b strings.Builder
-		ok, err := i.jsonStringify(ctx, &b, arg(args, 0), indent, "", map[*Object]bool{})
+		ok, err := i.jsonStringify(ctx, &b, value, indent, "", map[*Object]bool{})
 		if err != nil {
 			return nil, err
 		}
@@ -39,6 +48,12 @@ func (i *Interpreter) initJSON() {
 		p.skipWS()
 		if p.pos != len(p.s) {
 			return nil, i.throwError(ctx, "SyntaxError", "Unexpected non-whitespace character after JSON")
+		}
+		// Apply an optional reviver, walking bottom-up.
+		if reviver, ok := arg(args, 1).(*Object); ok && reviver.IsCallable() {
+			holder := NewObject(i.objectProto)
+			holder.SetData("", v)
+			return i.jsonRevive(ctx, holder, "", reviver)
 		}
 		return v, nil
 	})
@@ -442,4 +457,156 @@ func (p *jsonParser) parseNumber(ctx context.Context) (Value, error) {
 		return nil, p.errf(ctx, "Invalid number in JSON")
 	}
 	return Number(f), nil
+}
+
+// ---------------------------------------------------------------------------
+// Replacer (stringify) and reviver (parse)
+// ---------------------------------------------------------------------------
+
+// applyReplacer transforms a value tree per JSON.stringify's replacer argument.
+// A function replacer is invoked for every (key, value) pair top-down; a value
+// it maps to undefined is omitted. An array replacer is a property allowlist for
+// objects. It returns the transformed value and whether the top-level value
+// should be serialized at all.
+func (i *Interpreter) applyReplacer(ctx context.Context, value, replacer Value) (Value, bool, error) {
+	if fn, ok := replacer.(*Object); ok && fn.IsCallable() {
+		holder := NewObject(i.objectProto)
+		holder.SetData("", value)
+		out, keep, err := i.replaceWalk(ctx, holder, "", value, fn)
+		return out, keep, err
+	}
+	if arr, ok := replacer.(*Object); ok && arr.isArray {
+		allow := map[string]bool{}
+		for _, e := range arr.elems {
+			switch k := e.(type) {
+			case String:
+				allow[string(k)] = true
+			case Number:
+				allow[NumberToString(float64(k))] = true
+			}
+		}
+		return i.filterKeys(ctx, value, allow, map[*Object]bool{}), true, nil
+	}
+	return value, true, nil
+}
+
+// replaceWalk applies a function replacer recursively. holder is the object/
+// array containing key; value is holder[key].
+func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key string, value Value, fn *Object) (Value, bool, error) {
+	// toJSON is honored before the replacer sees the value.
+	if o, ok := value.(*Object); ok {
+		if tj, _ := o.GetStr(ctx, "toJSON"); tj != nil {
+			if m, ok := tj.(*Object); ok && m.IsCallable() {
+				r, err := m.fn.call(ctx, o, []Value{String(key)})
+				if err != nil {
+					return nil, false, err
+				}
+				value = r
+			}
+		}
+	}
+	res, err := fn.fn.call(ctx, holder, []Value{String(key), value})
+	if err != nil {
+		return nil, false, err
+	}
+	if IsUndefined(res) {
+		return Undef, false, nil
+	}
+	switch v := res.(type) {
+	case *Object:
+		if v.IsCallable() {
+			return Undef, false, nil
+		}
+		if v.isArray {
+			out := i.newArray(nil)
+			for idx, e := range v.elems {
+				sub, keep, err := i.replaceWalk(ctx, v, intToStr(idx), e, fn)
+				if err != nil {
+					return nil, false, err
+				}
+				if keep {
+					out.elems = append(out.elems, sub)
+				} else {
+					out.elems = append(out.elems, Nul)
+				}
+			}
+			return out, true, nil
+		}
+		out := NewObject(i.objectProto)
+		for _, name := range v.OwnKeys() {
+			if p, ok := v.getOwn(StrKey(name)); ok && p.Enumerable {
+				ev, _ := v.GetStr(ctx, name)
+				sub, keep, err := i.replaceWalk(ctx, v, name, ev, fn)
+				if err != nil {
+					return nil, false, err
+				}
+				if keep {
+					out.SetData(name, sub)
+				}
+			}
+		}
+		return out, true, nil
+	default:
+		return res, true, nil
+	}
+}
+
+// filterKeys returns a copy of value where objects retain only allowlisted
+// keys (arrays and their elements pass through).
+func (i *Interpreter) filterKeys(ctx context.Context, value Value, allow map[string]bool, seen map[*Object]bool) Value {
+	o, ok := value.(*Object)
+	if !ok || o.IsCallable() || seen[o] {
+		return value
+	}
+	seen[o] = true
+	defer delete(seen, o)
+	if o.isArray {
+		out := i.newArray(nil)
+		for _, e := range o.elems {
+			out.elems = append(out.elems, i.filterKeys(ctx, e, allow, seen))
+		}
+		return out
+	}
+	out := NewObject(i.objectProto)
+	for _, name := range o.OwnKeys() {
+		if !allow[name] {
+			continue
+		}
+		if p, ok := o.getOwn(StrKey(name)); ok && p.Enumerable {
+			ev, _ := o.GetStr(ctx, name)
+			out.SetData(name, i.filterKeys(ctx, ev, allow, seen))
+		}
+	}
+	return out
+}
+
+// jsonRevive applies a reviver function bottom-up: children are revived before
+// their parent, and a child revived to undefined is deleted.
+func (i *Interpreter) jsonRevive(ctx context.Context, holder *Object, key string, reviver *Object) (Value, error) {
+	val, _ := holder.GetStr(ctx, key)
+	if o, ok := val.(*Object); ok {
+		if o.isArray {
+			for idx := range o.elems {
+				name := intToStr(idx)
+				revived, err := i.jsonRevive(ctx, o, name, reviver)
+				if err != nil {
+					return nil, err
+				}
+				o.elems[idx] = revived // undefined becomes a hole/undefined
+			}
+		} else {
+			for _, name := range o.OwnKeys() {
+				revived, err := i.jsonRevive(ctx, o, name, reviver)
+				if err != nil {
+					return nil, err
+				}
+				if IsUndefined(revived) {
+					o.Delete(StrKey(name))
+				} else {
+					o.SetData(name, revived)
+				}
+			}
+		}
+	}
+	return reviver.fn.call(ctx, holder, []Value{String(key), val})
 }
