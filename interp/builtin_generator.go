@@ -123,6 +123,18 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 			return yieldMsg{value: Undef, done: true}
 		}
 		if !started {
+			// An abrupt resume (return or throw) of a generator still suspended at
+			// its start completes it immediately, without ever executing the body
+			// (ECMA-262 27.5.3.3/27.5.3.4: a suspendedStart generator goes straight
+			// to completed). Only a normal resume (next) starts the body.
+			switch msg.mode {
+			case resumeReturn:
+				gs.done = true
+				return yieldMsg{value: msg.value, done: true}
+			case resumeThrow:
+				gs.done = true
+				return yieldMsg{done: true, err: NewThrow(msg.value)}
+			}
 			start()
 		}
 		select {
