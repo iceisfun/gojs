@@ -39,7 +39,7 @@ func (i *Interpreter) initFunction() {
 				return nil, i.throwError(ctx, "TypeError", "CreateListFromArrayLike called on non-object")
 			}
 			if arr.isArray {
-				callArgs = append(callArgs, arr.elems...)
+				callArgs = append(callArgs, arr.denseCopy()...)
 			} else {
 				lenV, _ := arr.GetStr(ctx, "length")
 				n := int(ToInteger(ToNumber(lenV)))

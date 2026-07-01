@@ -146,9 +146,10 @@ func (i *Interpreter) arrayConstruct(ctx context.Context, this Value, args []Val
 			if float64(n) != float64(length) || length < 0 {
 				return nil, i.throwError(ctx, "RangeError", "Invalid array length")
 			}
+			// Array(n) produces a sparse array of n holes, not n undefineds.
 			elems := make([]Value, length)
 			for j := range elems {
-				elems[j] = Undef
+				elems[j] = theHole
 			}
 			return i.newArray(elems), nil
 		}
@@ -186,7 +187,7 @@ func (i *Interpreter) arrayPop(ctx context.Context, this Value, args []Value) (V
 	}
 	v := o.elems[len(o.elems)-1]
 	o.elems = o.elems[:len(o.elems)-1]
-	return v, nil
+	return undefIfHole(v), nil
 }
 
 func (i *Interpreter) arrayShift(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -199,7 +200,7 @@ func (i *Interpreter) arrayShift(ctx context.Context, this Value, args []Value) 
 	}
 	v := o.elems[0]
 	o.elems = o.elems[1:]
-	return v, nil
+	return undefIfHole(v), nil
 }
 
 func (i *Interpreter) arrayUnshift(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -290,7 +291,8 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 		if j > 0 {
 			out += sep
 		}
-		if IsNullish(v) {
+		// Holes, null, and undefined all render as the empty string.
+		if isHole(v) || IsNullish(v) {
 			continue
 		}
 		s, err := i.ToStringV(ctx, v)
@@ -328,8 +330,9 @@ func (i *Interpreter) arrayIncludes(ctx context.Context, this Value, args []Valu
 	}
 	target := arg(args, 0)
 	start := fromIndex(argIntOr(ctx, i, args, 1, 0), len(o.elems))
+	// includes does not skip holes; a hole is treated as undefined.
 	for j := start; j < len(o.elems); j++ {
-		if sameValueZero(o.elems[j], target) {
+		if sameValueZero(elemAt(o, j), target) {
 			return True, nil
 		}
 	}
@@ -348,14 +351,25 @@ func fromIndex(idx, n int) int {
 	return idx
 }
 
-// iterCallback runs fn(this=thisArg, [element, index, array]) for each element.
-func (i *Interpreter) eachElem(ctx context.Context, o *Object, cb Value, thisArg Value, fn func(idx int, res Value) (bool, error)) error {
+// eachElem runs fn(this=thisArg, [element, index, array]) for each element.
+// When skipHoles is true (the HasProperty-family methods: forEach, map, filter,
+// some, every, flatMap) hole indices are not visited at all; when false (the
+// Get-from-0..len methods: find, findIndex) a hole is visited with the callback
+// receiving undefined. The hole sentinel is never passed to the callback.
+func (i *Interpreter) eachElem(ctx context.Context, o *Object, cb Value, thisArg Value, skipHoles bool, fn func(idx int, res Value) (bool, error)) error {
 	callback, ok := cb.(*Object)
 	if !ok || !callback.IsCallable() {
 		return i.throwError(ctx, "TypeError", briefValue(cb)+" is not a function")
 	}
 	for j := 0; j < len(o.elems); j++ {
-		res, err := callback.fn.call(ctx, thisArg, []Value{o.elems[j], Number(float64(j)), o})
+		v := o.elems[j]
+		if isHole(v) {
+			if skipHoles {
+				continue
+			}
+			v = Undef
+		}
+		res, err := callback.fn.call(ctx, thisArg, []Value{v, Number(float64(j)), o})
 		if err != nil {
 			return err
 		}
@@ -371,7 +385,7 @@ func (i *Interpreter) arrayForEach(ctx context.Context, this Value, args []Value
 	if err != nil {
 		return nil, err
 	}
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(int, Value) (bool, error) { return false, nil })
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(int, Value) (bool, error) { return false, nil })
 	return Undef, err
 }
 
@@ -380,9 +394,14 @@ func (i *Interpreter) arrayMap(ctx context.Context, this Value, args []Value) (V
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Value, 0, len(o.elems))
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(_ int, res Value) (bool, error) {
-		out = append(out, res)
+	// map preserves hole positions: pre-fill with holes, then overwrite only the
+	// indices the callback actually visits.
+	out := make([]Value, len(o.elems))
+	for j := range out {
+		out[j] = theHole
+	}
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(idx int, res Value) (bool, error) {
+		out[idx] = res
 		return false, nil
 	})
 	if err != nil {
@@ -397,9 +416,9 @@ func (i *Interpreter) arrayFilter(ctx context.Context, this Value, args []Value)
 		return nil, err
 	}
 	var out []Value
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(idx int, res Value) (bool, error) {
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(idx int, res Value) (bool, error) {
 		if ToBoolean(res) {
-			out = append(out, o.elems[idx])
+			out = append(out, elemAt(o, idx))
 		}
 		return false, nil
 	})
@@ -415,9 +434,10 @@ func (i *Interpreter) arrayFind(ctx context.Context, this Value, args []Value) (
 		return nil, err
 	}
 	result := Value(Undef)
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(idx int, res Value) (bool, error) {
+	// find does not skip holes; a hole is visited as undefined.
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), false, func(idx int, res Value) (bool, error) {
 		if ToBoolean(res) {
-			result = o.elems[idx]
+			result = elemAt(o, idx)
 			return true, nil
 		}
 		return false, nil
@@ -431,7 +451,8 @@ func (i *Interpreter) arrayFindIndex(ctx context.Context, this Value, args []Val
 		return nil, err
 	}
 	result := Number(-1)
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(idx int, res Value) (bool, error) {
+	// findIndex does not skip holes; a hole is visited as undefined.
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), false, func(idx int, res Value) (bool, error) {
 		if ToBoolean(res) {
 			result = Number(float64(idx))
 			return true, nil
@@ -447,7 +468,7 @@ func (i *Interpreter) arraySome(ctx context.Context, this Value, args []Value) (
 		return nil, err
 	}
 	found := false
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(_ int, res Value) (bool, error) {
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(_ int, res Value) (bool, error) {
 		if ToBoolean(res) {
 			found = true
 			return true, nil
@@ -463,7 +484,7 @@ func (i *Interpreter) arrayEvery(ctx context.Context, this Value, args []Value) 
 		return nil, err
 	}
 	all := true
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(_ int, res Value) (bool, error) {
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(_ int, res Value) (bool, error) {
 		if !ToBoolean(res) {
 			all = false
 			return true, nil
@@ -482,22 +503,29 @@ func (i *Interpreter) arrayReduce(ctx context.Context, this Value, args []Value)
 	if !ok || !callback.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "Reduce callback is not a function")
 	}
+	// reduce skips holes: they seed neither the accumulator nor a callback call.
 	var acc Value
-	start := 0
+	haveAcc := false
 	if len(args) >= 2 {
 		acc = args[1]
-	} else {
-		if len(o.elems) == 0 {
-			return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
-		}
-		acc = o.elems[0]
-		start = 1
+		haveAcc = true
 	}
-	for j := start; j < len(o.elems); j++ {
+	for j := 0; j < len(o.elems); j++ {
+		if isHole(o.elems[j]) {
+			continue
+		}
+		if !haveAcc {
+			acc = o.elems[j]
+			haveAcc = true
+			continue
+		}
 		acc, err = callback.fn.call(ctx, Undef, []Value{acc, o.elems[j], Number(float64(j)), o})
 		if err != nil {
 			return nil, err
 		}
+	}
+	if !haveAcc {
+		return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
 	}
 	return acc, nil
 }
@@ -560,6 +588,9 @@ func (i *Interpreter) arrayFlat(ctx context.Context, this Value, args []Value) (
 	flatten = func(elems []Value, d int) []Value {
 		var out []Value
 		for _, v := range elems {
+			if isHole(v) {
+				continue // flatten uses HasProperty; holes are skipped
+			}
 			if vo, ok := v.(*Object); ok && vo.isArray && d > 0 {
 				out = append(out, flatten(vo.elems, d-1)...)
 			} else {
@@ -598,7 +629,8 @@ func (i *Interpreter) arrayValues(ctx context.Context, this Value, args []Value)
 		if idx >= len(o.elems) {
 			return Undef, false
 		}
-		v := o.elems[idx]
+		// The array iterator reads 0..len via [[Get]], densifying holes.
+		v := elemAt(o, idx)
 		idx++
 		return v, true
 	}), nil
@@ -614,7 +646,7 @@ func (i *Interpreter) arrayEntries(ctx context.Context, this Value, args []Value
 		if idx >= len(o.elems) {
 			return Undef, false
 		}
-		pair := i.newArray([]Value{Number(float64(idx)), o.elems[idx]})
+		pair := i.newArray([]Value{Number(float64(idx)), elemAt(o, idx)})
 		idx++
 		return pair, true
 	}), nil

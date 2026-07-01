@@ -529,8 +529,9 @@ func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key strin
 		defer delete(seen, v)
 		if v.isArray {
 			out := i.newArray(nil)
-			for idx, e := range v.elems {
-				sub, keep, err := i.replaceWalk(ctx, v, intToStr(idx), e, fn, seen, depth+1)
+			for idx := range v.elems {
+				// The replacer sees holes as undefined (array Get over 0..len).
+				sub, keep, err := i.replaceWalk(ctx, v, intToStr(idx), elemAt(v, idx), fn, seen, depth+1)
 				if err != nil {
 					return nil, false, err
 				}

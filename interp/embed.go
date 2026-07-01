@@ -115,8 +115,8 @@ func (i *Interpreter) toGo(v Value, seen map[*Object]bool) any {
 		defer delete(seen, x)
 		if x.isArray {
 			out := make([]any, len(x.elems))
-			for idx, e := range x.elems {
-				out[idx] = i.toGo(e, seen)
+			for idx := range x.elems {
+				out[idx] = i.toGo(elemAt(x, idx), seen)
 			}
 			return out
 		}

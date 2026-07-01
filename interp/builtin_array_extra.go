@@ -20,13 +20,18 @@ func (i *Interpreter) arraySort(ctx context.Context, this Value, args []Value) (
 	if c, ok := arg(args, 0).(*Object); ok && c.IsCallable() {
 		cmp = c
 	}
-	// undefined elements always sort to the end and are not passed to cmp.
+	// undefined elements always sort to the end (and are not passed to cmp);
+	// holes sort after even the undefineds, preserving their absence.
 	var defined []Value
 	undefinedCount := 0
+	holeCount := 0
 	for _, v := range o.elems {
-		if IsUndefined(v) {
+		switch {
+		case isHole(v):
+			holeCount++
+		case IsUndefined(v):
 			undefinedCount++
-		} else {
+		default:
 			defined = append(defined, v)
 		}
 	}
@@ -68,6 +73,9 @@ func (i *Interpreter) arraySort(ctx context.Context, this Value, args []Value) (
 	for k := 0; k < undefinedCount; k++ {
 		defined = append(defined, Undef)
 	}
+	for k := 0; k < holeCount; k++ {
+		defined = append(defined, theHole)
+	}
 	o.elems = defined
 	return o, nil
 }
@@ -79,9 +87,14 @@ func (i *Interpreter) arrayFlatMap(ctx context.Context, this Value, args []Value
 		return nil, err
 	}
 	var out []Value
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), func(_ int, res Value) (bool, error) {
+	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(_ int, res Value) (bool, error) {
 		if ro, ok := res.(*Object); ok && ro.isArray {
-			out = append(out, ro.elems...)
+			// FlattenIntoArray uses HasProperty; skip holes in the mapped array.
+			for _, ev := range ro.elems {
+				if !isHole(ev) {
+					out = append(out, ev)
+				}
+			}
 		} else {
 			out = append(out, res)
 		}
@@ -106,7 +119,7 @@ func (i *Interpreter) arrayAt(ctx context.Context, this Value, args []Value) (Va
 	if idx < 0 || idx >= len(o.elems) {
 		return Undef, nil
 	}
-	return o.elems[idx], nil
+	return elemAt(o, idx), nil
 }
 
 // arrayCopyWithin copies a slice of the array to another position within the
@@ -137,9 +150,10 @@ func (i *Interpreter) arrayToReversed(ctx context.Context, this Value, args []Va
 	if err != nil {
 		return nil, err
 	}
+	// The to* methods read 0..len via [[Get]], so holes densify to undefined.
 	out := make([]Value, len(o.elems))
-	for k, v := range o.elems {
-		out[len(o.elems)-1-k] = v
+	for k := range o.elems {
+		out[len(o.elems)-1-k] = elemAt(o, k)
 	}
 	return i.newArray(out), nil
 }
@@ -150,7 +164,7 @@ func (i *Interpreter) arrayToSorted(ctx context.Context, this Value, args []Valu
 	if err != nil {
 		return nil, err
 	}
-	copyArr := i.newArray(append([]Value(nil), o.elems...))
+	copyArr := i.newArray(o.denseCopy())
 	if _, err := i.arraySort(ctx, copyArr, args); err != nil {
 		return nil, err
 	}
@@ -164,7 +178,7 @@ func (i *Interpreter) arrayToSpliced(ctx context.Context, this Value, args []Val
 	if err != nil {
 		return nil, err
 	}
-	copyArr := i.newArray(append([]Value(nil), o.elems...))
+	copyArr := i.newArray(o.denseCopy())
 	if _, err := i.arraySplice(ctx, copyArr, args); err != nil {
 		return nil, err
 	}
@@ -186,7 +200,7 @@ func (i *Interpreter) arrayWith(ctx context.Context, this Value, args []Value) (
 	if idx < 0 || idx >= n {
 		return nil, i.throwError(ctx, "RangeError", "Invalid index")
 	}
-	out := append([]Value(nil), o.elems...)
+	out := o.denseCopy()
 	out[idx] = arg(args, 1)
 	return i.newArray(out), nil
 }
@@ -228,22 +242,29 @@ func (i *Interpreter) arrayReduceRight(ctx context.Context, this Value, args []V
 	if !ok || !callback.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "Reduce callback is not a function")
 	}
+	// reduceRight skips holes, just like reduce.
 	var acc Value
-	start := len(o.elems) - 1
+	haveAcc := false
 	if len(args) >= 2 {
 		acc = args[1]
-	} else {
-		if len(o.elems) == 0 {
-			return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
-		}
-		acc = o.elems[start]
-		start--
+		haveAcc = true
 	}
-	for j := start; j >= 0; j-- {
+	for j := len(o.elems) - 1; j >= 0; j-- {
+		if isHole(o.elems[j]) {
+			continue
+		}
+		if !haveAcc {
+			acc = o.elems[j]
+			haveAcc = true
+			continue
+		}
 		acc, err = callback.fn.call(ctx, Undef, []Value{acc, o.elems[j], Number(float64(j)), o})
 		if err != nil {
 			return nil, err
 		}
+	}
+	if !haveAcc {
+		return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
 	}
 	return acc, nil
 }
@@ -258,13 +279,15 @@ func (i *Interpreter) arrayFindLast(ctx context.Context, this Value, args []Valu
 	if !ok || !cb.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "predicate is not a function")
 	}
+	// findLast does not skip holes; a hole is visited as undefined.
 	for j := len(o.elems) - 1; j >= 0; j-- {
-		r, err := cb.fn.call(ctx, arg(args, 1), []Value{o.elems[j], Number(float64(j)), o})
+		v := elemAt(o, j)
+		r, err := cb.fn.call(ctx, arg(args, 1), []Value{v, Number(float64(j)), o})
 		if err != nil {
 			return nil, err
 		}
 		if ToBoolean(r) {
-			return o.elems[j], nil
+			return v, nil
 		}
 	}
 	return Undef, nil
@@ -281,8 +304,9 @@ func (i *Interpreter) arrayFindLastIndex(ctx context.Context, this Value, args [
 	if !ok || !cb.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "predicate is not a function")
 	}
+	// findLastIndex does not skip holes; a hole is visited as undefined.
 	for j := len(o.elems) - 1; j >= 0; j-- {
-		r, err := cb.fn.call(ctx, arg(args, 1), []Value{o.elems[j], Number(float64(j)), o})
+		r, err := cb.fn.call(ctx, arg(args, 1), []Value{elemAt(o, j), Number(float64(j)), o})
 		if err != nil {
 			return nil, err
 		}

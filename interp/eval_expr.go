@@ -241,7 +241,7 @@ func (i *Interpreter) evalArrayLit(ctx context.Context, e *ast.ArrayLit, env *En
 	var elems []Value
 	for _, el := range e.Elements {
 		if el == nil {
-			elems = append(elems, Undef) // hole
+			elems = append(elems, theHole) // elision → hole
 			continue
 		}
 		if sp, ok := el.(*ast.SpreadElement); ok {

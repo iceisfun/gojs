@@ -216,8 +216,8 @@ func (i *Interpreter) initMap() {
 					m.set(k, v)
 					return nil
 				}
-				k := arg(itemObj.elems, 0)
-				v := arg(itemObj.elems, 1)
+				k := undefIfHole(arg(itemObj.elems, 0))
+				v := undefIfHole(arg(itemObj.elems, 1))
 				m.set(k, v)
 				return nil
 			})
@@ -577,7 +577,7 @@ func (i *Interpreter) initWeakMap() {
 			err := i.iterate(ctx, iterable, func(item Value) error {
 				var pair []Value
 				if itemObj, ok := item.(*Object); ok && itemObj.isArray {
-					pair = itemObj.elems
+					pair = itemObj.denseCopy()
 				} else {
 					if err2 := i.iterate(ctx, item, func(v Value) error {
 						pair = append(pair, v)

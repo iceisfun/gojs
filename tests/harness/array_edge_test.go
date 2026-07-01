@@ -146,7 +146,6 @@ func TestArrayEdgeGroupBy(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestArrayEdgeSparseHoles(t *testing.T) {
-	t.Skip("sparse-array holes are densified to undefined; a true sparse representation is deferred (see NOTES-divergences.md)")
 	// Tests hole semantics as required by the spec. Engines that densify holes
 	// (treating them as explicit undefined) will fail several of these assertions.
 	Expect(t, `
@@ -178,7 +177,6 @@ func TestArrayEdgeSparseHoles(t *testing.T) {
 }
 
 func TestArrayEdgeDeleteHole(t *testing.T) {
-	t.Skip("sparse-array holes are densified to undefined; a true sparse representation is deferred (see NOTES-divergences.md)")
 	// delete arr[i] creates a hole at i; length must remain unchanged.
 	Expect(t, `
 		var arr = [1, 2, 3, 4, 5];
@@ -202,7 +200,6 @@ func TestArrayEdgeDeleteHole(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestArrayEdgeSparseConstructor(t *testing.T) {
-	t.Skip("sparse-array holes are densified to undefined; a true sparse representation is deferred (see NOTES-divergences.md)")
 	// Array(n) must produce a sparse array; forEach/map must treat slots as holes.
 	Expect(t, `
 		var sparse = Array(3);
@@ -224,6 +221,74 @@ func TestArrayEdgeSparseConstructor(t *testing.T) {
 		var mapped = Array(3).map(function() { return 42; });
 		assert.sameValue(mapped.length, 3);
 		assert.sameValue((0 in mapped), false);
+	`)
+}
+
+func TestArrayEdgeSparseReflection(t *testing.T) {
+	// hasOwnProperty, Object.keys, JSON.stringify, spread and join over holes.
+	Expect(t, `
+		var sparse = [1, , 3];
+		// hasOwnProperty distinguishes a hole from a present index
+		assert.sameValue(sparse.hasOwnProperty(0), true);
+		assert.sameValue(sparse.hasOwnProperty(1), false);
+		assert.sameValue(sparse.hasOwnProperty(2), true);
+		// Object.keys reports only present indices, as strings
+		assert.sameValue(Object.keys(sparse).join(","), "0,2");
+		// for-in visits only present indices
+		var seen = [];
+		for (var k in sparse) { seen.push(k); }
+		assert.sameValue(seen.join(","), "0,2");
+		// JSON.stringify renders holes as null
+		assert.sameValue(JSON.stringify(sparse), "[1,null,3]");
+		// join renders holes (like null/undefined) as the empty string
+		assert.sameValue(sparse.join("-"), "1--3");
+		// spread densifies holes to undefined (the iterator reads via Get)
+		var spread = [...sparse];
+		assert.sameValue(spread.length, 3);
+		assert.sameValue((1 in spread), true);
+		assert.sameValue(spread[1], undefined);
+	`)
+}
+
+func TestArrayEdgeSparseMethodVisitation(t *testing.T) {
+	// The HasProperty-family methods skip holes; the Get-from-0..len family visit
+	// them as undefined.
+	Expect(t, `
+		var sparse = [1, , 3];
+		// some / every skip holes (never called for the hole at index 1)
+		var someIdx = [];
+		sparse.some(function(v, idx) { someIdx.push(idx); return false; });
+		assert.sameValue(someIdx.join(","), "0,2");
+		var everyIdx = [];
+		sparse.every(function(v, idx) { everyIdx.push(idx); return true; });
+		assert.sameValue(everyIdx.join(","), "0,2");
+		// reduce skips holes: sum of 1 and 3, callback runs once with no init
+		var calls = 0;
+		var total = sparse.reduce(function(acc, v) { calls++; return acc + v; });
+		assert.sameValue(total, 4);
+		assert.sameValue(calls, 1);
+		// reduceRight likewise skips holes
+		var order = [];
+		sparse.reduceRight(function(acc, v, idx) { order.push(idx); return acc; }, 0);
+		assert.sameValue(order.join(","), "2,0");
+		// find / findIndex do NOT skip; the hole is visited as undefined
+		var visited = [];
+		sparse.find(function(v, idx) { visited.push(idx); return false; });
+		assert.sameValue(visited.join(","), "0,1,2");
+		// includes treats a hole as undefined
+		assert.sameValue([1, , 3].includes(undefined), true);
+		// indexOf does not match a hole with a real value
+		assert.sameValue([1, , 3].indexOf(3), 2);
+		// flat drops holes
+		assert.sameValue([1, , 3].flat().length, 2);
+		// the array iterator (values) densifies holes to undefined
+		var vals = Array.from([1, , 3].values());
+		assert.sameValue(vals.length, 3);
+		assert.sameValue(vals[1], undefined);
+		// fill converts a hole in range into a real element
+		var f = [1, , 3].fill(9, 1, 2);
+		assert.sameValue((1 in f), true);
+		assert.sameValue(f[1], 9);
 	`)
 }
 

@@ -63,6 +63,10 @@ func (i *Interpreter) inspectObject(ctx context.Context, o *Object, seen map[*Ob
 	if o.isArray {
 		parts := make([]string, 0, len(o.elems))
 		for _, e := range o.elems {
+			if isHole(e) {
+				parts = append(parts, "<empty>")
+				continue
+			}
 			s, err := i.inspect(ctx, e, seen, true)
 			if err != nil {
 				return "", err

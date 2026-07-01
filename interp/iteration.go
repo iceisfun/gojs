@@ -39,7 +39,8 @@ func (i *Interpreter) iterate(ctx context.Context, iterable Value, fn func(Value
 		if v.isArray {
 			// Snapshot length to mirror spec-ish behavior on mutation.
 			for j := 0; j < len(v.elems); j++ {
-				if err := fn(v.elems[j]); err != nil {
+				// The array iterator reads via [[Get]], so holes densify to undefined.
+				if err := fn(undefIfHole(v.elems[j])); err != nil {
 					return err
 				}
 			}

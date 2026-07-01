@@ -152,6 +152,53 @@ func (o *Object) IsConstructor() bool { return o.fn != nil && o.fn.construct != 
 func (o *Object) IsArray() bool { return o.isArray }
 
 // ---------------------------------------------------------------------------
+// Array holes (sparse arrays)
+// ---------------------------------------------------------------------------
+
+// holeElem is the sentinel stored in an array's dense element slice to mark an
+// absent index — a "hole" — in a sparse array. It is distinct from undefined:
+// [[Get]] on a hole reads through the prototype chain (normally yielding
+// undefined), but `in` / hasOwnProperty / Object.keys report the index as
+// absent, and the HasProperty-family iteration methods skip it. The sentinel is
+// confined to the interpreter and must never be handed to user code; helpers
+// such as elemAt and undefIfHole enforce that boundary.
+type holeElem struct{}
+
+// Typeof reports "undefined" so an accidental leak degrades gracefully.
+func (holeElem) Typeof() string { return "undefined" }
+
+// theHole is the single hole sentinel value.
+var theHole Value = holeElem{}
+
+// isHole reports whether v is the array-hole sentinel.
+func isHole(v Value) bool { _, ok := v.(holeElem); return ok }
+
+// undefIfHole maps the hole sentinel to undefined, passing any other value
+// through unchanged. It is the boundary that keeps holes from escaping to user
+// code.
+func undefIfHole(v Value) Value {
+	if isHole(v) {
+		return Undef
+	}
+	return v
+}
+
+// elemAt returns the element at index j with the hole sentinel mapped to
+// undefined. The caller must ensure j is within range.
+func elemAt(o *Object, j int) Value { return undefIfHole(o.elems[j]) }
+
+// denseCopy returns a copy of the element slice with holes densified to
+// undefined, matching the [[Get]]-over-0..len behavior of the copying array
+// methods (toReversed, toSorted, toSpliced, with).
+func (o *Object) denseCopy() []Value {
+	out := make([]Value, len(o.elems))
+	for j := range o.elems {
+		out[j] = undefIfHole(o.elems[j])
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // Own-property access
 // ---------------------------------------------------------------------------
 
@@ -163,6 +210,9 @@ func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
 			return &Property{Value: Number(float64(len(o.elems))), Writable: true}, true
 		}
 		if idx, ok := arrayIndex(key.Str); ok && idx < len(o.elems) {
+			if isHole(o.elems[idx]) {
+				return nil, false // hole: not an own property
+			}
 			return &Property{Value: o.elems[idx], Writable: true, Enumerable: true, Configurable: true}, true
 		}
 	}
@@ -211,7 +261,7 @@ func (o *Object) SetHidden(name string, v Value) {
 func (o *Object) deleteOwn(key PropertyKey) bool {
 	if o.isArray && !key.IsSymbol() {
 		if idx, ok := arrayIndex(key.Str); ok && idx < len(o.elems) {
-			o.elems[idx] = Undef // create a hole
+			o.elems[idx] = theHole // create a hole (length is unchanged)
 			return true
 		}
 	}
@@ -236,10 +286,8 @@ func (o *Object) OwnKeys() []string {
 	var strs []string
 	if o.isArray {
 		for i, v := range o.elems {
-			if v != nil && !IsUndefined(v) {
-				indices = append(indices, i)
-			} else if v != nil {
-				indices = append(indices, i)
+			if v != nil && !isHole(v) {
+				indices = append(indices, i) // holes are absent, so excluded
 			}
 		}
 	}
@@ -266,10 +314,12 @@ func (o *Object) OwnKeys() []string {
 // Array helpers
 // ---------------------------------------------------------------------------
 
-// ensureLen grows the element slice to at least n, padding with undefined.
+// ensureLen grows the element slice to at least n, padding new slots with holes
+// (a gap created by an out-of-bounds index write or a length extension is
+// sparse, not filled with explicit undefined).
 func (o *Object) ensureLen(n int) {
 	for len(o.elems) < n {
-		o.elems = append(o.elems, Undef)
+		o.elems = append(o.elems, theHole)
 	}
 }
 
