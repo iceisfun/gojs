@@ -1,0 +1,135 @@
+package interp
+
+import "context"
+
+// This file implements ordinary [[Get]] / [[Set]] / [[HasProperty]] /
+// [[Delete]] over the prototype chain, including accessor (getter/setter)
+// invocation.
+
+// Get returns the value of the property key on the object, walking the
+// prototype chain and invoking a getter if the property is an accessor.
+func (o *Object) Get(ctx context.Context, key PropertyKey) (Value, error) {
+	return o.getWithReceiver(ctx, key, o)
+}
+
+// GetStr is Get for a string key.
+func (o *Object) GetStr(ctx context.Context, name string) (Value, error) {
+	return o.getWithReceiver(ctx, StrKey(name), o)
+}
+
+// getWithReceiver resolves key starting at o but binds getters' `this` to
+// receiver (which matters for inherited accessors).
+func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver Value) (Value, error) {
+	for cur := o; cur != nil; cur = cur.proto {
+		if p, ok := cur.getOwn(key); ok {
+			if p.Accessor {
+				if p.Get == nil {
+					return Undef, nil
+				}
+				return p.Get.fn.call(ctx, receiver, nil)
+			}
+			return p.Value, nil
+		}
+	}
+	return Undef, nil
+}
+
+// Has reports whether key exists anywhere on the prototype chain.
+func (o *Object) Has(key PropertyKey) bool {
+	for cur := o; cur != nil; cur = cur.proto {
+		if _, ok := cur.getOwn(key); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// HasOwn reports whether key is an own property of o.
+func (o *Object) HasOwn(key PropertyKey) bool {
+	_, ok := o.getOwn(key)
+	return ok
+}
+
+// Set assigns v to key, honoring inherited setters and non-writable data
+// properties. In this (non-strict-by-default) implementation, writes that the
+// spec would silently ignore are silently ignored.
+func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
+	// Search the prototype chain for an accessor or a non-writable data
+	// property that governs the assignment.
+	for cur := o; cur != nil; cur = cur.proto {
+		p, ok := cur.getOwn(key)
+		if !ok {
+			continue
+		}
+		if p.Accessor {
+			if p.Set == nil {
+				return nil // no setter: ignore (would throw in strict mode)
+			}
+			_, err := p.Set.fn.call(ctx, o, []Value{v})
+			return err
+		}
+		if cur == o {
+			// Own data property: update in place if writable.
+			if !p.Writable {
+				return nil
+			}
+			o.writeData(key, v)
+			return nil
+		}
+		if !p.Writable {
+			return nil // inherited read-only data property blocks the write
+		}
+		break // inherited writable data property: create an own property
+	}
+	if !o.extensible {
+		return nil
+	}
+	o.writeData(key, v)
+	return nil
+}
+
+// SetStr is Set for a string key.
+func (o *Object) SetStr(ctx context.Context, name string, v Value) error {
+	return o.Set(ctx, StrKey(name), v)
+}
+
+// writeData creates or updates an own data property, routing array elements and
+// length through the array-aware path.
+func (o *Object) writeData(key PropertyKey, v Value) {
+	if !key.IsSymbol() && o.isArray {
+		if key.Str == "length" {
+			o.setArrayLength(v)
+			return
+		}
+		if idx, ok := arrayIndex(key.Str); ok {
+			o.ensureLen(idx + 1)
+			o.elems[idx] = v
+			return
+		}
+	}
+	if p, ok := o.props[key]; ok && !p.Accessor {
+		p.Value = v
+		return
+	}
+	o.defineOwn(key, &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
+}
+
+// Delete removes an own property, returning whether the object no longer has it.
+func (o *Object) Delete(key PropertyKey) bool {
+	if p, ok := o.props[key]; ok && !p.Configurable {
+		return false
+	}
+	o.deleteOwn(key)
+	return true
+}
+
+// DefineAccessor installs a getter/setter accessor property.
+func (o *Object) DefineAccessor(name string, get, set *Object, enumerable bool) {
+	o.defineOwn(StrKey(name), &Property{
+		Get:          get,
+		Set:          set,
+		Accessor:     true,
+		Enumerable:   enumerable,
+		Configurable: true,
+	})
+}

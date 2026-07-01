@@ -1,0 +1,124 @@
+package interp
+
+// Environment is a lexical scope: a set of variable bindings plus a link to the
+// enclosing scope. Environments form a chain from the innermost block out to
+// the global environment.
+//
+// Binding kinds:
+//   - var / function declarations are hoisted to the nearest function (or
+//     global) scope; these use mutable, pre-initialized bindings.
+//   - let / const are block-scoped and start uninitialized, giving the
+//     Temporal Dead Zone: reading before initialization is a ReferenceError.
+type Environment struct {
+	parent  *Environment
+	vars    map[string]*binding
+	fnScope bool    // true for function bodies and the global scope
+	thisVal Value   // `this` binding for this scope (nil = inherit from parent)
+	hasThis bool    // whether thisVal is set at this scope
+	newTgt  Value   // new.target for this scope
+	homeObj *Object // [[HomeObject]] for super resolution in methods
+}
+
+// binding is a single variable slot.
+type binding struct {
+	value       Value
+	mutable     bool // false for const
+	initialized bool // false while in the Temporal Dead Zone
+}
+
+// NewEnvironment creates a child environment of parent. If fnScope is true, the
+// environment acts as a var/function hoisting target.
+func NewEnvironment(parent *Environment, fnScope bool) *Environment {
+	return &Environment{
+		parent:  parent,
+		vars:    make(map[string]*binding),
+		fnScope: fnScope,
+	}
+}
+
+// declare creates a lexical binding (let/const/class) in this environment,
+// initially in the TDZ. It overwrites any existing binding of the same name in
+// this scope.
+func (e *Environment) declareLexical(name string, mutable bool) *binding {
+	b := &binding{mutable: mutable, initialized: false}
+	e.vars[name] = b
+	return b
+}
+
+// declareVar creates (or reuses) a hoisted, pre-initialized var binding in the
+// nearest function/global scope.
+func (e *Environment) declareVar(name string, v Value) {
+	target := e.functionScope()
+	if b, ok := target.vars[name]; ok {
+		if v != nil {
+			b.value = v
+		}
+		b.initialized = true
+		return
+	}
+	init := Value(Undef)
+	if v != nil {
+		init = v
+	}
+	target.vars[name] = &binding{value: init, mutable: true, initialized: true}
+}
+
+// functionScope returns the nearest enclosing function or global environment.
+func (e *Environment) functionScope() *Environment {
+	for env := e; env != nil; env = env.parent {
+		if env.fnScope {
+			return env
+		}
+	}
+	return e
+}
+
+// lookup returns the binding for name, searching outward, or nil.
+func (e *Environment) lookup(name string) *binding {
+	for env := e; env != nil; env = env.parent {
+		if b, ok := env.vars[name]; ok {
+			return b
+		}
+	}
+	return nil
+}
+
+// has reports whether name is bound anywhere in the chain.
+func (e *Environment) has(name string) bool { return e.lookup(name) != nil }
+
+// thisBinding returns the effective `this` value, searching outward to the
+// nearest scope that established one.
+func (e *Environment) thisBinding() (Value, bool) {
+	for env := e; env != nil; env = env.parent {
+		if env.hasThis {
+			return env.thisVal, true
+		}
+	}
+	return Undef, false
+}
+
+// setThis establishes the `this` binding for this environment.
+func (e *Environment) setThis(v Value) {
+	e.thisVal = v
+	e.hasThis = true
+}
+
+// homeObject returns the nearest [[HomeObject]] for super resolution.
+func (e *Environment) homeObject() *Object {
+	for env := e; env != nil; env = env.parent {
+		if env.homeObj != nil {
+			return env.homeObj
+		}
+	}
+	return nil
+}
+
+// newTarget returns the nearest new.target value.
+func (e *Environment) newTarget() Value {
+	for env := e; env != nil; env = env.parent {
+		if env.newTgt != nil {
+			return env.newTgt
+		}
+	}
+	return Undef
+}
