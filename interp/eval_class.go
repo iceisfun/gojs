@@ -181,9 +181,15 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 				return nil, err
 			}
 			// An explicit object return from a constructor replaces `this`; a
-			// primitive (or undefined) return is ignored.
+			// primitive (or undefined) return is ignored. In a derived class a
+			// non-object return instead reads the `this` binding, which is still
+			// uninitialized if super() was never called — a ReferenceError
+			// (ECMA-262 10.2.2 / GetThisBinding on an uninitialized environment).
 			if obj, ok := ret.(*Object); ok {
 				result = obj
+			} else if cd.superCtor != nil && (env.superInit == nil || !env.superInit.called) {
+				return nil, i.throwError(ctx, "ReferenceError",
+					"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
 			}
 		} else if cd.superCtor != nil {
 			// Default derived constructor behaves as `constructor(...args) {
