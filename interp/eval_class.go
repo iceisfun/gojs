@@ -274,11 +274,31 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 			}
 		}
 		if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+			if !self.extensible {
+				return i.throwError(ctx, "TypeError",
+					"Cannot add private field "+priv.Name+" to a non-extensible object")
+			}
 			self.definePrivate(cd.env.resolvePrivate(priv.Name), &Property{Value: v, Writable: true})
 			continue
 		}
-		self.writeData(key, v)
+		if err := i.defineFieldOrThrow(ctx, self, key, v); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// defineFieldOrThrow creates a public class field as an own data property with
+// CreateDataPropertyOrThrow semantics: adding a new property to a non-extensible
+// object (e.g. a field initializer froze `this`) is a TypeError.
+func (i *Interpreter) defineFieldOrThrow(ctx context.Context, obj *Object, key PropertyKey, v Value) error {
+	if !obj.extensible {
+		if _, exists := obj.getOwn(key); !exists {
+			return i.throwError(ctx, "TypeError",
+				"Cannot define property "+keyName(key)+", object is not extensible")
+		}
+	}
+	obj.writeData(key, v)
 	return nil
 }
 
@@ -302,11 +322,14 @@ func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.
 		}
 	}
 	if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+		if !ctor.extensible {
+			return i.throwError(ctx, "TypeError",
+				"Cannot add private field "+priv.Name+" to a non-extensible object")
+		}
 		ctor.definePrivate(classEnv.resolvePrivate(priv.Name), &Property{Value: v, Writable: true})
 		return nil
 	}
-	ctor.writeData(key, v)
-	return nil
+	return i.defineFieldOrThrow(ctx, ctor, key, v)
 }
 
 // forbidStaticPrototypeKey returns a TypeError when a static class element's
