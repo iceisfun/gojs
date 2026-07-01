@@ -141,6 +141,21 @@ func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *En
 
 // evalBinary evaluates a binary operator expression.
 func (i *Interpreter) evalBinary(ctx context.Context, e *ast.BinaryExpr, env *Environment) (Value, error) {
+	// Ergonomic brand check: `#field in obj` tests whether obj carries the
+	// private field, without evaluating `#field` as a value.
+	if e.Op == token.IN {
+		if priv, ok := e.Left.(*ast.PrivateIdent); ok {
+			right, err := i.evalExpr(ctx, e.Right, env)
+			if err != nil {
+				return nil, err
+			}
+			obj, ok := right.(*Object)
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "Cannot use 'in' operator to search in a non-object")
+			}
+			return Bool(obj.HasOwn(StrKey(priv.Name))), nil
+		}
+	}
 	left, err := i.evalExpr(ctx, e.Left, env)
 	if err != nil {
 		return nil, err

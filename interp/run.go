@@ -17,7 +17,9 @@ import (
 func (i *Interpreter) RunString(sourceName, source string) (Value, error) {
 	prog, err := parser.Parse(sourceName, source)
 	if err != nil {
-		return nil, err
+		// A parse failure is a SyntaxError; surface it as a thrown JS value so
+		// embedders (and try/catch-style harnesses) see a proper error object.
+		return nil, NewThrow(i.newError("SyntaxError", err.Error()))
 	}
 	return i.RunProgram(prog)
 }

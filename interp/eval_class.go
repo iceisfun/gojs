@@ -346,6 +346,13 @@ func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCt
 	if !ok || self == nil || parentObj == self {
 		return nil
 	}
+	// If the parent is an exotic Array (class X extends Array), the instance
+	// must itself be array-backed so length/indexing/push work on it.
+	if parentObj.isArray {
+		self.isArray = true
+		self.elems = parentObj.elems
+		self.class = "Array"
+	}
 	for _, name := range parentObj.OwnKeys() {
 		if p, ok := parentObj.getOwn(StrKey(name)); ok {
 			self.defineOwn(StrKey(name), p)

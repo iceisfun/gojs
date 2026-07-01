@@ -52,6 +52,9 @@ type parser struct {
 	inFunction int
 	inLoop     int
 	inSwitch   int
+	// classDepth is the class-body nesting depth; private names (#x) are only
+	// valid where it is > 0.
+	classDepth int
 }
 
 // Parse parses source into a [*ast.Program]. sourceName is used in error

@@ -422,12 +422,16 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 	}
 	lb := p.expect(token.LBRACE)
 	def.Lbrace = lb.Pos
+	// Private names (#x) are only valid inside a class body; track nesting so
+	// their use elsewhere is a SyntaxError (see parsePrivateName).
+	p.classDepth++
 	for !p.at(token.RBRACE) && !p.at(token.EOF) {
 		if p.accept(token.SEMICOLON) {
 			continue // stray semicolons between members are allowed
 		}
 		def.Members = append(def.Members, p.parseClassMember())
 	}
+	p.classDepth--
 	rb := p.expect(token.RBRACE)
 	def.Rbrace = rb.Pos
 	return def
