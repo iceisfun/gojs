@@ -412,13 +412,50 @@ func (i *Interpreter) bigBitwise(ctx context.Context, op token.Type, a, b *BigIn
 	case token.BIT_XOR:
 		res.Xor(a.Int, b.Int)
 	case token.SHL:
-		res.Lsh(a.Int, uint(b.Int.Int64()))
+		return i.bigShift(ctx, a.Int, b.Int, false)
 	case token.SHR:
-		res.Rsh(a.Int, uint(b.Int.Int64()))
+		return i.bigShift(ctx, a.Int, b.Int, true)
 	default:
 		return nil, i.throwError(ctx, "TypeError", "BigInts have no unsigned right shift, use >> instead")
 	}
 	return &BigInt{Int: res}, nil
+}
+
+// maxBigIntShift bounds a BigInt left shift. math/big allocates the full
+// magnitude of the result, so an unbounded or negative-wrapped shift count can
+// panic the host (makeslice: len out of range) or exhaust memory. Beyond this
+// many bits we report the result as exceeding the maximum BigInt size, matching
+// engines that cap BigInt precision. ~1 billion bits is far past any real use.
+const maxBigIntShift = 1 << 30
+
+// bigShift implements BigInt << and >> with ECMAScript semantics: a negative
+// shift count reverses direction (x << -n === x >> n). It rejects left shifts
+// that would exceed the maximum BigInt size rather than letting math/big panic.
+func (i *Interpreter) bigShift(ctx context.Context, a, shift *big.Int, right bool) (Value, error) {
+	n := new(big.Int).Set(shift)
+	if n.Sign() < 0 {
+		right = !right
+		n.Neg(n)
+	}
+	if right {
+		// A right shift by an out-of-range amount saturates: 0 for a
+		// non-negative operand, -1 for a negative one. No allocation risk.
+		if !n.IsInt64() || n.Int64() > maxBigIntShift {
+			if a.Sign() < 0 {
+				return &BigInt{Int: big.NewInt(-1)}, nil
+			}
+			return &BigInt{Int: big.NewInt(0)}, nil
+		}
+		return &BigInt{Int: new(big.Int).Rsh(a, uint(n.Int64()))}, nil
+	}
+	// Shifting zero is always zero, regardless of the (finite) count.
+	if a.Sign() == 0 {
+		return &BigInt{Int: big.NewInt(0)}, nil
+	}
+	if !n.IsInt64() || n.Int64() > maxBigIntShift {
+		return nil, i.throwError(ctx, "RangeError", "Maximum BigInt size exceeded")
+	}
+	return &BigInt{Int: new(big.Int).Lsh(a, uint(n.Int64()))}, nil
 }
 
 // evalIn implements the `in` operator.
