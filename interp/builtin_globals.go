@@ -52,14 +52,7 @@ func (i *Interpreter) initGlobals() {
 	// eval is not implemented; it either throws (when hardened) or reports the
 	// missing capability. Dynamic code evaluation is intentionally unsupported.
 	i.setGlobalFunc("eval", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if i.security.DisableEval {
-			return nil, i.throwError(ctx, "EvalError", "eval is disabled in this sandbox")
-		}
-		// Per spec, eval of a non-string returns the argument unchanged.
-		if _, ok := arg(args, 0).(String); !ok {
-			return arg(args, 0), nil
-		}
-		return nil, i.throwError(ctx, "EvalError", "dynamic eval of source text is not supported")
+		return i.evalSource(ctx, arg(args, 0))
 	})
 
 	// URI helpers (thin wrappers over Go's URL escaping semantics).

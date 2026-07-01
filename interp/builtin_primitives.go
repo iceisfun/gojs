@@ -97,6 +97,10 @@ func thisSymbol(this Value) (*Symbol, bool) {
 
 func (i *Interpreter) initNumber() {
 	proto := i.numberProto
+	// Number.prototype is itself a Number wrapper with [[NumberData]] 0, so
+	// Number.prototype.valueOf() and .toString() work on it directly.
+	proto.class = "Number"
+	proto.primitive = Number(0)
 
 	num := func(this Value) (float64, bool) {
 		switch x := this.(type) {
@@ -227,6 +231,9 @@ func (i *Interpreter) initNumber() {
 
 func (i *Interpreter) initBoolean() {
 	proto := i.booleanProto
+	// Boolean.prototype is itself a Boolean wrapper with [[BooleanData]] false.
+	proto.class = "Boolean"
+	proto.primitive = Boolean(false)
 
 	boolOf := func(this Value) (bool, bool) {
 		switch x := this.(type) {

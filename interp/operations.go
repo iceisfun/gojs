@@ -42,6 +42,24 @@ func strictEquals(a, b Value) bool {
 	}
 }
 
+// sameValue implements the SameValue comparison (§7.2.10): like strict equality
+// but NaN equals NaN and +0 is distinct from -0. It backs Object.is.
+func sameValue(a, b Value) bool {
+	if xa, ok := a.(Number); ok {
+		if xb, ok := b.(Number); ok {
+			fa, fb := float64(xa), float64(xb)
+			if math.IsNaN(fa) && math.IsNaN(fb) {
+				return true
+			}
+			if fa == 0 && fb == 0 {
+				return math.Signbit(fa) == math.Signbit(fb)
+			}
+			return fa == fb
+		}
+	}
+	return strictEquals(a, b)
+}
+
 // sameValueZero is strictEquals except that NaN is considered equal to NaN
 // (§7.2.11). It backs Array.prototype.includes and Map/Set keys.
 func sameValueZero(a, b Value) bool {

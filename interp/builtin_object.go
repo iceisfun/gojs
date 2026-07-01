@@ -269,8 +269,111 @@ func (i *Interpreter) initObject() {
 		return o, nil
 	})
 
+	i.defineMethod(ctor, "getOwnPropertyDescriptor", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, err := i.ToObject(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		key, err := i.ToPropertyKey(ctx, arg(args, 1))
+		if err != nil {
+			return nil, err
+		}
+		p, ok := o.getOwn(key)
+		if !ok {
+			return Undef, nil
+		}
+		return i.descriptorToObject(p), nil
+	})
+	i.defineMethod(ctor, "getOwnPropertyDescriptors", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, err := i.ToObject(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		out := NewObject(i.objectProto)
+		for _, name := range o.OwnKeys() {
+			if p, ok := o.getOwn(StrKey(name)); ok {
+				out.SetData(name, i.descriptorToObject(p))
+			}
+		}
+		return out, nil
+	})
+	i.defineMethod(ctor, "getOwnPropertySymbols", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, err := i.ToObject(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		var syms []Value
+		for _, k := range o.keys {
+			if k.IsSymbol() {
+				syms = append(syms, k.Sym)
+			}
+		}
+		return i.newArray(syms), nil
+	})
+	i.defineMethod(ctor, "isExtensible", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, ok := arg(args, 0).(*Object)
+		return Bool(ok && o.extensible), nil
+	})
+	i.defineMethod(ctor, "preventExtensions", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if o, ok := arg(args, 0).(*Object); ok {
+			o.extensible = false
+		}
+		return arg(args, 0), nil
+	})
+	i.defineMethod(ctor, "seal", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if o, ok := arg(args, 0).(*Object); ok {
+			o.extensible = false
+			for _, p := range o.props {
+				p.Configurable = false
+			}
+		}
+		return arg(args, 0), nil
+	})
+	i.defineMethod(ctor, "isSealed", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, ok := arg(args, 0).(*Object)
+		if !ok {
+			return True, nil
+		}
+		if o.extensible {
+			return False, nil
+		}
+		for _, p := range o.props {
+			if p.Configurable {
+				return False, nil
+			}
+		}
+		return True, nil
+	})
+	i.defineMethod(ctor, "is", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return Bool(sameValue(arg(args, 0), arg(args, 1))), nil
+	})
+
 	i.objectCtor = ctor
 	i.setGlobalHidden("Object", ctor)
+}
+
+// descriptorToObject renders a property descriptor as a plain object, matching
+// Object.getOwnPropertyDescriptor's result shape.
+func (i *Interpreter) descriptorToObject(p *Property) *Object {
+	d := NewObject(i.objectProto)
+	if p.Accessor {
+		if p.Get != nil {
+			d.SetData("get", p.Get)
+		} else {
+			d.SetData("get", Undef)
+		}
+		if p.Set != nil {
+			d.SetData("set", p.Set)
+		} else {
+			d.SetData("set", Undef)
+		}
+	} else {
+		d.SetData("value", p.Value)
+		d.SetData("writable", Bool(p.Writable))
+	}
+	d.SetData("enumerable", Bool(p.Enumerable))
+	d.SetData("configurable", Bool(p.Configurable))
+	return d
 }
 
 // enumerableKeys collects a value for each own enumerable string-keyed property
