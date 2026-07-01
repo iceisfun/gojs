@@ -42,3 +42,35 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 	}
 	return result, nil
 }
+
+// directEval implements a direct call to eval (the callee is the identifier
+// `eval` resolving to the %eval% intrinsic). Unlike indirect eval, the code runs
+// in the caller's lexical context: this, super, new.target, and private names
+// all resolve as in the surrounding code (ECMA-262 19.2.1.1 PerformEval with
+// direct = true and a non-strict caller sharing its variable environment).
+func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environment) (Value, error) {
+	str, ok := code.(String)
+	if !ok {
+		return code, nil
+	}
+	if i.security.DisableEval {
+		return nil, i.throwError(ctx, "EvalError", "eval is disabled in this sandbox")
+	}
+
+	prog, err := parser.ParseEval("<eval>", string(str), parser.EvalContext{
+		AllowSuperCall: env.inDerivedConstructor(),
+		PrivateNames:   env.privateNamesInScope(),
+	})
+	if err != nil {
+		return nil, i.throwError(ctx, "SyntaxError", err.Error())
+	}
+
+	// A fresh declarative scope holds the eval's own lexical (let/const)
+	// bindings; var/function declarations hoist to the caller's variable scope,
+	// and this/super/#private resolve up the parent chain.
+	evalEnv := NewEnvironment(env, false)
+	if err := i.hoistDeclarations(ctx, prog.Body, evalEnv, true); err != nil {
+		return nil, err
+	}
+	return i.execStmts(ctx, prog.Body, evalEnv)
+}

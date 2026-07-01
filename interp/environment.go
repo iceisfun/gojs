@@ -46,6 +46,33 @@ func (e *Environment) resolvePrivate(name string) *PrivateName {
 	return nil
 }
 
+// privateNamesInScope returns every private name (#x) visible from this scope,
+// so a direct eval can be parsed with the same private environment.
+func (e *Environment) privateNamesInScope() []string {
+	var names []string
+	seen := map[string]bool{}
+	for env := e; env != nil; env = env.parent {
+		for n := range env.privNames {
+			if !seen[n] {
+				seen[n] = true
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}
+
+// inDerivedConstructor reports whether a derived constructor's `this`-binding
+// scope is in effect, so a direct eval here may contain a SuperCall.
+func (e *Environment) inDerivedConstructor() bool {
+	for env := e; env != nil; env = env.parent {
+		if env.superInit != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // superInitState records whether a derived constructor has invoked super().
 type superInitState struct{ called bool }
 

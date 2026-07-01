@@ -236,6 +236,13 @@ func (i *Interpreter) evalCall(ctx context.Context, e *ast.CallExpr, env *Enviro
 	if !ok || !fnObj.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", i.calleeName(e.Callee)+" is not a function")
 	}
+	// A direct eval — the callee is the identifier `eval` resolving to the
+	// %eval% intrinsic — runs in the caller's lexical context.
+	if fnObj == i.evalFn {
+		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "eval" {
+			return i.directEval(ctx, arg(args, 0), env)
+		}
+	}
 	return fnObj.fn.call(ctx, thisArg, args)
 }
 

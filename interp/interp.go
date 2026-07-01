@@ -54,6 +54,11 @@ type Interpreter struct {
 	// rng is the per-interpreter PRNG backing Math.random.
 	rng *prng
 
+	// evalFn is the intrinsic %eval% function object. A call whose callee is the
+	// identifier `eval` resolving to this object is a direct eval, which runs in
+	// the caller's lexical context rather than the global scope.
+	evalFn *Object
+
 	// pendingNewTarget carries the [[NewTarget]] value from an ordinary
 	// function's [[Construct]] to the [[Call]] that runs its body. It is set
 	// immediately before the call and consumed at the top of the call, so no

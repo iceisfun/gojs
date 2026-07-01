@@ -57,11 +57,13 @@ func (i *Interpreter) initGlobals() {
 		return Bool(!math.IsNaN(f) && !math.IsInf(f, 0)), nil
 	})
 
-	// eval is not implemented; it either throws (when hardened) or reports the
-	// missing capability. Dynamic code evaluation is intentionally unsupported.
-	i.setGlobalFunc("eval", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	// eval. An indirect call (the callee is not the identifier `eval`, or it
+	// does not resolve to this intrinsic) runs in the global scope; a direct
+	// call is intercepted in evalCall and runs in the caller's context instead.
+	i.evalFn = i.newNativeFunc("eval", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return i.evalSource(ctx, arg(args, 0))
 	})
+	i.setGlobalHidden("eval", i.evalFn)
 
 	// URI helpers (thin wrappers over Go's URL escaping semantics).
 	i.setGlobalFunc("encodeURIComponent", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {

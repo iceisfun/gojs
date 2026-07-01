@@ -112,6 +112,35 @@ func Parse(sourceName, source string) (*ast.Program, error) {
 	return p.parseProgram()
 }
 
+// EvalContext carries the surrounding lexical context of a direct eval so its
+// code is parsed under the same early-error rules: the private names in scope
+// (so `this.#x` resolves), whether a SuperCall is permitted (inside a derived
+// constructor), and whether the caller is strict-mode code.
+type EvalContext struct {
+	Strict         bool
+	AllowSuperCall bool
+	PrivateNames   []string
+}
+
+// ParseEval parses the source of a direct eval, seeding the surrounding
+// context so context-sensitive early errors match the call site.
+func ParseEval(sourceName, source string, ec EvalContext) (*ast.Program, error) {
+	p, err := newParser(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	p.strict = ec.Strict
+	p.superCallOK = ec.AllowSuperCall
+	if len(ec.PrivateNames) > 0 {
+		env := &privateEnv{declared: make(map[string]bool, len(ec.PrivateNames))}
+		for _, n := range ec.PrivateNames {
+			env.declared[n] = true
+		}
+		p.privateEnvStack = append(p.privateEnvStack, env)
+	}
+	return p.parseProgram()
+}
+
 // newParser tokenizes source and returns a ready parser, or a lexical error.
 func newParser(sourceName, source string) (*parser, error) {
 	lex := lexer.New(sourceName, source, true)
