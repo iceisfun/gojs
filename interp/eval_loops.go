@@ -193,57 +193,81 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 	// body completion value (UpdateEmpty semantics), preserved across break.
 	var completion Value = Undef
 
-	// Build the sequence of values to iterate.
-	var each func(func(Value) error) error
-	if s.Of {
-		each = func(fn func(Value) error) error { return i.iterate(ctx, rhs, fn) }
-	} else {
-		// for-in enumerates own+inherited enumerable string keys.
-		if IsNullish(rhs) {
-			return Undef, nil
-		}
-		obj, err := i.ToObject(ctx, rhs)
-		if err != nil {
-			return nil, err
-		}
-		// Keys are collected once up front, but a property deleted before it is
-		// visited must not be visited, so existence is re-checked at each step.
-		keys := i.enumerateKeys(obj)
-		each = func(fn func(Value) error) error {
-			for _, k := range keys {
-				if !i.stillEnumerable(ctx, obj, k) {
-					continue
-				}
-				if err := fn(String(k)); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-	}
-
-	loopErr := each(func(item Value) error {
+	// runBody binds one value to the loop target and evaluates the body,
+	// returning the classified loop signal alongside the raw error.
+	runBody := func(item Value) (loopControl, error) {
 		iterEnv := NewEnvironment(env, false)
 		if err := i.bindForTarget(ctx, s.Left, item, iterEnv, env); err != nil {
-			return err
+			return loopPropagate, err
 		}
 		bodyVal, err := i.evalStmt(ctx, s.Body, iterEnv)
 		if bodyVal != nil {
 			completion = bodyVal
 		}
-		switch classifyLoopSignal(err, label) {
-		case loopBreak:
-			return errStopIteration
-		case loopContinue, loopNormal:
-			return nil
-		default:
-			return err
+		return classifyLoopSignal(err, label), err
+	}
+
+	if s.Of {
+		// for-of drives the iteration protocol directly so that it can close the
+		// iterator (call its return method) on any abrupt completion — break, a
+		// signal targeting an enclosing construct, a throw, or a target-binding
+		// error (ECMA-262 14.7.5.7, ForIn/OfBodyEvaluation + IteratorClose).
+		step, closeIter, err := i.patternIterator(ctx, rhs)
+		if err != nil {
+			return nil, err
 		}
-	})
-	if loopErr != nil && loopErr != errStopIteration {
-		// A signal targeting an enclosing construct carries this loop's
-		// completion value outward (UpdateEmpty semantics).
-		return completion, loopErr
+		for {
+			v, done, err := step()
+			if err != nil {
+				// A throwing IteratorStep leaves the iterator done; do not close.
+				return completion, err
+			}
+			if done {
+				return completion, nil
+			}
+			sig, bodyErr := runBody(v)
+			switch sig {
+			case loopContinue, loopNormal:
+				continue
+			case loopBreak:
+				// Normal break: close, surfacing any error from return().
+				if e := closeIter(); e != nil {
+					return completion, e
+				}
+				return completion, nil
+			default:
+				// Throw, or a break/continue targeting an outer loop: close the
+				// iterator but let the original abrupt completion take precedence.
+				_ = closeIter()
+				return completion, bodyErr
+			}
+		}
+	}
+
+	// for-in enumerates own+inherited enumerable string keys.
+	if IsNullish(rhs) {
+		return Undef, nil
+	}
+	obj, err := i.ToObject(ctx, rhs)
+	if err != nil {
+		return nil, err
+	}
+	// Keys are collected once up front, but a property deleted before it is
+	// visited must not be visited, so existence is re-checked at each step.
+	keys := i.enumerateKeys(obj)
+	for _, k := range keys {
+		if !i.stillEnumerable(ctx, obj, k) {
+			continue
+		}
+		sig, bodyErr := runBody(String(k))
+		switch sig {
+		case loopContinue, loopNormal:
+			continue
+		case loopBreak:
+			return completion, nil
+		default:
+			return completion, bodyErr
+		}
 	}
 	return completion, nil
 }
