@@ -239,3 +239,455 @@ func (p *parser) parseSubStatement(annexBFunc bool) ast.Stmt {
 	p.checkStatementPosition(annexBFunc)
 	return p.parseStmt()
 }
+
+// earlyError records a SyntaxError at pos (only the first is kept).
+func (p *parser) earlyError(pos token.Pos, msg string) {
+	if p.err == nil {
+		p.errorAt(pos, "%s", msg)
+	}
+}
+
+// checkForInLeft validates the left-hand side of a for-in / for-of statement.
+// The LHS is either a ForDeclaration (var/let/const binding) or an
+// assignment-target expression (possibly a destructuring assignment pattern).
+func (p *parser) checkForInLeft(left ast.Node) {
+	switch l := left.(type) {
+	case *ast.VarDecl:
+		p.checkForDeclaration(l)
+		if p.strict && len(l.Decls) > 0 {
+			p.checkNoYieldInStrict(l.Decls[0].Target)
+		}
+	case ast.Expr:
+		p.checkAssignmentTarget(l)
+		if p.strict {
+			p.checkNoYieldInStrict(l)
+		}
+	}
+}
+
+// checkNoYieldInStrict reports a SyntaxError if a for-in/of head pattern uses a
+// YieldExpression in strict mode (where `yield` is a reserved word and may not
+// serve as an IdentifierReference outside a generator). The walk descends
+// through the pattern's structure — computed keys, defaults, and nested
+// targets — but not into nested function bodies, which have their own scope.
+func (p *parser) checkNoYieldInStrict(expr ast.Expr) {
+	if expr == nil || p.err != nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.YieldExpr:
+		p.earlyError(e.Keyword, "'yield' expression is not allowed in strict mode")
+	case *ast.Ident:
+		if e.Name == "yield" {
+			p.earlyError(e.NamePos, "'yield' may not be used as an identifier in strict mode")
+		}
+	case *ast.MemberExpr:
+		p.checkNoYieldInStrict(e.Object)
+		if e.Computed {
+			p.checkNoYieldInStrict(e.Property)
+		}
+	case *ast.CallExpr:
+		p.checkNoYieldInStrict(e.Callee)
+		for _, a := range e.Arguments {
+			p.checkNoYieldInStrict(a)
+		}
+	case *ast.ArrayLit:
+		for _, el := range e.Elements {
+			p.checkNoYieldInStrict(el)
+		}
+	case *ast.ObjectLit:
+		for _, prop := range e.Properties {
+			if prop.Computed {
+				p.checkNoYieldInStrict(prop.Key)
+			}
+			p.checkNoYieldInStrict(prop.Value)
+		}
+	case *ast.SpreadElement:
+		p.checkNoYieldInStrict(e.Argument)
+	case *ast.RestElement:
+		p.checkNoYieldInStrict(e.Target)
+	case *ast.AssignExpr:
+		p.checkNoYieldInStrict(e.Target)
+		p.checkNoYieldInStrict(e.Value)
+	case *ast.AssignPattern:
+		p.checkNoYieldInStrict(e.Target)
+		p.checkNoYieldInStrict(e.Default)
+	}
+}
+
+// checkForDeclaration validates the bound names and binding pattern of a
+// for-in/of ForDeclaration head (for (let/const/var <target> in ...)).
+func (p *parser) checkForDeclaration(vd *ast.VarDecl) {
+	if len(vd.Decls) == 0 {
+		return
+	}
+	target := vd.Decls[0].Target
+	lexical := vd.Kind == token.LET || vd.Kind == token.CONST
+	seen := map[string]bool{}
+	var walk func(name string, pos token.Pos)
+	walk = func(name string, pos token.Pos) {
+		if lexical && name == "let" {
+			p.earlyError(pos, "'let' is not a valid binding name in a lexical declaration")
+			return
+		}
+		if p.strict && (name == "eval" || name == "arguments") {
+			p.earlyError(pos, "Binding '"+name+"' in strict mode")
+			return
+		}
+		if lexical && seen[name] {
+			p.earlyError(pos, "Duplicate binding '"+name+"' in destructuring declaration")
+			return
+		}
+		seen[name] = true
+	}
+	p.collectBindingNames(target, walk)
+	// The binding pattern itself must be structurally valid (rest last, etc.).
+	p.checkBindingPattern(target)
+}
+
+// checkForBodyVarConflict reports a SyntaxError when a lexical ForDeclaration
+// (for (let/const <target> in ...)) binds a name that also appears among the
+// VarDeclaredNames of the loop body (ECMA-262 13.7.5.1).
+func (p *parser) checkForBodyVarConflict(head *ast.VarDecl, body ast.Stmt) {
+	if head == nil || (head.Kind != token.LET && head.Kind != token.CONST) || len(head.Decls) == 0 {
+		return
+	}
+	bound := map[string]bool{}
+	p.collectBindingNames(head.Decls[0].Target, func(name string, _ token.Pos) { bound[name] = true })
+	if len(bound) == 0 {
+		return
+	}
+	varNames := map[string]token.Pos{}
+	collectBodyVarNames(body, varNames)
+	for name, pos := range varNames {
+		if bound[name] {
+			p.earlyError(pos, "Identifier '"+name+"' has already been declared")
+			return
+		}
+	}
+}
+
+// collectBodyVarNames gathers the var-declared names within a statement, without
+// descending into nested function or class bodies.
+func collectBodyVarNames(s ast.Stmt, into map[string]token.Pos) {
+	switch st := s.(type) {
+	case *ast.VarDecl:
+		if st.Kind == token.VAR {
+			for _, d := range st.Decls {
+				collectPatternNamesPos(d.Target, into)
+			}
+		}
+	case *ast.BlockStmt:
+		for _, b := range st.Body {
+			collectBodyVarNames(b, into)
+		}
+	case *ast.IfStmt:
+		collectBodyVarNames(st.Consequent, into)
+		if st.Alternate != nil {
+			collectBodyVarNames(st.Alternate, into)
+		}
+	case *ast.ForStmt:
+		if vd, ok := st.Init.(*ast.VarDecl); ok {
+			collectBodyVarNames(vd, into)
+		}
+		collectBodyVarNames(st.Body, into)
+	case *ast.ForInStmt:
+		if vd, ok := st.Left.(*ast.VarDecl); ok {
+			collectBodyVarNames(vd, into)
+		}
+		collectBodyVarNames(st.Body, into)
+	case *ast.WhileStmt:
+		collectBodyVarNames(st.Body, into)
+	case *ast.DoWhileStmt:
+		collectBodyVarNames(st.Body, into)
+	case *ast.TryStmt:
+		for _, b := range st.Block.Body {
+			collectBodyVarNames(b, into)
+		}
+		if st.Handler != nil {
+			for _, b := range st.Handler.Body.Body {
+				collectBodyVarNames(b, into)
+			}
+		}
+		if st.Finalizer != nil {
+			for _, b := range st.Finalizer.Body {
+				collectBodyVarNames(b, into)
+			}
+		}
+	case *ast.SwitchStmt:
+		for _, c := range st.Cases {
+			for _, b := range c.Body {
+				collectBodyVarNames(b, into)
+			}
+		}
+	case *ast.LabeledStmt:
+		collectBodyVarNames(st.Body, into)
+	}
+}
+
+// collectPatternNamesPos records each bound name of a binding target with its
+// position.
+func collectPatternNamesPos(target ast.Expr, into map[string]token.Pos) {
+	switch t := target.(type) {
+	case *ast.Ident:
+		if _, ok := into[t.Name]; !ok {
+			into[t.Name] = t.NamePos
+		}
+	case *ast.AssignPattern:
+		collectPatternNamesPos(t.Target, into)
+	case *ast.AssignExpr:
+		if t.Op == token.ASSIGN {
+			collectPatternNamesPos(t.Target, into)
+		}
+	case *ast.RestElement:
+		collectPatternNamesPos(t.Target, into)
+	case *ast.SpreadElement:
+		collectPatternNamesPos(t.Argument, into)
+	case *ast.ArrayLit:
+		for _, el := range t.Elements {
+			if el != nil {
+				collectPatternNamesPos(el, into)
+			}
+		}
+	case *ast.ObjectLit:
+		for _, prop := range t.Properties {
+			if prop.Value != nil {
+				collectPatternNamesPos(prop.Value, into)
+			}
+		}
+	}
+}
+
+// collectBindingNames invokes emit for each BoundName in a binding target
+// (Ident or destructuring pattern).
+func (p *parser) collectBindingNames(target ast.Expr, emit func(name string, pos token.Pos)) {
+	switch t := target.(type) {
+	case *ast.Ident:
+		emit(t.Name, t.NamePos)
+	case *ast.AssignPattern:
+		p.collectBindingNames(t.Target, emit)
+	case *ast.RestElement:
+		p.collectBindingNames(t.Target, emit)
+	case *ast.SpreadElement:
+		p.collectBindingNames(t.Argument, emit)
+	case *ast.ArrayLit:
+		for _, el := range t.Elements {
+			if el == nil {
+				continue
+			}
+			p.collectBindingNames(el, emit)
+		}
+	case *ast.ObjectLit:
+		for _, prop := range t.Properties {
+			if prop.Kind == ast.PropSpread {
+				p.collectBindingNames(prop.Value, emit)
+				continue
+			}
+			if prop.Value != nil {
+				p.collectBindingNames(prop.Value, emit)
+			}
+		}
+	case *ast.AssignExpr:
+		if t.Op == token.ASSIGN {
+			p.collectBindingNames(t.Target, emit)
+		}
+	}
+}
+
+// checkBindingPattern validates the structure of a binding pattern (used in a
+// var/let/const ForDeclaration): a rest element must be the final element and
+// may not carry a default initializer.
+func (p *parser) checkBindingPattern(target ast.Expr) {
+	switch t := target.(type) {
+	case *ast.ArrayLit:
+		for idx, el := range t.Elements {
+			if el == nil {
+				continue
+			}
+			if isRest(el) {
+				if idx != len(t.Elements)-1 {
+					p.earlyError(el.Pos(), "Rest element must be last element")
+				}
+				if hasDefault(el) {
+					p.earlyError(el.Pos(), "Rest element may not have a default")
+				}
+				continue
+			}
+			p.checkBindingPattern(stripDefault(el))
+		}
+	case *ast.ObjectLit:
+		for idx, prop := range t.Properties {
+			if prop.Kind == ast.PropSpread {
+				if idx != len(t.Properties)-1 {
+					p.earlyError(prop.Pos(), "Rest element must be last element")
+				}
+				continue
+			}
+			if prop.Method || prop.Kind == ast.PropGet || prop.Kind == ast.PropSet {
+				p.earlyError(prop.Pos(), "Invalid destructuring binding target")
+				continue
+			}
+			if prop.Value != nil {
+				p.checkBindingPattern(stripDefault(prop.Value))
+			}
+		}
+	}
+}
+
+// checkAssignmentTarget validates an expression used as a for-in/of assignment
+// target: it must be a simple assignment target (Ident, non-optional member
+// access) or a valid destructuring AssignmentPattern (array/object literal).
+func (p *parser) checkAssignmentTarget(expr ast.Expr) {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		if p.strict && (e.Name == "eval" || e.Name == "arguments") {
+			p.earlyError(e.NamePos, "Assignment to '"+e.Name+"' in strict mode")
+		}
+	case *ast.MemberExpr:
+		if containsOptional(e) {
+			p.earlyError(e.Pos(), "Optional chain may not be an assignment target")
+		}
+	case *ast.ArrayLit:
+		p.checkArrayAssignmentPattern(e)
+	case *ast.ObjectLit:
+		p.checkObjectAssignmentPattern(e)
+	default:
+		p.earlyError(expr.Pos(), "Invalid left-hand side in for-loop")
+	}
+}
+
+// checkArrayAssignmentPattern validates an array destructuring assignment
+// pattern used as a for-in/of target.
+func (p *parser) checkArrayAssignmentPattern(arr *ast.ArrayLit) {
+	for idx, el := range arr.Elements {
+		if el == nil {
+			continue
+		}
+		if isRest(el) {
+			if idx != len(arr.Elements)-1 {
+				p.earlyError(el.Pos(), "Rest element must be last element")
+			}
+			if hasDefault(el) {
+				p.earlyError(el.Pos(), "Rest element may not have a default initializer")
+			}
+			// The rest target must itself be a simple/pattern target, never a
+			// pattern with a default, call, or (a, b).
+			p.checkAssignmentElement(restArg(el), true)
+			continue
+		}
+		p.checkAssignmentElement(el, false)
+	}
+}
+
+// checkObjectAssignmentPattern validates an object destructuring assignment
+// pattern used as a for-in/of target.
+func (p *parser) checkObjectAssignmentPattern(obj *ast.ObjectLit) {
+	for idx, prop := range obj.Properties {
+		if prop.Kind == ast.PropSpread {
+			if idx != len(obj.Properties)-1 {
+				p.earlyError(prop.Pos(), "Rest element must be last element")
+			}
+			p.checkAssignmentElement(prop.Value, true)
+			continue
+		}
+		if prop.Method || prop.Kind == ast.PropGet || prop.Kind == ast.PropSet {
+			p.earlyError(prop.Pos(), "Invalid destructuring assignment target")
+			continue
+		}
+		if prop.Value != nil {
+			p.checkAssignmentElement(prop.Value, false)
+		}
+	}
+}
+
+// checkAssignmentElement validates one element of a destructuring assignment
+// pattern. When rest is true the element is a rest target (no default allowed).
+func (p *parser) checkAssignmentElement(el ast.Expr, rest bool) {
+	// Peel a default initializer (target = default), which is legal for a
+	// non-rest element.
+	switch e := el.(type) {
+	case *ast.AssignExpr:
+		if e.Op == token.ASSIGN {
+			if rest {
+				p.earlyError(e.Pos(), "Rest element may not have a default initializer")
+			}
+			p.checkAssignmentElement(e.Target, false)
+			return
+		}
+		p.earlyError(el.Pos(), "Invalid destructuring assignment target")
+		return
+	case *ast.AssignPattern:
+		if rest {
+			p.earlyError(e.Pos(), "Rest element may not have a default initializer")
+		}
+		p.checkAssignmentElement(e.Target, false)
+		return
+	}
+	// Otherwise the element must itself be a valid assignment target.
+	p.checkAssignmentTarget(el)
+}
+
+// --- small structural helpers ----------------------------------------------
+
+func isRest(el ast.Expr) bool {
+	switch el.(type) {
+	case *ast.SpreadElement, *ast.RestElement:
+		return true
+	}
+	return false
+}
+
+func restArg(el ast.Expr) ast.Expr {
+	switch e := el.(type) {
+	case *ast.SpreadElement:
+		return e.Argument
+	case *ast.RestElement:
+		return e.Target
+	}
+	return el
+}
+
+// hasDefault reports whether a rest element carries a default initializer
+// (which is always an early error).
+func hasDefault(el ast.Expr) bool {
+	arg := restArg(el)
+	switch a := arg.(type) {
+	case *ast.AssignPattern:
+		return true
+	case *ast.AssignExpr:
+		return a.Op == token.ASSIGN
+	}
+	return false
+}
+
+// stripDefault removes a default initializer wrapper, returning the underlying
+// binding target.
+func stripDefault(el ast.Expr) ast.Expr {
+	switch e := el.(type) {
+	case *ast.AssignPattern:
+		return e.Target
+	case *ast.AssignExpr:
+		if e.Op == token.ASSIGN {
+			return e.Target
+		}
+	}
+	return el
+}
+
+// containsOptional reports whether a member-access chain includes an optional
+// (?.) link, which disqualifies it as an assignment target.
+func containsOptional(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.MemberExpr:
+		if e.Optional {
+			return true
+		}
+		return containsOptional(e.Object)
+	case *ast.CallExpr:
+		if e.Optional {
+			return true
+		}
+		return containsOptional(e.Callee)
+	}
+	return false
+}

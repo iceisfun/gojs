@@ -83,8 +83,10 @@ func (p *parser) letIsDeclaration() bool {
 	case token.IDENT, token.LBRACKET, token.LBRACE:
 		return true
 	default:
-		// let followed by a contextual keyword name (e.g. `let of`) is a decl.
-		return p.peek(1).Type.IsKeyword()
+		// `let` followed by a contextual keyword name (e.g. `let of`) is a decl;
+		// but `let` followed by a reserved word (e.g. `let in`) is the identifier
+		// `let` used in an expression, not a declaration.
+		return isContextualKeyword(p.peek(1).Type)
 	}
 }
 
@@ -218,7 +220,9 @@ func (p *parser) parseFor() ast.Stmt {
 			right := p.forRight(isOf)
 			p.expect(token.RPAREN)
 			vd.Decls = []*ast.VarDeclarator{{Target: target}}
+			p.checkForInLeft(vd)
 			body := p.parseLoopBody()
+			p.checkForBodyVarConflict(vd, body)
 			return &ast.ForInStmt{Keyword: kw.Pos, Left: vd, Right: right, Body: body, Of: isOf, Await: await}
 		}
 		// Otherwise a C-style declaration list.
@@ -243,6 +247,7 @@ func (p *parser) parseFor() ast.Stmt {
 			p.next()
 			right := p.forRight(isOf)
 			p.expect(token.RPAREN)
+			p.checkForInLeft(expr)
 			body := p.parseLoopBody()
 			return &ast.ForInStmt{Keyword: kw.Pos, Left: expr, Right: right, Body: body, Of: isOf, Await: await}
 		}

@@ -116,3 +116,63 @@ func TestParseErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestForInEarlyErrors covers the parse-time (early) SyntaxErrors mandated for
+// the for-in/of head and body, including strict-mode-only cases.
+func TestForInEarlyErrors(t *testing.T) {
+	bad := []string{
+		// body must be a Statement, not a Declaration
+		`for (var x in {}) let y;`,
+		`for (var x in {}) const y = 0;`,
+		`for (var x in {}) function f() {}`,
+		`for (var x in {}) class C {}`,
+		`for (var x in {}) label: function f() {}`,
+		`for (var x in null) let [a] = 0;`,
+		// invalid left-hand side
+		`for (this in {}) {}`,
+		`for ((this) in {}) {}`,
+		`for (1 in {}) {}`,
+		`for ([(x, y)] in {}) {}`,
+		`for ({ m() {} } in {}) {}`,
+		// destructuring rest rules
+		`for ([...x, y] in [[]]) ;`,
+		`for ([...x = 1] in [[]]) ;`,
+		`for ({...r, b} in [{}]) ;`,
+		// lexical ForDeclaration bound names
+		`for (let [x, x] in {}) {}`,
+		`for (const [x, x] in {}) {}`,
+		`for (let let in {}) {}`,
+		// var in body conflicting with lexical head
+		`for (let x in {}) { var x; }`,
+		`for (const x in {}) { { var x; } }`,
+		// strict-mode-only: yield in the head pattern, binding eval/arguments
+		`"use strict"; for ([ x[yield] ] in [[]]) ;`,
+		`"use strict"; for ({ x = yield } in [{}]) ;`,
+		`"use strict"; for (var eval in {}) {}`,
+		`"use strict"; for (var arguments in {}) {}`,
+	}
+	for _, src := range bad {
+		if _, err := Parse("test", src); err == nil {
+			t.Errorf("expected SyntaxError for %q", src)
+		}
+	}
+
+	// These must continue to parse (positive cases / ASI / valid targets).
+	good := []string{
+		`for (var x in {a:1}) var y = x;`,
+		`for (var z in {a:1}) lbl: z;`,
+		`for (let in {a:1}) {}`,             // `let` used as an identifier
+		`var l = 0; for ([l][1] in {a:1});`, // array-literal member target
+		"for (var x in null) let\nx = 1;",   // `let` + ASI
+		"for (var x in null) let\n{}",       // `let` + ASI + block
+		`for (o.p in {a:1}) {}`,
+		`var a, b; for ([a, ...b] in [[1,2,3]]) {}`,
+		`var a, b; for ({a, ...b} in [{a:1}]) {}`,
+		`for (var eval in {}) {}`, // legal in sloppy mode
+	}
+	for _, src := range good {
+		if _, err := Parse("test", src); err != nil {
+			t.Errorf("unexpected error for %q: %v", src, err)
+		}
+	}
+}

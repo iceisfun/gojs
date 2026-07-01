@@ -46,26 +46,26 @@ func (i *Interpreter) evalWhile(ctx context.Context, s *ast.WhileStmt, env *Envi
 }
 
 func (i *Interpreter) runWhile(ctx context.Context, s *ast.WhileStmt, env *Environment, label string) (Value, error) {
-	var v Value // running completion value (nil == empty)
+	var completion Value = Undef
 	for {
 		test, err := i.evalExpr(ctx, s.Test, env)
 		if err != nil {
 			return nil, err
 		}
 		if !ToBoolean(test) {
-			return orUndef(v), nil
+			return completion, nil
 		}
-		bv, err := i.evalStmt(ctx, s.Body, env)
-		if bv != nil {
-			v = bv
+		bodyVal, err := i.evalStmt(ctx, s.Body, env)
+		if bodyVal != nil {
+			completion = bodyVal
 		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
-			return orUndef(v), nil
+			return completion, nil
 		case loopContinue, loopNormal:
 			continue
 		default:
-			return orUndef(v), err
+			return completion, err
 		}
 	}
 }
@@ -76,26 +76,26 @@ func (i *Interpreter) evalDoWhile(ctx context.Context, s *ast.DoWhileStmt, env *
 }
 
 func (i *Interpreter) runDoWhile(ctx context.Context, s *ast.DoWhileStmt, env *Environment, label string) (Value, error) {
-	var v Value // running completion value (nil == empty)
+	var completion Value = Undef
 	for {
-		bv, err := i.evalStmt(ctx, s.Body, env)
-		if bv != nil {
-			v = bv
+		bodyVal, err := i.evalStmt(ctx, s.Body, env)
+		if bodyVal != nil {
+			completion = bodyVal
 		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
-			return orUndef(v), nil
+			return completion, nil
 		case loopContinue, loopNormal:
 			// fall through to the test
 		default:
-			return orUndef(v), err
+			return completion, err
 		}
 		test, err := i.evalExpr(ctx, s.Test, env)
 		if err != nil {
 			return nil, err
 		}
 		if !ToBoolean(test) {
-			return orUndef(v), nil
+			return completion, nil
 		}
 	}
 }
@@ -123,7 +123,7 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 			}
 		}
 	}
-	var v Value // running completion value (nil == empty)
+	var completion Value = Undef
 	for {
 		if s.Test != nil {
 			test, err := i.evalExpr(ctx, s.Test, loopEnv)
@@ -131,22 +131,22 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 				return nil, err
 			}
 			if !ToBoolean(test) {
-				return orUndef(v), nil
+				return completion, nil
 			}
 		}
 		// Each iteration runs in a copy so closures capture per-iteration lets.
 		iterEnv := i.copyLoopScope(loopEnv, env)
-		bv, err := i.evalStmt(ctx, s.Body, iterEnv)
-		if bv != nil {
-			v = bv
+		bodyVal, err := i.evalStmt(ctx, s.Body, iterEnv)
+		if bodyVal != nil {
+			completion = bodyVal
 		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
-			return orUndef(v), nil
+			return completion, nil
 		case loopContinue, loopNormal:
 			// proceed to update
 		default:
-			return orUndef(v), err
+			return completion, err
 		}
 		i.writeBackLoopScope(loopEnv, iterEnv)
 		if s.Update != nil {
@@ -189,6 +189,10 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		return nil, err
 	}
 
+	// completion accumulates the loop's completion value: the last non-empty
+	// body completion value (UpdateEmpty semantics), preserved across break.
+	var completion Value = Undef
+
 	// Build the sequence of values to iterate.
 	var each func(func(Value) error) error
 	if s.Of {
@@ -202,9 +206,14 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		if err != nil {
 			return nil, err
 		}
+		// Keys are collected once up front, but a property deleted before it is
+		// visited must not be visited, so existence is re-checked at each step.
 		keys := i.enumerateKeys(obj)
 		each = func(fn func(Value) error) error {
 			for _, k := range keys {
+				if !i.stillEnumerable(ctx, obj, k) {
+					continue
+				}
 				if err := fn(String(k)); err != nil {
 					return err
 				}
@@ -213,15 +222,14 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		}
 	}
 
-	var v Value // running completion value (nil == empty)
 	loopErr := each(func(item Value) error {
 		iterEnv := NewEnvironment(env, false)
 		if err := i.bindForTarget(ctx, s.Left, item, iterEnv, env); err != nil {
 			return err
 		}
-		bv, err := i.evalStmt(ctx, s.Body, iterEnv)
-		if bv != nil {
-			v = bv
+		bodyVal, err := i.evalStmt(ctx, s.Body, iterEnv)
+		if bodyVal != nil {
+			completion = bodyVal
 		}
 		switch classifyLoopSignal(err, label) {
 		case loopBreak:
@@ -233,9 +241,23 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		}
 	})
 	if loopErr != nil && loopErr != errStopIteration {
-		return orUndef(v), loopErr
+		// A signal targeting an enclosing construct carries this loop's
+		// completion value outward (UpdateEmpty semantics).
+		return completion, loopErr
 	}
-	return orUndef(v), nil
+	return completion, nil
+}
+
+// stillEnumerable reports whether name is still an enumerable property somewhere
+// on obj's prototype chain, so a for-in enumeration skips properties deleted
+// (or made non-enumerable) before they are visited.
+func (i *Interpreter) stillEnumerable(ctx context.Context, obj *Object, name string) bool {
+	for cur := obj; cur != nil; cur = cur.proto {
+		if p, ok := cur.getOwn(StrKey(name)); ok {
+			return p.Enumerable
+		}
+	}
+	return false
 }
 
 // bindForTarget binds a for-in/of loop value to the loop's left-hand side,

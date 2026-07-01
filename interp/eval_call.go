@@ -452,6 +452,20 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 			value = def
 		}
 		return i.assignPattern(ctx, t.Target, value, env, bindName)
+	case *ast.AssignExpr:
+		// A default in a destructuring-assignment pattern, e.g. [a = 1], parses
+		// as a plain assignment expression rather than an AssignPattern.
+		if t.Op == token.ASSIGN {
+			if IsUndefined(value) {
+				def, err := i.evalExpr(ctx, t.Value, env)
+				if err != nil {
+					return err
+				}
+				value = def
+			}
+			return i.assignPattern(ctx, t.Target, value, env, bindName)
+		}
+		return i.throwError(ctx, "SyntaxError", "invalid assignment target")
 	case *ast.ArrayLit:
 		items, err := i.iterableToSlice(ctx, value)
 		if err != nil {
@@ -461,12 +475,12 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 			if el == nil {
 				continue
 			}
-			if rest, ok := el.(*ast.RestElement); ok {
+			if restTgt := restTargetOf(el); restTgt != nil {
 				var remaining []Value
 				if idx < len(items) {
 					remaining = append(remaining, items[idx:]...)
 				}
-				return i.assignPattern(ctx, rest.Target, i.newArray(remaining), env, bindName)
+				return i.assignPattern(ctx, restTgt, i.newArray(remaining), env, bindName)
 			}
 			var v Value = Undef
 			if idx < len(items) {
@@ -482,11 +496,32 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 		if err != nil {
 			return err
 		}
+		taken := map[string]bool{}
 		for _, prop := range t.Properties {
+			if prop.Kind == ast.PropSpread {
+				rest := NewObject(i.objectProto)
+				for _, name := range obj.OwnKeys() {
+					if taken[name] {
+						continue
+					}
+					if p, ok := obj.getOwn(StrKey(name)); ok && p.Enumerable {
+						v, err := obj.GetStr(ctx, name)
+						if err != nil {
+							return err
+						}
+						rest.SetData(name, v)
+					}
+				}
+				if err := i.assignPattern(ctx, prop.Value, rest, env, bindName); err != nil {
+					return err
+				}
+				continue
+			}
 			key, err := i.propertyKeyName(ctx, prop, env)
 			if err != nil {
 				return err
 			}
+			taken[key] = true
 			v, err := obj.GetStr(ctx, key)
 			if err != nil {
 				return err
@@ -503,6 +538,18 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 	default:
 		return i.throwError(ctx, "SyntaxError", "invalid assignment target")
 	}
+}
+
+// restTargetOf returns the underlying target of a rest/spread element, or nil
+// when el is not a rest element.
+func restTargetOf(el ast.Expr) ast.Expr {
+	switch e := el.(type) {
+	case *ast.SpreadElement:
+		return e.Argument
+	case *ast.RestElement:
+		return e.Target
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -59,9 +59,16 @@ type parser struct {
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a
 	// class body. Several early errors are strict-mode sensitive (e.g. duplicate
-	// block-level FunctionDeclarations, or a FunctionDeclaration in a
-	// single-statement position under Annex B).
+	// block-level FunctionDeclarations, a FunctionDeclaration in a
+	// single-statement position under Annex B, or binding `eval`/`arguments`).
 	strict bool
+}
+
+// isContextualKeyword reports whether t is a soft/contextual keyword (let,
+// static, yield, async, await, of, get, set) that may legally serve as a
+// binding identifier or plain identifier. Reserved words cannot.
+func isContextualKeyword(t token.Type) bool {
+	return t >= token.LET && t <= token.SET
 }
 
 // Parse parses source into a [*ast.Program]. sourceName is used in error
