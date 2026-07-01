@@ -6,6 +6,17 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/iceisfun/gojs.svg)](https://pkg.go.dev/github.com/iceisfun/gojs)
 
+> [!IMPORTANT]
+> **gojs is not ready for a release and is not production-ready.** It is an
+> incomplete, actively evolving implementation: language and library coverage
+> has gaps, and the **public API surface will change** (types, options, and
+> function signatures may break between commits without notice).
+>
+> It is suitable for experiments, prototypes, learning, and other non-serious
+> projects — not for anything where stability or completeness matters. Pin a
+> specific commit if you depend on it, and expect to update your code as things
+> move.
+
 An embeddable, sandbox-first **JavaScript (ECMAScript) runtime for Go**. Pure
 Go, zero dependencies, no cgo.
 
