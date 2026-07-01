@@ -378,7 +378,7 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 
 	names := re.GroupNames()
 	if len(names) > 0 {
-		groups := NewObject(i.objectProto)
+		groups := NewObject(nil)
 		for name, idx := range names {
 			s, e := m[2*idx], m[2*idx+1]
 			if idx >= n || s < 0 {
@@ -408,7 +408,7 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 		}
 		indicesArr := i.newArray(indices)
 		if len(names) > 0 {
-			ig := NewObject(i.objectProto)
+			ig := NewObject(nil)
 			for name, idx := range names {
 				if idx >= n {
 					ig.SetData(name, Undef)
