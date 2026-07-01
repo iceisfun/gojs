@@ -31,9 +31,14 @@ automation, and running untrusted snippets under tight host control.
   `do-while`, `switch`, `try`/`catch`/`finally` (incl. optional catch
   binding), `throw`, and Automatic Semicolon Insertion.
 - **Built-ins** — `Object`, `Function`, `Array`, `String`, `Number`,
-  `Boolean`, `Symbol` (well-known symbols), `Math`, `JSON`, `RegExp` (RE2),
-  the `Error` hierarchy, and global helpers (`parseInt`, `parseFloat`,
-  `isNaN`, `isFinite`, `encodeURIComponent`, …).
+  `Boolean`, `Symbol` (well-known symbols), `Map`, `Set`, `WeakMap`, `WeakSet`,
+  `Promise`, `Math`, `JSON`, `RegExp` (RE2), the `Error` hierarchy, and global
+  helpers (`parseInt`, `parseFloat`, `isNaN`, `isFinite`,
+  `encodeURIComponent`, …).
+- **Generators & async/await** — `function*`, `yield`, `yield*`, `async`
+  functions, `await`, and async arrows, all driven cooperatively on the single
+  VM thread (an `await` is a `yield` to a promise-driven runner), so ordering
+  matches real engines.
 - **Event loop & timers** — `setTimeout`, `setInterval`, `clearTimeout`,
   `clearInterval`, `setImmediate`, and `queueMicrotask`, all serialized on a
   single event-loop goroutine so callbacks never race with script code.
@@ -185,6 +190,60 @@ fmt.Println(vm.ToGo(sum)) // 5
 **Convert values both ways** with `vm.FromGo` (Go → JS: scalars, `[]any`,
 `map[string]any`) and `vm.ToGo` / `vm.ToString` (JS → Go).
 
+## Security model
+
+gojs is designed to run **untrusted** JavaScript. The posture is defense in
+depth, and every layer is off by default:
+
+- **No ambient authority.** A bare `gojs.New()` has no way to print, read the
+  clock, schedule timers, or load modules. Scripts see only pure-computation
+  built-ins. Capabilities are granted one provider at a time, and each provider
+  is an interface you can implement to mediate, log, or refuse individual
+  operations.
+- **No dynamic code by default.** `eval` and the `Function` constructor are
+  gated by `Security{DisableEval, DisableFunctionCtor}`; the CLI `--sandbox`
+  mode turns them off entirely.
+- **Prototype-pollution guard.** `DisableProtoMutation` freezes mutation of
+  built-in prototypes so untrusted code can't tamper with the shared realm.
+- **Bounded resources.** `WithLimits(Limits{MaxCallDepth, MaxSteps})` caps
+  recursion (catchable `RangeError`) and total evaluation steps (an uncatchable
+  abort), and every evaluation honors a `context.Context` deadline. A hostile
+  `while (true) {}` is stopped by the step budget or the context, not by luck.
+- **Single-threaded by construction.** JavaScript never runs on two goroutines
+  at once, so a script cannot exploit host-side data races. `Close()` cancels
+  the context and drains outstanding timers and coroutines.
+
+```go
+vm := gojs.New(
+	gojs.WithSecurity(gojs.Security{
+		DisableEval:          true,
+		DisableFunctionCtor:  true,
+		DisableProtoMutation: true,
+	}),
+	gojs.WithLimits(gojs.Limits{MaxCallDepth: 512, MaxSteps: 5_000_000}),
+)
+```
+
+See the [`sandbox`](examples/sandbox) and [`limits`](examples/limits) examples
+for end-to-end setups.
+
+## Standard library
+
+Implemented intrinsics and globals (see [Limitations](#limitations) for gaps):
+
+| Area          | Coverage                                                                    |
+| ------------- | --------------------------------------------------------------------------- |
+| `Object`      | literals, descriptors, `keys`/`values`/`entries`, `assign`, `freeze`/`seal`, `create`, `getPrototypeOf`, `is`, `groupBy` |
+| `Array`       | literals, iteration (`map`/`filter`/`reduce`/…), `sort`, `flat`, ES2023 `toSorted`/`toReversed`/`toSpliced`/`with`, `from`/`of`, `Array.isArray` |
+| `String`      | full method set incl. `match`/`matchAll`/`replace`/`replaceAll`/`split` (regex-aware), templates, `padStart`/`padEnd` |
+| `Number`/`Math` | numeric methods, `toFixed`/`toPrecision`/`toString(radix)`, the `Math.*` surface |
+| `JSON`        | `parse`/`stringify` with replacer (function + array), reviver, `toJSON`, cycle detection |
+| `RegExp`      | RE2-backed `exec`/`test`, flags, named groups (see limits)                  |
+| Collections   | `Map`, `Set`, `WeakMap`, `WeakSet`, and `Promise` (with the microtask queue) |
+| `Symbol`      | well-known symbols (`iterator`, `asyncIterator`, `hasInstance`, …)          |
+| Errors        | full `Error` hierarchy, subclassable                                        |
+| Globals       | `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURIComponent`, `Date`, `Promise`, timers |
+
 ## Examples
 
 Runnable programs live under [`examples/`](examples), each with its own README:
@@ -225,16 +284,54 @@ Source → lexer → parser → ast → interp (tree-walking evaluator)
 
 The root package `gojs` re-exports the common surface of `interp`.
 
+## Project structure
+
+```
+gojs/
+├── doc.go            package overview (pkg.go.dev landing)
+├── gojs.go           root package: re-exported public surface
+├── token/            token kinds, source positions, spans
+├── lexer/            lexical scanner
+├── ast/              AST node types
+├── parser/           recursive-descent parser
+├── interp/           evaluator, values, built-ins, providers, event loop, host API
+├── cmd/gojs/         command-line runner
+├── examples/         runnable embedding examples (each with a README)
+└── tests/
+    ├── harness/      behavioral JS conformance suite (self-asserting programs)
+    ├── doctest/      documentation examples run as tests
+    └── test262/      optional Test262 runner (gated behind GOJS_T262)
+```
+
+## Running tests
+
+```bash
+go test ./...              # full suite (fast; Test262 is skipped)
+go test ./... -race        # race detector across the event loop and coroutines
+go test ./tests/harness    # just the JS behavioral suite
+```
+
+The behavioral suite runs real JavaScript programs that assert their own
+results, so a regression surfaces as a failing Go test with the thrown value.
+The optional [Test262](https://github.com/tc39/test262) runner is gated behind
+the `GOJS_T262` environment variable (pointing at a local checkout) so the
+default `go test ./...` stays fast and hermetic.
+
+## Contributing
+
+The workflow is find-fix-test: when you hit a behavior that diverges from the
+spec, **first reproduce it as a failing test** in `tests/harness`, then fix the
+engine until it passes. Keep `go test ./... -race` green. Intentional
+divergences from the spec (e.g. RE2 regex semantics, rune-indexed strings) are
+recorded so they aren't mistaken for bugs. New built-ins and language features
+should land with harness coverage.
+
 ## Limitations
 
 This is a first pass. Notable gaps and approximations:
 
-- **Generators** (`function*`, `yield`, `yield*`) and **`async`/`await`** are
-  fully functional. Each runs on its own goroutine as a cooperative coroutine
-  (an `await` is a `yield` to a promise-driven runner on the VM goroutine), so
-  async ordering matches real engines and `Close()` cleans up suspended
-  coroutines. Top-level `await` outside an async function is a best-effort
-  synchronous unwrap.
+- **Top-level `await`** outside an `async` function is a best-effort
+  synchronous unwrap rather than a full module-graph suspension.
 - **Strings** are stored as Go UTF-8 and indexed by rune, not UTF-16 code
   units — an approximation for characters outside the BMP.
 - **Modules** (`import`/`export`) are not yet executed.

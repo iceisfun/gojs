@@ -1,3 +1,19 @@
+// Package interp is the heart of gojs: a tree-walking evaluator for the AST
+// produced by [github.com/iceisfun/gojs/parser], together with the JavaScript
+// value model, the intrinsic prototypes (the "realm"), the capability
+// providers, and the host-facing embedding API.
+//
+// An [Interpreter] runs script on a single logical thread with an event loop.
+// Host code drives it through the embedding API — Enqueue, QueueMicrotask,
+// ResolvePromise, RejectPromise, and RunLoop — which is how concurrent Go work
+// hands results back without ever running JavaScript on two goroutines at once.
+// Capabilities (printing, time, timers, module loading) are supplied by
+// providers and are absent by default, and execution can be bounded with
+// [Limits] and a context deadline.
+//
+// Most embedders do not import this package directly; the root gojs package
+// re-exports the common surface. Import interp when you need lower-level access
+// such as building custom host functions, providers, or values.
 package interp
 
 import (

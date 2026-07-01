@@ -1,26 +1,6 @@
-// Package gojs is an embeddable, sandbox-first JavaScript (ECMAScript) runtime
-// for Go applications. It is pure Go with no cgo and no external dependencies.
-//
-// gojs is organized as a layered pipeline, mirroring a conventional engine:
-//
-//	Source → lexer → parser → ast → interp (tree-walking evaluator)
-//
-// Host access (console output, wall-clock time, timers) is gated behind
-// capability providers, so the default configuration is a closed sandbox. A
-// caller opts into each capability explicitly.
-//
-// # Quick start
-//
-//	vm := gojs.New(
-//	    gojs.WithPrintProvider(gojs.NewDefaultPrintProvider()),
-//	)
-//	defer vm.Close()
-//	if _, err := vm.RunString("example.js", `console.log(1 + 2)`); err != nil {
-//	    log.Fatal(err)
-//	}
-//
-// The root package re-exports the most common surface of the interp package so
-// simple embeddings need only import gojs.
+// The gojs package overview and the layered-package map live in doc.go. This
+// file holds the re-exported public surface (types and constructors) that lets
+// simple embeddings depend only on the root package.
 package gojs
 
 import "github.com/iceisfun/gojs/interp"
