@@ -55,9 +55,12 @@ type parser struct {
 	// classDepth is the class-body nesting depth; private names (#x) are only
 	// valid where it is > 0.
 	classDepth int
-	// strict tracks whether the code currently being parsed is in strict mode
-	// (inside a strict script/module or a function with a "use strict"
-	// prologue). It propagates lexically into nested functions.
+	// strict reports whether the code currently being parsed is strict-mode
+	// code. It is set by a "use strict" directive prologue (at the program or
+	// function level), inherited into nested functions, and always true inside a
+	// class body. Several early errors are strict-mode sensitive (e.g. duplicate
+	// block-level FunctionDeclarations, or a FunctionDeclaration in a
+	// single-statement position under Annex B).
 	strict bool
 }
 
@@ -195,6 +198,14 @@ func (p *parser) expectSemicolon() {
 // parseProgram parses the whole token stream into a program node.
 func (p *parser) parseProgram() (*ast.Program, error) {
 	prog := &ast.Program{Source: p.source}
+
+	// A "use strict" directive anywhere in the program's leading directive
+	// prologue makes the whole program strict. Detect it up front (before
+	// parsing any block) so strict-sensitive early errors are applied correctly.
+	if p.scanUseStrict(p.idx) {
+		p.strict = true
+		prog.Strict = true
+	}
 
 	// Directive prologue: a leading run of string-literal expression
 	// statements, one of which may be "use strict".

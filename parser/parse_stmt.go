@@ -69,7 +69,7 @@ func (p *parser) parseStmt() ast.Stmt {
 	if tk.Type == token.IDENT && p.peek(1).Type == token.COLON {
 		label := p.next()
 		p.next() // ':'
-		body := p.parseStmt()
+		body := p.parseSubStatement(true)
 		return &ast.LabeledStmt{Label: &ast.Ident{NamePos: label.Pos, Name: label.Literal}, Body: body}
 	}
 
@@ -88,8 +88,9 @@ func (p *parser) letIsDeclaration() bool {
 	}
 }
 
-// parseBlock parses a brace-delimited block statement.
-func (p *parser) parseBlock() *ast.BlockStmt {
+// parseBraceBody parses a brace-delimited statement list into a block node
+// without applying any block-level early-error checks.
+func (p *parser) parseBraceBody() *ast.BlockStmt {
 	lb := p.expect(token.LBRACE)
 	blk := &ast.BlockStmt{Lbrace: lb.Pos}
 	for !p.at(token.RBRACE) && !p.at(token.EOF) && p.err == nil {
@@ -100,40 +101,33 @@ func (p *parser) parseBlock() *ast.BlockStmt {
 	return blk
 }
 
-// parseFunctionBody parses a function body block, scanning its directive
-// prologue for "use strict". It reports whether the body runs in strict mode
-// (its own directive or inherited from strict-mode enclosing code) and leaves
-// p.strict set for that mode while the body (and its nested functions) parse,
-// restoring the caller's mode on return.
-func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
-	outer := p.strict
-	defer func() { p.strict = outer }()
+// parseBlock parses a brace-delimited block statement and enforces the Block
+// static-semantics early errors (lexical redeclaration rules). It is used for
+// genuine Block productions — block statements and try/catch/finally blocks —
+// not function bodies (see parseFunctionBody).
+func (p *parser) parseBlock() *ast.BlockStmt {
+	blk := p.parseBraceBody()
+	p.checkBlockEarlyErrors(blk.Body)
+	return blk
+}
 
-	lb := p.expect(token.LBRACE)
-	blk := &ast.BlockStmt{Lbrace: lb.Pos}
-	inPrologue := true
-	for !p.at(token.RBRACE) && !p.at(token.EOF) && p.err == nil {
-		stmt := p.parseStmt()
-		if inPrologue {
-			// The directive prologue is a leading run of string-literal
-			// expression statements; the first non-string statement ends it.
-			if es, ok := stmt.(*ast.ExprStmt); ok {
-				if _, isStr := es.X.(*ast.StringLit); isStr {
-					if es.Directive == "use strict" {
-						p.strict = true
-					}
-				} else {
-					inPrologue = false
-				}
-			} else {
-				inPrologue = false
-			}
-		}
-		blk.Body = append(blk.Body, stmt)
+// parseFunctionBody parses the brace-delimited body of a function, arrow, or
+// method. Unlike a block statement, a function body uses top-level semantics
+// (FunctionDeclarations are var-scoped, not lexical), so the Block early-error
+// check is not applied; instead this is where a strict-mode directive prologue
+// takes effect for the code within. It returns the body and whether that body
+// runs in strict mode (its own "use strict" prologue or strict inherited from
+// enclosing code), so callers can record it on the function definition for the
+// runtime (e.g. strict-mode `this` binding).
+func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
+	prevStrict := p.strict
+	if p.at(token.LBRACE) && p.scanUseStrict(p.idx+1) {
+		p.strict = true
 	}
-	rb := p.expect(token.RBRACE)
-	blk.Rbrace = rb.Pos
-	return blk, p.strict
+	strict := p.strict
+	blk := p.parseBraceBody()
+	p.strict = prevStrict
+	return blk, strict
 }
 
 // parseExprStmt parses an expression statement, recognizing directive-prologue
@@ -187,10 +181,10 @@ func (p *parser) parseIf() ast.Stmt {
 	p.expect(token.LPAREN)
 	test := p.parseExpression()
 	p.expect(token.RPAREN)
-	cons := p.parseStmt()
+	cons := p.parseSubStatement(true)
 	stmt := &ast.IfStmt{Keyword: kw.Pos, Test: test, Consequent: cons}
 	if p.accept(token.ELSE) {
-		stmt.Alternate = p.parseStmt()
+		stmt.Alternate = p.parseSubStatement(true)
 	}
 	return stmt
 }
@@ -282,7 +276,7 @@ func (p *parser) forRight(isOf bool) ast.Expr {
 // parseLoopBody parses a loop body while tracking loop context for break/continue.
 func (p *parser) parseLoopBody() ast.Stmt {
 	p.inLoop++
-	body := p.parseStmt()
+	body := p.parseSubStatement(false)
 	p.inLoop--
 	return body
 }
@@ -339,6 +333,13 @@ func (p *parser) parseSwitch() ast.Stmt {
 	p.inSwitch--
 	rb := p.expect(token.RBRACE)
 	stmt.Rbrace = rb.Pos
+	// The CaseBlock as a whole is one lexical scope: apply the Block early-error
+	// rules across the concatenated statement lists of all clauses.
+	var all []ast.Stmt
+	for _, c := range stmt.Cases {
+		all = append(all, c.Body...)
+	}
+	p.checkBlockEarlyErrors(all)
 	return stmt
 }
 
