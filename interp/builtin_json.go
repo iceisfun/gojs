@@ -472,7 +472,7 @@ func (i *Interpreter) applyReplacer(ctx context.Context, value, replacer Value) 
 	if fn, ok := replacer.(*Object); ok && fn.IsCallable() {
 		holder := NewObject(i.objectProto)
 		holder.SetData("", value)
-		out, keep, err := i.replaceWalk(ctx, holder, "", value, fn)
+		out, keep, err := i.replaceWalk(ctx, holder, "", value, fn, map[*Object]bool{}, 0)
 		return out, keep, err
 	}
 	if arr, ok := replacer.(*Object); ok && arr.isArray {
@@ -491,8 +491,13 @@ func (i *Interpreter) applyReplacer(ctx context.Context, value, replacer Value) 
 }
 
 // replaceWalk applies a function replacer recursively. holder is the object/
-// array containing key; value is holder[key].
-func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key string, value Value, fn *Object) (Value, bool, error) {
+// array containing key; value is holder[key]. seen guards against cyclic output
+// (a circular structure throws a TypeError) and depth bounds runaway nesting
+// from a generative replacer (throws a RangeError, as engines do).
+func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key string, value Value, fn *Object, seen map[*Object]bool, depth int) (Value, bool, error) {
+	if depth > 4000 {
+		return nil, false, i.throwError(ctx, "RangeError", "Maximum call stack size exceeded")
+	}
 	// toJSON is honored before the replacer sees the value.
 	if o, ok := value.(*Object); ok {
 		if tj, _ := o.GetStr(ctx, "toJSON"); tj != nil {
@@ -517,10 +522,15 @@ func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key strin
 		if v.IsCallable() {
 			return Undef, false, nil
 		}
+		if seen[v] {
+			return nil, false, i.throwError(ctx, "TypeError", "Converting circular structure to JSON")
+		}
+		seen[v] = true
+		defer delete(seen, v)
 		if v.isArray {
 			out := i.newArray(nil)
 			for idx, e := range v.elems {
-				sub, keep, err := i.replaceWalk(ctx, v, intToStr(idx), e, fn)
+				sub, keep, err := i.replaceWalk(ctx, v, intToStr(idx), e, fn, seen, depth+1)
 				if err != nil {
 					return nil, false, err
 				}
@@ -536,7 +546,7 @@ func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key strin
 		for _, name := range v.OwnKeys() {
 			if p, ok := v.getOwn(StrKey(name)); ok && p.Enumerable {
 				ev, _ := v.GetStr(ctx, name)
-				sub, keep, err := i.replaceWalk(ctx, v, name, ev, fn)
+				sub, keep, err := i.replaceWalk(ctx, v, name, ev, fn, seen, depth+1)
 				if err != nil {
 					return nil, false, err
 				}
