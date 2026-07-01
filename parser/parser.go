@@ -69,6 +69,13 @@ type parser struct {
 	// transparent through arrow functions but reset at a regular function or a
 	// method boundary, which introduce their own arguments/super scope.
 	inFieldInit bool
+	// inGenerator/inAsync track whether the function whose parameters or body is
+	// currently being parsed is a generator or async. They gate the reserved-word
+	// treatment of `yield` (in a generator) and `await` (in an async function),
+	// which may not be used as binding identifiers there. Both are reset at every
+	// function boundary to that function's own kind.
+	inGenerator bool
+	inAsync     bool
 	// strict reports whether the code currently being parsed is strict-mode
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a

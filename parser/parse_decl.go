@@ -140,8 +140,16 @@ func (p *parser) tryParseArrow() ast.Expr {
 		p.next() // async
 	}
 	arrow := &ast.ArrowFunc{Start: start.Pos, Async: async}
+	// An arrow inherits [Yield]/[Await] from its context (it is transparent to
+	// yield/await like it is to `this`), except that an async arrow is itself
+	// async, so `await` is reserved within it.
+	prevAsync := p.inAsync
+	if async {
+		p.inAsync = true
+	}
 	if p.at(token.IDENT) {
 		id := p.next()
+		p.checkBindingIdentifier(id.Literal, id.Pos)
 		arrow.Params = []ast.Expr{&ast.Ident{NamePos: id.Pos, Name: id.Literal}}
 	} else {
 		arrow.Params = p.parseParams()
@@ -155,6 +163,7 @@ func (p *parser) tryParseArrow() ast.Expr {
 		arrow.Expression = true
 		arrow.Body = p.parseAssignExpr()
 	}
+	p.inAsync = prevAsync
 	// Arrow functions never permit duplicate parameter names.
 	p.checkParamDuplicates(arrow.Params, true)
 	return arrow
@@ -319,15 +328,34 @@ func (p *parser) parseBindingTarget() ast.Expr {
 		return pat
 	case token.IDENT:
 		id := p.next()
+		p.checkBindingIdentifier(id.Literal, id.Pos)
 		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 	default:
 		// Contextual keywords are valid binding names.
 		if p.cur().Type.IsKeyword() {
 			id := p.next()
-			return &ast.Ident{NamePos: id.Pos, Name: identText(id)}
+			name := identText(id)
+			p.checkBindingIdentifier(name, id.Pos)
+			return &ast.Ident{NamePos: id.Pos, Name: name}
 		}
 		p.errorf("expected binding name but got %s", p.cur().Type)
 		return &ast.Ident{NamePos: p.cur().Pos}
+	}
+}
+
+// checkBindingIdentifier reports the early errors for a name used as a binding
+// identifier: `yield` is a reserved word in strict-mode or generator code, and
+// `await` is reserved in async-function code, so neither may be bound there.
+func (p *parser) checkBindingIdentifier(name string, pos token.Pos) {
+	switch name {
+	case "yield":
+		if p.strict || p.inGenerator {
+			p.earlyError(pos, "'yield' may not be used as an identifier in this context")
+		}
+	case "await":
+		if p.inAsync {
+			p.earlyError(pos, "'await' may not be used as an identifier in this context")
+		}
 	}
 }
 
@@ -337,7 +365,7 @@ func (p *parser) parseBindingTarget() ast.Expr {
 
 // parseFuncDef parses the star/name/params/body of a function following the
 // `function` keyword (already consumed by the caller position-wise via kwPos).
-func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
+func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	def := &ast.FuncDef{}
 	if p.accept(token.STAR) {
 		def.Generator = true
@@ -354,17 +382,19 @@ func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
 	if requireName && def.Name == nil {
 		p.errorf("function declaration requires a name")
 	}
-	// A regular function establishes its own arguments/super scope, so a field
-	// initializer's restrictions do not reach into its parameters or body.
-	prevField := p.inFieldInit
+	// A regular function establishes its own arguments/super scope (so a field
+	// initializer's restrictions do not reach in) and its own yield/await
+	// reservation determined by whether it is a generator or async.
+	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
 	p.inFieldInit = false
+	p.inGenerator, p.inAsync = def.Generator, async
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
 	bodyUseStrict := p.at(token.LBRACE) && p.scanUseStrict(p.idx+1)
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
-	p.inFieldInit = prevField
+	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
@@ -374,7 +404,7 @@ func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
 // the caller for `async function`.
 func (p *parser) parseFunctionExpr(async bool) *ast.FuncExpr {
 	kw := p.expect(token.FUNCTION)
-	def := p.parseFuncDef(false)
+	def := p.parseFuncDef(false, async)
 	def.Async = async
 	return &ast.FuncExpr{Keyword: kw.Pos, Def: def}
 }
@@ -382,7 +412,7 @@ func (p *parser) parseFunctionExpr(async bool) *ast.FuncExpr {
 // parseFunctionDecl parses a function declaration statement.
 func (p *parser) parseFunctionDecl(async bool) *ast.FuncDecl {
 	kw := p.expect(token.FUNCTION)
-	def := p.parseFuncDef(true)
+	def := p.parseFuncDef(true, async)
 	def.Async = async
 	return &ast.FuncDecl{Keyword: kw.Pos, Def: def}
 }
@@ -508,16 +538,18 @@ func (p *parser) parsePropertyKey() (ast.Expr, bool) {
 func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	start := p.cur()
 	def := &ast.FuncDef{Async: async, Generator: generator}
-	// A method establishes its own arguments/super scope (see parseFuncDef).
-	prevField := p.inFieldInit
+	// A method establishes its own arguments/super scope and yield/await
+	// reservation (see parseFuncDef).
+	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
 	p.inFieldInit = false
+	p.inGenerator, p.inAsync = generator, async
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
 	bodyUseStrict := p.at(token.LBRACE) && p.scanUseStrict(p.idx+1)
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
-	p.inFieldInit = prevField
+	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
