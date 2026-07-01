@@ -216,10 +216,9 @@ func (p *parser) checkStatementPosition(annexBFunc bool) {
 	switch tk.Type {
 	case token.CONST, token.CLASS:
 		p.errorAt(tk.Pos, "Lexical declaration cannot appear in a single-statement context")
-	case token.LET:
-		if p.letIsDeclaration() {
-			p.errorAt(tk.Pos, "Lexical declaration cannot appear in a single-statement context")
-		}
+	// `let` in a single-statement position is handled by parseSubStatement (it is
+	// the identifier `let` unless the restricted `let [` lookahead applies), so it
+	// is intentionally not treated as a lexical declaration here.
 	case token.FUNCTION:
 		// A generator declaration is never permitted; a plain FunctionDeclaration
 		// is permitted only under the Annex B relaxation in non-strict code.
@@ -234,10 +233,44 @@ func (p *parser) checkStatementPosition(annexBFunc bool) {
 }
 
 // parseSubStatement parses a statement that appears in a single-statement
-// position, rejecting declarations that the grammar forbids there.
+// position, rejecting declarations the grammar forbids there. annexBFunc is
+// true for the if/else and labelled-statement bodies where Annex B (B.3.2/B.3.4)
+// relaxes a plain FunctionDeclaration in sloppy code, and false for iteration
+// bodies where no such relaxation applies.
 func (p *parser) parseSubStatement(annexBFunc bool) ast.Stmt {
+	// A leading `let` in a Statement-only position is the identifier `let` used
+	// as an ExpressionStatement, never a LexicalDeclaration. The one exception is
+	// the lookahead-restricted `let [` form, which is an early error here.
+	if p.at(token.LET) {
+		if p.peek(1).Type == token.LBRACKET {
+			p.errorAt(p.cur().Pos, "Lexical declaration cannot appear in a single-statement context")
+		}
+		return p.parseExprStmt()
+	}
 	p.checkStatementPosition(annexBFunc)
-	return p.parseStmt()
+	stmt := p.parseStmt()
+	// In an iteration-statement body a LabelledFunctionDeclaration is a Syntax
+	// Error (ECMA-262 B.3.2); annexBFunc is false only for those loop bodies.
+	if !annexBFunc && isLabeledFunction(stmt) {
+		p.errorAt(stmt.Pos(), "Labelled function declaration cannot appear in a single-statement context")
+	}
+	return stmt
+}
+
+// isLabeledFunction reports whether stmt is a (possibly multiply) labelled
+// FunctionDeclaration, e.g. `l1: l2: function f(){}`.
+func isLabeledFunction(stmt ast.Stmt) bool {
+	inner := stmt
+	for {
+		lbl, ok := inner.(*ast.LabeledStmt)
+		if !ok {
+			return false
+		}
+		if _, ok := lbl.Body.(*ast.FuncDecl); ok {
+			return true
+		}
+		inner = lbl.Body
+	}
 }
 
 // earlyError records a SyntaxError at pos (only the first is kept).
