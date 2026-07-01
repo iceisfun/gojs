@@ -1,0 +1,4 @@
+reference/
+.gocache/
+gojs
+cmd/gojs/gojs
