@@ -309,9 +309,7 @@ func (p *parser) parseMemberName() ast.Expr {
 	tk := p.cur()
 	if tk.Type == token.PRIVATE {
 		p.next()
-		if p.classDepth == 0 {
-			p.errorAt(tk.Pos, "Private field '%s' must be declared in an enclosing class", tk.Literal)
-		}
+		p.recordPrivateRef(tk)
 		return &ast.PrivateIdent{NamePos: tk.Pos, Name: tk.Literal}
 	}
 	// Any identifier-like token (including reserved words) is a valid property
@@ -418,9 +416,7 @@ func (p *parser) parsePrimary() ast.Expr {
 	case token.PRIVATE:
 		// `#field in obj` ergonomic brand check — only valid inside a class.
 		p.next()
-		if p.classDepth == 0 {
-			p.errorAt(tk.Pos, "Private field '%s' must be declared in an enclosing class", tk.Literal)
-		}
+		p.recordPrivateRef(tk)
 		return &ast.PrivateIdent{NamePos: tk.Pos, Name: tk.Literal}
 	default:
 		// Contextual keywords (let, of, get, set, yield, await, static) used as

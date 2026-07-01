@@ -524,6 +524,8 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 	// their use elsewhere is a SyntaxError (see parsePrivateName). A class body
 	// is always strict-mode code.
 	p.classDepth++
+	env := &privateEnv{declared: map[string]bool{}}
+	p.privateEnvStack = append(p.privateEnvStack, env)
 	prevStrict := p.strict
 	p.strict = true
 	for !p.at(token.RBRACE) && !p.at(token.EOF) {
@@ -532,12 +534,70 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 		}
 		def.Members = append(def.Members, p.parseClassMember())
 	}
+	// Record this class's declared private names before popping so that
+	// references captured anywhere (including in nested classes, or textually
+	// before the declaration) can still resolve to them.
+	for _, m := range def.Members {
+		if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+			env.declared[priv.Name] = true
+		}
+	}
 	p.strict = prevStrict
 	p.classDepth--
+	p.privateEnvStack = p.privateEnvStack[:len(p.privateEnvStack)-1]
 	rb := p.expect(token.RBRACE)
 	def.Rbrace = rb.Pos
 	p.checkClassMembers(def)
 	return def
+}
+
+// privateEnv records the private names (#x) declared in a single class body.
+type privateEnv struct {
+	declared map[string]bool
+}
+
+// privateRef is a use of a private name captured with the class environments
+// enclosing it, so that "declared in an enclosing class" can be validated after
+// the whole program is parsed and every declaration is known.
+type privateRef struct {
+	name string
+	pos  token.Pos
+	envs []*privateEnv
+}
+
+// recordPrivateRef notes a reference to a private name for later validation. A
+// reference outside any class body is an immediate SyntaxError; inside one, the
+// enclosing environments are snapshotted (their declarations may still be
+// pending) and checked once parsing completes.
+func (p *parser) recordPrivateRef(tk token.Token) {
+	if len(p.privateEnvStack) == 0 {
+		p.errorAt(tk.Pos, "Private field '%s' must be declared in an enclosing class", tk.Literal)
+		return
+	}
+	envs := make([]*privateEnv, len(p.privateEnvStack))
+	copy(envs, p.privateEnvStack)
+	p.privateRefs = append(p.privateRefs, privateRef{name: tk.Literal, pos: tk.Pos, envs: envs})
+}
+
+// checkPrivateRefs reports the first reference to a private name that is not
+// declared in any of its enclosing classes (ECMA-262 AllPrivateIdentifiersValid).
+func (p *parser) checkPrivateRefs() {
+	if p.err != nil {
+		return
+	}
+	for _, ref := range p.privateRefs {
+		found := false
+		for _, env := range ref.envs {
+			if env.declared[ref.name] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			p.errorAt(ref.pos, "Private field '%s' must be declared in an enclosing class", ref.name)
+			return
+		}
+	}
 }
 
 // checkClassMembers enforces early (static-semantic) errors on a class body:

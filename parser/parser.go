@@ -55,6 +55,15 @@ type parser struct {
 	// classDepth is the class-body nesting depth; private names (#x) are only
 	// valid where it is > 0.
 	classDepth int
+	// privateEnvStack holds one entry per class body currently being parsed,
+	// each recording the private names declared in that class. privateRefs
+	// records every private-name reference with a snapshot of its enclosing
+	// class environments. Because a private name is visible throughout its
+	// class — including before its textual declaration and in nested classes —
+	// references cannot be resolved until every declaration is known, so they
+	// are validated once at the end of the parse (see checkPrivateRefs).
+	privateEnvStack []*privateEnv
+	privateRefs     []privateRef
 	// strict reports whether the code currently being parsed is strict-mode
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a
@@ -233,6 +242,8 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 		prog.Body = append(prog.Body, stmt)
 	}
 	prog.EndPos = p.cur().Pos
+	// All private-name declarations are now known; validate every reference.
+	p.checkPrivateRefs()
 	if p.err != nil {
 		return nil, p.err
 	}
