@@ -332,10 +332,15 @@ func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
 	if requireName && def.Name == nil {
 		p.errorf("function declaration requires a name")
 	}
+	// A regular function establishes its own arguments/super scope, so a field
+	// initializer's restrictions do not reach into its parameters or body.
+	prevField := p.inFieldInit
+	p.inFieldInit = false
 	def.Params = p.parseParams()
 	p.inFunction++
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
+	p.inFieldInit = prevField
 	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
 }
@@ -478,10 +483,14 @@ func (p *parser) parsePropertyKey() (ast.Expr, bool) {
 func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	start := p.cur()
 	def := &ast.FuncDef{Async: async, Generator: generator}
+	// A method establishes its own arguments/super scope (see parseFuncDef).
+	prevField := p.inFieldInit
+	p.inFieldInit = false
 	def.Params = p.parseParams()
 	p.inFunction++
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
+	p.inFieldInit = prevField
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
 	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
@@ -689,10 +698,14 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 		return m
 	}
 
-	// Field definition (with optional initializer).
+	// Field definition (with optional initializer). A field initializer may not
+	// contain `arguments` or a SuperCall (tracked via inFieldInit).
 	m.Field = true
 	if p.accept(token.ASSIGN) {
+		prev := p.inFieldInit
+		p.inFieldInit = true
 		m.Value = p.parseAssignExpr()
+		p.inFieldInit = prev
 	}
 	p.expectSemicolon()
 	return m

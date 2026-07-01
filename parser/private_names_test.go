@@ -10,11 +10,11 @@ import "testing"
 
 func TestPrivateNameUndeclaredIsSyntaxError(t *testing.T) {
 	bad := []string{
-		`class C { f = (() => {})().#x }`,      // undeclared, in a field initializer
+		`class C { f = (() => {})().#x }`, // undeclared, in a field initializer
 		`class C { m() { return this.#missing; } }`,
-		`class C { m(o) { return #missing in o; } }`, // brand check on undeclared
-		`var o = {}; o.#x;`,                          // outside any class
-		`this.#x;`,                                   // outside any class
+		`class C { m(o) { return #missing in o; } }`,            // brand check on undeclared
+		`var o = {}; o.#x;`,                                     // outside any class
+		`this.#x;`,                                              // outside any class
 		`class C { #x = 1; } class D { m(o) { return o.#x; } }`, // sibling class
 		`class C { #a = 1; m() { return this.#b; } }`,           // wrong name
 	}

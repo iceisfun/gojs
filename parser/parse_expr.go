@@ -378,9 +378,16 @@ func (p *parser) parsePrimary() ast.Expr {
 		return &ast.ThisExpr{Keyword: tk.Pos}
 	case token.SUPER:
 		p.next()
+		// A SuperCall (super(...)) is not allowed in a class field initializer.
+		if p.inFieldInit && p.at(token.LPAREN) {
+			p.errorAt(tk.Pos, "super() is not allowed in a class field initializer")
+		}
 		return &ast.SuperExpr{Keyword: tk.Pos}
 	case token.IDENT:
 		p.next()
+		if p.inFieldInit && tk.Literal == "arguments" {
+			p.errorAt(tk.Pos, "'arguments' is not allowed in a class field initializer")
+		}
 		return &ast.Ident{NamePos: tk.Pos, Name: tk.Literal}
 	case token.REGEX:
 		p.next()

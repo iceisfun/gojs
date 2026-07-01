@@ -64,6 +64,11 @@ type parser struct {
 	// are validated once at the end of the parse (see checkPrivateRefs).
 	privateEnvStack []*privateEnv
 	privateRefs     []privateRef
+	// inFieldInit is true while parsing a class field initializer. A field
+	// initializer may not contain `arguments` or a SuperCall (super(...)). It is
+	// transparent through arrow functions but reset at a regular function or a
+	// method boundary, which introduce their own arguments/super scope.
+	inFieldInit bool
 	// strict reports whether the code currently being parsed is strict-mode
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a
