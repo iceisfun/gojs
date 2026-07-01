@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/contrib/logo_gojs.png" alt="gojs" width="640">
+</p>
+
 # gojs
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/iceisfun/gojs.svg)](https://pkg.go.dev/github.com/iceisfun/gojs)
@@ -51,9 +55,44 @@ clock, or schedule timers.
 | `TimeProvider`    | `Date` / `performance.now` clock source    | `NewDefaultTimeProvider()`  |
 | `TimerProvider`   | `setTimeout` / `setInterval` scheduling    | `NewDefaultTimerProvider()` |
 
+Each provider is a small Go interface, so you can supply your own — route
+`console.*` through your logger, present a fixed clock for deterministic tests,
+or back timers with your own scheduler:
+
+```go
+type PrintProvider interface {
+	Print(ctx context.Context, msg string) // console.log/info/debug
+	Warn(ctx context.Context, msg string)  // console.warn/error
+}
+```
+
 Additional hardening is available through `WithSecurity(Security{…})`:
 `DisableEval`, `DisableFunctionCtor`, `DisableProtoMutation`,
 `StrictModulesOnly`.
+
+### Host async integration
+
+Concurrent host work (HTTP, filesystem, DB, subprocess) integrates through a
+single-threaded event-loop model — the interpreter is never touched from more
+than one goroutine. A provider does its blocking work on its own goroutine, then
+posts exactly one continuation back onto the VM goroutine:
+
+```go
+cap := vm.NewPromiseCapability()   // create a pending promise on the VM goroutine
+go func() {
+	body, err := http.Get(url)     // blocking work off the VM goroutine
+	if err != nil {
+		cap.Reject(vm.NewError("Error", err.Error())) // marshals back to the loop
+		return
+	}
+	cap.Resolve(gojs.String(body))
+}()
+return cap.Promise                 // hand the promise to the script
+```
+
+`Enqueue`, `QueueMicrotask`, `ResolvePromise`/`RejectPromise`, and `RunLoop`
+round out the API. All JavaScript — the initial program and every callback —
+runs on one goroutine, so objects, environments, and closures never need locks.
 
 ## Installation
 
@@ -110,7 +149,54 @@ gojs --timeout 500 ...     # cancel after 500ms
 ```
 
 By default the CLI installs the `Default*` providers (the standalone-runner
-trust level). `--sandbox` runs with no providers at all.
+trust level). `--sandbox` runs with no providers at all. `--ast` prints the
+parsed syntax tree instead of executing.
+
+## Go interop
+
+Move values and control across the Go/JavaScript boundary with a small API.
+
+**Expose a Go function to scripts:**
+
+```go
+vm.SetGlobal("shout", vm.NewFunction("shout", func(args []gojs.Value) (gojs.Value, error) {
+	s, _ := vm.ToString(args[0])
+	return gojs.String(strings.ToUpper(s)), nil
+}))
+vm.RunString("s.js", `console.log(shout("hi"))`) // HI
+```
+
+Returning an error from a `HostFunc` throws it into the script; wrap a value
+with `gojs.NewThrow(...)` to throw a specific JS object.
+
+**Call a script function from Go:**
+
+```go
+vm.RunString("lib.js", `function add(a, b) { return a + b; }`)
+sum, _ := vm.Call(vm.GetGlobal("add"), gojs.Undefined, gojs.Number(2), gojs.Number(3))
+fmt.Println(vm.ToGo(sum)) // 5
+```
+
+**Convert values both ways** with `vm.FromGo` (Go → JS: scalars, `[]any`,
+`map[string]any`) and `vm.ToGo` / `vm.ToString` (JS → Go).
+
+## Examples
+
+Runnable programs live under [`examples/`](examples), each with its own README:
+
+| Example                                  | Shows                                                    |
+| ---------------------------------------- | ------------------------------------------------------- |
+| [`basic`](examples/basic)               | Run a script and read back its result                   |
+| [`expose_go`](examples/expose_go)       | Expose Go functions and data to JavaScript              |
+| [`call_js`](examples/call_js)           | Call script functions from Go                           |
+| [`providers`](examples/providers)       | Custom `PrintProvider` + timers on the event loop       |
+| [`sandbox`](examples/sandbox)           | Hardened sandbox: no I/O, no eval, timeout on runaway    |
+
+```bash
+go run ./examples/basic
+go run ./examples/expose_go
+go run ./examples/providers
+```
 
 ## Architecture
 

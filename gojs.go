@@ -38,6 +38,38 @@ type Option = interp.Option
 // Security holds the opt-in hardening switches. Alias for [interp.Security].
 type Security = interp.Security
 
+// Value type aliases for building/inspecting JavaScript values from Go.
+type (
+	// Object is a JavaScript object (also arrays and functions).
+	Object = interp.Object
+	// String is a JavaScript string.
+	String = interp.String
+	// Number is a JavaScript number (float64).
+	Number = interp.Number
+	// Boolean is a JavaScript boolean.
+	Boolean = interp.Boolean
+	// HostFunc is the signature for a Go function exposed to scripts.
+	HostFunc = interp.HostFunc
+)
+
+// Interned primitive values.
+var (
+	// Undefined is the JavaScript undefined value.
+	Undefined = interp.Undef
+	// Null is the JavaScript null value.
+	Null = interp.Nul
+	// True and False are the JavaScript boolean values.
+	True  = interp.True
+	False = interp.False
+)
+
+// Bool returns the JavaScript boolean for b.
+func Bool(b bool) Value { return interp.Bool(b) }
+
+// NewThrow wraps a value so returning it from a HostFunc throws it as a JS
+// exception.
+func NewThrow(v Value) error { return interp.NewThrow(v) }
+
 // New creates a VM. With no options it is a closed sandbox: no console output,
 // no clock, and no timers. Add providers to grant capabilities.
 func New(opts ...Option) *VM { return interp.New(opts...) }
@@ -58,3 +90,7 @@ var (
 // ThrownValue extracts the JavaScript value from an uncaught-exception error
 // returned by RunString/RunProgram.
 func ThrownValue(err error) (Value, bool) { return interp.ThrownValue(err) }
+
+// BriefValue renders a value for host-facing display (e.g. an uncaught
+// exception) without running user toString methods.
+func BriefValue(v Value) string { return interp.BriefValue(v) }
