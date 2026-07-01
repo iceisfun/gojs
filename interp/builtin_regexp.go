@@ -34,7 +34,7 @@ func (i *Interpreter) initRegExp() {
 	})
 
 	i.defineMethod(proto, "exec", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		reObj, re, ok := regexpReceiver(this)
+		o, ok := this.(*Object)
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Method RegExp.prototype.exec called on incompatible receiver")
 		}
@@ -42,15 +42,7 @@ func (i *Interpreter) initRegExp() {
 		if err != nil {
 			return nil, err
 		}
-		units := jsregexp.ToUnits(s)
-		m, err := i.regexExec(ctx, reObj, re, units)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		if m == nil {
-			return Nul, nil
-		}
-		return i.submatchToArray(re, units, m), nil
+		return i.regexpBuiltinExec(ctx, o, s)
 	})
 
 	i.defineMethod(proto, "toString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -73,177 +65,256 @@ func (i *Interpreter) initRegExp() {
 	linkCtor(ctor, proto)
 	i.setGlobalHidden("RegExp", ctor)
 
+	i.initRegExpAccessors(proto)
+	i.initRegExpSymbols(proto)
 	i.initStringRegex()
 }
 
-// initStringRegex installs the RegExp-aware String.prototype methods
-// (match/matchAll/search) and upgrades replace/replaceAll/split to accept a
-// RegExp argument in addition to a string.
+// initStringRegex installs the RegExp-aware String.prototype methods, each of
+// which delegates to the regexp argument's well-known-symbol method when present
+// (§22.1.3), falling back to a freshly created RegExp (match/search/matchAll) or
+// plain string behavior (replace/split).
 func (i *Interpreter) initStringRegex() {
 	sp := i.stringProto
 
-	strOf := func(ctx context.Context, this Value) (string, error) {
+	requireCoercible := func(ctx context.Context, this Value) error {
 		if IsNullish(this) {
-			return "", i.throwError(ctx, "TypeError", "String.prototype method called on null or undefined")
+			return i.throwError(ctx, "TypeError", "String.prototype method called on null or undefined")
 		}
-		return i.ToStringV(ctx, this)
-	}
-
-	// coerceRegExp turns the argument into a compiled RegExp object, wrapping a
-	// non-RegExp value with `new RegExp(value)`.
-	coerceRegExp := func(ctx context.Context, v Value, extraFlags string) (*Object, reEngine, error) {
-		if o, ok := v.(*Object); ok {
-			if re, ok := regexpOf(o); ok {
-				return o, re, nil
-			}
-		}
-		pattern := ""
-		if !IsNullish(v) {
-			p, err := i.ToStringV(ctx, v)
-			if err != nil {
-				return nil, nil, err
-			}
-			pattern = p
-		}
-		rev, err := i.newRegExp(ctx, pattern, extraFlags)
-		if err != nil {
-			return nil, nil, err
-		}
-		o := rev.(*Object)
-		re, _ := regexpOf(o)
-		return o, re, nil
+		return nil
 	}
 
 	i.defineMethod(sp, "search", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s, err := strOf(ctx, this)
+		if err := requireCoercible(ctx, this); err != nil {
+			return nil, err
+		}
+		regexp := arg(args, 0)
+		if !IsNullish(regexp) {
+			if m, err := i.getMethod(ctx, regexp, i.symSearch); err != nil {
+				return nil, err
+			} else if m != nil {
+				s, err := i.ToStringV(ctx, this)
+				if err != nil {
+					return nil, err
+				}
+				return i.call(ctx, m, regexp, []Value{String(s)})
+			}
+		}
+		s, err := i.ToStringV(ctx, this)
 		if err != nil {
 			return nil, err
 		}
-		_, re, err := coerceRegExp(ctx, arg(args, 0), "")
+		rx, err := i.regExpCreate(ctx, regexp, "")
 		if err != nil {
 			return nil, err
 		}
-		units := jsregexp.ToUnits(s)
-		m, err := re.FindSubmatchIndex(ctx, units, 0)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		if m == nil {
-			return Number(-1), nil
-		}
-		return Number(float64(m[0])), nil
+		return i.regexpSymbolSearch(ctx, rx, []Value{String(s)})
 	})
 
 	i.defineMethod(sp, "match", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s, err := strOf(ctx, this)
+		if err := requireCoercible(ctx, this); err != nil {
+			return nil, err
+		}
+		regexp := arg(args, 0)
+		if !IsNullish(regexp) {
+			if m, err := i.getMethod(ctx, regexp, i.symMatch); err != nil {
+				return nil, err
+			} else if m != nil {
+				s, err := i.ToStringV(ctx, this)
+				if err != nil {
+					return nil, err
+				}
+				return i.call(ctx, m, regexp, []Value{String(s)})
+			}
+		}
+		s, err := i.ToStringV(ctx, this)
 		if err != nil {
 			return nil, err
 		}
-		reObj, re, err := coerceRegExp(ctx, arg(args, 0), "")
+		rx, err := i.regExpCreate(ctx, regexp, "")
 		if err != nil {
 			return nil, err
 		}
-		units := jsregexp.ToUnits(s)
-		if regexpIsGlobal(reObj) {
-			reObj.SetData("lastIndex", Number(0))
-			all, err := i.regexFindAll(ctx, re, units)
-			if err != nil {
-				return nil, i.regexErr(ctx, err)
-			}
-			if len(all) == 0 {
-				return Nul, nil
-			}
-			vals := make([]Value, len(all))
-			for j, m := range all {
-				vals[j] = String(jsregexp.FromUnits(units[m[0]:m[1]]))
-			}
-			return i.newArray(vals), nil
-		}
-		m, err := i.regexExec(ctx, reObj, re, units)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		if m == nil {
-			return Nul, nil
-		}
-		return i.submatchToArray(re, units, m), nil
+		return i.regexpSymbolMatch(ctx, rx, []Value{String(s)})
 	})
 
 	i.defineMethod(sp, "matchAll", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s, err := strOf(ctx, this)
+		if err := requireCoercible(ctx, this); err != nil {
+			return nil, err
+		}
+		regexp := arg(args, 0)
+		if !IsNullish(regexp) {
+			isRe, err := i.isRegExpValue(ctx, regexp)
+			if err != nil {
+				return nil, err
+			}
+			if isRe {
+				flags, err := i.getStrProp(ctx, regexp.(*Object), "flags")
+				if err != nil {
+					return nil, err
+				}
+				if !strings.Contains(flags, "g") {
+					return nil, i.throwError(ctx, "TypeError", "String.prototype.matchAll called with a non-global RegExp argument")
+				}
+			}
+			if m, err := i.getMethod(ctx, regexp, i.symMatchAll); err != nil {
+				return nil, err
+			} else if m != nil {
+				s, err := i.ToStringV(ctx, this)
+				if err != nil {
+					return nil, err
+				}
+				return i.call(ctx, m, regexp, []Value{String(s)})
+			}
+		}
+		s, err := i.ToStringV(ctx, this)
 		if err != nil {
 			return nil, err
 		}
-		// A RegExp argument must carry the global flag (§22.1.3.14).
-		if reObj, ok := arg(args, 0).(*Object); ok {
-			if _, isRe := regexpOf(reObj); isRe && !regexpIsGlobal(reObj) {
-				return nil, i.throwError(ctx, "TypeError", "String.prototype.matchAll called with a non-global RegExp argument")
-			}
-		}
-		_, re, err := coerceRegExp(ctx, arg(args, 0), "g")
+		rx, err := i.regExpCreate(ctx, regexp, "g")
 		if err != nil {
 			return nil, err
 		}
-		units := jsregexp.ToUnits(s)
-		matches, err := i.regexFindAll(ctx, re, units)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		idx := 0
-		return i.newIterator(func() (Value, bool) {
-			if idx >= len(matches) {
-				return Undef, false
-			}
-			m := matches[idx]
-			idx++
-			return i.submatchToArray(re, units, m), true
-		}), nil
+		return i.regexpSymbolMatchAll(ctx, rx, []Value{String(s)})
 	})
 
 	i.defineMethod(sp, "replace", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s, err := strOf(ctx, this)
-		if err != nil {
+		if err := requireCoercible(ctx, this); err != nil {
 			return nil, err
 		}
-		if reObj, ok := arg(args, 0).(*Object); ok {
-			if re, ok := regexpOf(reObj); ok {
-				return i.regexReplace(ctx, s, reObj, re, arg(args, 1), regexpIsGlobal(reObj))
+		searchValue := arg(args, 0)
+		if !IsNullish(searchValue) {
+			if m, err := i.getMethod(ctx, searchValue, i.symReplace); err != nil {
+				return nil, err
+			} else if m != nil {
+				s, err := i.ToStringV(ctx, this)
+				if err != nil {
+					return nil, err
+				}
+				return i.call(ctx, m, searchValue, []Value{String(s), arg(args, 1)})
 			}
+		}
+		s, err := i.ToStringV(ctx, this)
+		if err != nil {
+			return nil, err
 		}
 		return i.stringReplace(ctx, s, args, false)
 	})
+
 	i.defineMethod(sp, "replaceAll", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s, err := strOf(ctx, this)
-		if err != nil {
+		if err := requireCoercible(ctx, this); err != nil {
 			return nil, err
 		}
-		if reObj, ok := arg(args, 0).(*Object); ok {
-			if re, ok := regexpOf(reObj); ok {
-				if !regexpIsGlobal(reObj) {
-					return nil, i.throwError(ctx, "TypeError", "replaceAll must be called with a global RegExp")
-				}
-				return i.regexReplace(ctx, s, reObj, re, arg(args, 1), true)
+		searchValue := arg(args, 0)
+		if !IsNullish(searchValue) {
+			isRe, err := i.isRegExpValue(ctx, searchValue)
+			if err != nil {
+				return nil, err
 			}
+			if isRe {
+				flags, err := i.getStrProp(ctx, searchValue.(*Object), "flags")
+				if err != nil {
+					return nil, err
+				}
+				if !strings.Contains(flags, "g") {
+					return nil, i.throwError(ctx, "TypeError", "String.prototype.replaceAll called with a non-global RegExp argument")
+				}
+			}
+			if m, err := i.getMethod(ctx, searchValue, i.symReplace); err != nil {
+				return nil, err
+			} else if m != nil {
+				s, err := i.ToStringV(ctx, this)
+				if err != nil {
+					return nil, err
+				}
+				return i.call(ctx, m, searchValue, []Value{String(s), arg(args, 1)})
+			}
+		}
+		s, err := i.ToStringV(ctx, this)
+		if err != nil {
+			return nil, err
 		}
 		return i.stringReplace(ctx, s, args, true)
 	})
 
 	i.defineMethod(sp, "split", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s, err := strOf(ctx, this)
+		if err := requireCoercible(ctx, this); err != nil {
+			return nil, err
+		}
+		separator := arg(args, 0)
+		if !IsNullish(separator) {
+			if m, err := i.getMethod(ctx, separator, i.symSplit); err != nil {
+				return nil, err
+			} else if m != nil {
+				s, err := i.ToStringV(ctx, this)
+				if err != nil {
+					return nil, err
+				}
+				return i.call(ctx, m, separator, []Value{String(s), arg(args, 1)})
+			}
+		}
+		s, err := i.ToStringV(ctx, this)
 		if err != nil {
 			return nil, err
 		}
-		if reObj, ok := arg(args, 0).(*Object); ok {
-			if re, ok := regexpOf(reObj); ok {
-				limit := -1
-				if !IsUndefined(arg(args, 1)) {
-					limit, _ = i.argInt(ctx, args, 1)
-				}
-				return i.regexSplit(ctx, s, re, limit)
-			}
-		}
 		return i.stringSplitString(ctx, s, args)
 	})
+}
+
+// getMethod implements GetMethod (§7.3.11): Get(V, P); undefined/null → nil;
+// otherwise it must be callable.
+func (i *Interpreter) getMethod(ctx context.Context, v Value, sym *Symbol) (*Object, error) {
+	o, ok := v.(*Object)
+	if !ok {
+		return nil, nil
+	}
+	fn, err := o.Get(ctx, SymKey(sym))
+	if err != nil {
+		return nil, err
+	}
+	if IsNullish(fn) {
+		return nil, nil
+	}
+	fo, ok := fn.(*Object)
+	if !ok || !fo.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", "the value of a well-known symbol method is not callable")
+	}
+	return fo, nil
+}
+
+// isRegExpValue implements IsRegExp (§22.1.3): an object whose @@match is truthy,
+// or (absent @@match) one with a compiled matcher.
+func (i *Interpreter) isRegExpValue(ctx context.Context, v Value) (bool, error) {
+	o, ok := v.(*Object)
+	if !ok {
+		return false, nil
+	}
+	m, err := o.Get(ctx, SymKey(i.symMatch))
+	if err != nil {
+		return false, err
+	}
+	if !IsUndefined(m) {
+		return ToBoolean(m), nil
+	}
+	_, isRe := regexpOf(o)
+	return isRe, nil
+}
+
+// regExpCreate builds a RegExp from a (non-RegExp) pattern value and flag string.
+func (i *Interpreter) regExpCreate(ctx context.Context, pattern Value, flags string) (*Object, error) {
+	p := ""
+	if !IsUndefined(pattern) {
+		s, err := i.ToStringV(ctx, pattern)
+		if err != nil {
+			return nil, err
+		}
+		p = s
+	}
+	v, err := i.newRegExp(ctx, p, flags)
+	if err != nil {
+		return nil, err
+	}
+	return v.(*Object), nil
 }
 
 // regexExec runs one match honoring lastIndex for global/sticky regexes, updating
@@ -275,31 +346,6 @@ func (i *Interpreter) regexExec(ctx context.Context, reObj *Object, re reEngine,
 		reObj.SetData("lastIndex", Number(float64(m[1])))
 	}
 	return m, nil
-}
-
-// regexFindAll collects every match from the start of units, advancing past
-// zero-width matches by one code point (AdvanceStringIndex). It is independent of
-// lastIndex; callers that must reset lastIndex do so themselves.
-func (i *Interpreter) regexFindAll(ctx context.Context, re reEngine, units []uint16) ([][]int, error) {
-	unicode := re.Flags().UnicodeMode()
-	var out [][]int
-	pos := 0
-	for pos <= len(units) {
-		m, err := re.FindSubmatchIndex(ctx, units, pos)
-		if err != nil {
-			return nil, err
-		}
-		if m == nil {
-			break
-		}
-		out = append(out, m)
-		if m[1] == m[0] {
-			pos = advanceStringIndex(units, m[1], unicode)
-		} else {
-			pos = m[1]
-		}
-	}
-	return out, nil
 }
 
 // advanceStringIndex returns the next index after i, stepping over a surrogate
@@ -347,61 +393,6 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 	return arr
 }
 
-// regexSplit implements String.prototype.split with a RegExp separator, including
-// interspersed separator capture groups (§22.1.3.21).
-func (i *Interpreter) regexSplit(ctx context.Context, s string, re reEngine, limit int) (Value, error) {
-	if limit == 0 {
-		return i.newArray(nil), nil
-	}
-	units := jsregexp.ToUnits(s)
-	var out []Value
-	push := func(v Value) bool {
-		out = append(out, v)
-		return !(limit >= 0 && len(out) >= limit)
-	}
-
-	if len(units) == 0 {
-		m, err := re.FindSubmatchIndex(ctx, units, 0)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		if m != nil {
-			return i.newArray(nil), nil
-		}
-		return i.newArray([]Value{String("")}), nil
-	}
-
-	matches, err := i.regexFindAll(ctx, re, units)
-	if err != nil {
-		return nil, i.regexErr(ctx, err)
-	}
-	last := 0
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		if start >= len(units) {
-			break // no match position at end of string
-		}
-		if end == last {
-			continue // empty match at the current boundary
-		}
-		if !push(String(jsregexp.FromUnits(units[last:start]))) {
-			return i.newArray(out), nil
-		}
-		for g := 1; g < len(m)/2; g++ {
-			if m[2*g] < 0 {
-				if !push(Undef) {
-					return i.newArray(out), nil
-				}
-			} else if !push(String(jsregexp.FromUnits(units[m[2*g]:m[2*g+1]]))) {
-				return i.newArray(out), nil
-			}
-		}
-		last = end
-	}
-	push(String(jsregexp.FromUnits(units[last:])))
-	return i.newArray(out), nil
-}
-
 // stringSplitString implements String.prototype.split with a string separator.
 func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Value) (Value, error) {
 	if IsUndefined(arg(args, 0)) {
@@ -431,163 +422,6 @@ func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Va
 		out = append(out, String(p))
 	}
 	return i.newArray(out), nil
-}
-
-// regexReplace implements String.prototype.replace with a RegExp pattern,
-// supporting a function replacer and $-substitutions ($&, $1..$99, $<name>, $$,
-// $`, $').
-func (i *Interpreter) regexReplace(ctx context.Context, s string, reObj *Object, re reEngine, repl Value, global bool) (Value, error) {
-	units := jsregexp.ToUnits(s)
-	var matches [][]int
-	if global {
-		reObj.SetData("lastIndex", Number(0))
-		ms, err := i.regexFindAll(ctx, re, units)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		matches = ms
-	} else {
-		m, err := re.FindSubmatchIndex(ctx, units, 0)
-		if err != nil {
-			return nil, i.regexErr(ctx, err)
-		}
-		if m != nil {
-			matches = [][]int{m}
-		}
-	}
-	if len(matches) == 0 {
-		return String(s), nil
-	}
-
-	names := re.GroupNames()
-	replFn, isFn := repl.(*Object)
-	var b strings.Builder
-	last := 0
-	for _, m := range matches {
-		b.WriteString(jsregexp.FromUnits(units[last:m[0]]))
-		ng := len(m) / 2
-		groups := make([]Value, ng)
-		groupStr := make([]string, ng)
-		for g := 0; g < ng; g++ {
-			if m[2*g] >= 0 {
-				gs := jsregexp.FromUnits(units[m[2*g]:m[2*g+1]])
-				groupStr[g] = gs
-				groups[g] = String(gs)
-			} else {
-				groups[g] = Undef
-			}
-		}
-		if isFn && replFn.IsCallable() {
-			callArgs := make([]Value, 0, ng+3)
-			callArgs = append(callArgs, groups...)
-			callArgs = append(callArgs, Number(float64(m[0])), String(s))
-			if len(names) > 0 {
-				callArgs = append(callArgs, i.namedGroupsObject(names, units, m))
-			}
-			r, err := replFn.fn.call(ctx, Undef, callArgs)
-			if err != nil {
-				return nil, err
-			}
-			rs, err := i.ToStringV(ctx, r)
-			if err != nil {
-				return nil, err
-			}
-			b.WriteString(rs)
-		} else {
-			rs, err := i.ToStringV(ctx, repl)
-			if err != nil {
-				return nil, err
-			}
-			b.WriteString(expandDollar(rs, units, groupStr, groups, m[0], m[1], names))
-		}
-		last = m[1]
-	}
-	b.WriteString(jsregexp.FromUnits(units[last:]))
-	return String(b.String()), nil
-}
-
-// namedGroupsObject builds the groups object passed to a replacer function.
-func (i *Interpreter) namedGroupsObject(names map[string]int, units []uint16, m []int) *Object {
-	o := NewObject(i.objectProto)
-	for name, idx := range names {
-		if 2*idx+1 < len(m) && m[2*idx] >= 0 {
-			o.SetData(name, String(jsregexp.FromUnits(units[m[2*idx]:m[2*idx+1]])))
-		} else {
-			o.SetData(name, Undef)
-		}
-	}
-	return o
-}
-
-// expandDollar performs $-substitution in a regex replacement string.
-func expandDollar(repl string, units []uint16, groupStr []string, groups []Value, matchStart, matchEnd int, names map[string]int) string {
-	var b strings.Builder
-	for j := 0; j < len(repl); j++ {
-		if repl[j] != '$' || j+1 >= len(repl) {
-			b.WriteByte(repl[j])
-			continue
-		}
-		next := repl[j+1]
-		switch {
-		case next == '$':
-			b.WriteByte('$')
-			j++
-		case next == '&':
-			b.WriteString(groupStr[0])
-			j++
-		case next == '`':
-			b.WriteString(jsregexp.FromUnits(units[:matchStart]))
-			j++
-		case next == '\'':
-			b.WriteString(jsregexp.FromUnits(units[matchEnd:]))
-			j++
-		case next == '<' && len(names) > 0:
-			// $<name> named-group substitution.
-			end := strings.IndexByte(repl[j+2:], '>')
-			if end < 0 {
-				b.WriteByte('$')
-				continue
-			}
-			name := repl[j+2 : j+2+end]
-			if idx, ok := names[name]; ok && idx < len(groups) {
-				if s, isStr := groups[idx].(String); isStr {
-					b.WriteString(string(s))
-				}
-			}
-			j += 2 + end
-		case next >= '0' && next <= '9':
-			num := int(next - '0')
-			consumed := 1
-			if j+2 < len(repl) && repl[j+2] >= '0' && repl[j+2] <= '9' {
-				two := num*10 + int(repl[j+2]-'0')
-				if two < len(groupStr) {
-					num = two
-					consumed = 2
-				}
-			}
-			if num > 0 && num < len(groupStr) {
-				b.WriteString(groupStr[num])
-				j += consumed
-			} else {
-				b.WriteByte('$')
-			}
-		default:
-			b.WriteByte('$')
-		}
-	}
-	return b.String()
-}
-
-// canonicalFlags returns the RegExp flags in the spec-mandated order
-// (d, g, i, m, s, u, v, y), deduplicated.
-func canonicalFlags(flags string) string {
-	var b strings.Builder
-	for _, f := range "dgimsuvy" {
-		if strings.ContainsRune(flags, f) {
-			b.WriteRune(f)
-		}
-	}
-	return b.String()
 }
 
 // regexpIsGlobal reports whether a RegExp object carries the global flag.
@@ -629,24 +463,12 @@ func (i *Interpreter) newRegExp(ctx context.Context, pattern, flags string) (Val
 	if err != nil {
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
 	}
-	f := re.Flags()
 	o := NewObject(i.regexpProto)
 	o.class = "RegExp"
 	o.internal = map[string]any{"regexp": re}
-	source := pattern
-	if source == "" {
-		source = "(?:)"
-	}
-	o.SetHidden("source", String(source))
-	o.SetHidden("flags", String(canonicalFlags(flags)))
-	o.SetHidden("global", Bool(f.Global))
-	o.SetHidden("ignoreCase", Bool(f.IgnoreCase))
-	o.SetHidden("multiline", Bool(f.Multiline))
-	o.SetHidden("dotAll", Bool(f.DotAll))
-	o.SetHidden("unicode", Bool(f.Unicode))
-	o.SetHidden("unicodeSets", Bool(f.UnicodeSets))
-	o.SetHidden("sticky", Bool(f.Sticky))
-	o.SetHidden("hasIndices", Bool(f.HasIndices))
+	// source and the flag booleans are exposed via RegExp.prototype accessors
+	// (initRegExpAccessors), which read them from the compiled engine. lastIndex
+	// is the sole own data property (writable, non-enumerable, non-configurable).
 	o.SetData("lastIndex", Number(0))
 	return o, nil
 }

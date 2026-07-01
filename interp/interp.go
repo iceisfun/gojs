@@ -85,6 +85,12 @@ type Interpreter struct {
 	symToPrimitive   *Symbol
 	symToStringTag   *Symbol
 	symHasInstance   *Symbol
+	symMatch         *Symbol
+	symMatchAll      *Symbol
+	symReplace       *Symbol
+	symSearch        *Symbol
+	symSplit         *Symbol
+	symSpecies       *Symbol
 
 	// event loop / timers
 	loop    *eventLoop
@@ -196,6 +202,12 @@ func New(opts ...Option) *Interpreter {
 	i.symToPrimitive = &Symbol{Desc: "Symbol.toPrimitive"}
 	i.symToStringTag = &Symbol{Desc: "Symbol.toStringTag"}
 	i.symHasInstance = &Symbol{Desc: "Symbol.hasInstance"}
+	i.symMatch = &Symbol{Desc: "Symbol.match"}
+	i.symMatchAll = &Symbol{Desc: "Symbol.matchAll"}
+	i.symReplace = &Symbol{Desc: "Symbol.replace"}
+	i.symSearch = &Symbol{Desc: "Symbol.search"}
+	i.symSplit = &Symbol{Desc: "Symbol.split"}
+	i.symSpecies = &Symbol{Desc: "Symbol.species"}
 
 	i.bootstrap()
 	return i

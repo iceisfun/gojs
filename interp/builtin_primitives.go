@@ -61,6 +61,12 @@ func (i *Interpreter) initSymbol() {
 	ctor.SetHidden("toPrimitive", i.symToPrimitive)
 	ctor.SetHidden("toStringTag", i.symToStringTag)
 	ctor.SetHidden("hasInstance", i.symHasInstance)
+	ctor.SetHidden("match", i.symMatch)
+	ctor.SetHidden("matchAll", i.symMatchAll)
+	ctor.SetHidden("replace", i.symReplace)
+	ctor.SetHidden("search", i.symSearch)
+	ctor.SetHidden("split", i.symSplit)
+	ctor.SetHidden("species", i.symSpecies)
 
 	// A tiny registry for Symbol.for/keyFor.
 	registry := map[string]*Symbol{}
