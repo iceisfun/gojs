@@ -77,40 +77,65 @@ func (i *Interpreter) initString() {
 		}
 		return String(string(rs[idx])), nil
 	})
+	// Search methods operate over runes (gojs indexes strings by code point) and
+	// honor their position/endPosition arguments.
 	m("indexOf", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return Number(float64(strings.Index(s, sub))), nil
+		rs, rsub := []rune(s), []rune(sub)
+		from := clampRange(argIntOr(ctx, i, args, 1, 0), len(rs))
+		return Number(float64(runeIndex(rs, rsub, from))), nil
 	})
 	m("lastIndexOf", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return Number(float64(strings.LastIndex(s, sub))), nil
+		rs, rsub := []rune(s), []rune(sub)
+		last := -1
+		limit := len(rs)
+		if !IsUndefined(arg(args, 1)) {
+			limit = clampRange(argIntOr(ctx, i, args, 1, len(rs)), len(rs)) + len(rsub)
+		}
+		for k := 0; k+len(rsub) <= len(rs) && k+len(rsub) <= limit; k++ {
+			if runeHasAt(rs, rsub, k) {
+				last = k
+			}
+		}
+		return Number(float64(last)), nil
 	})
 	m("includes", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return Bool(strings.Contains(s, sub)), nil
+		rs, rsub := []rune(s), []rune(sub)
+		from := clampRange(argIntOr(ctx, i, args, 1, 0), len(rs))
+		return Bool(runeIndex(rs, rsub, from) >= 0), nil
 	})
 	m("startsWith", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return Bool(strings.HasPrefix(s, sub)), nil
+		rs, rsub := []rune(s), []rune(sub)
+		pos := clampRange(argIntOr(ctx, i, args, 1, 0), len(rs))
+		return Bool(runeHasAt(rs, rsub, pos)), nil
 	})
 	m("endsWith", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return Bool(strings.HasSuffix(s, sub)), nil
+		rs, rsub := []rune(s), []rune(sub)
+		end := len(rs)
+		if !IsUndefined(arg(args, 1)) {
+			end = clampRange(argIntOr(ctx, i, args, 1, len(rs)), len(rs))
+		}
+		start := end - len(rsub)
+		return Bool(start >= 0 && runeHasAt(rs, rsub, start)), nil
 	})
 	m("slice", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
@@ -283,6 +308,10 @@ func (i *Interpreter) initString() {
 			if err != nil {
 				return nil, err
 			}
+			// Each argument must be a non-negative integer code point <= 0x10FFFF.
+			if n != ToInteger(n) || n < 0 || n > 0x10FFFF {
+				return nil, i.throwError(ctx, "RangeError", "Invalid code point "+NumberToString(n))
+			}
 			b.WriteRune(rune(int64(n)))
 		}
 		return String(b.String()), nil
@@ -313,15 +342,60 @@ func (i *Interpreter) stringReplace(ctx context.Context, s string, args []Value,
 		if err != nil {
 			return "", err
 		}
-		return strings.ReplaceAll(rs, "$&", match), nil
+		// Expand the $ patterns for a string pattern: $$ -> $, $& -> match,
+		// $` -> portion before the match, $' -> portion after the match.
+		var b strings.Builder
+		for k := 0; k < len(rs); k++ {
+			if rs[k] == '$' && k+1 < len(rs) {
+				switch rs[k+1] {
+				case '$':
+					b.WriteByte('$')
+					k++
+					continue
+				case '&':
+					b.WriteString(match)
+					k++
+					continue
+				case '`':
+					b.WriteString(s[:idx])
+					k++
+					continue
+				case '\'':
+					b.WriteString(s[idx+len(match):])
+					k++
+					continue
+				}
+			}
+			b.WriteByte(rs[k])
+		}
+		return b.String(), nil
 	}
 	if all {
+		// Empty pattern: insert the replacement between every character and at
+		// both ends ("abc".replaceAll("", "X") -> "XaXbXcX").
+		if pattern == "" {
+			var b strings.Builder
+			r0, err := doReplace("", 0)
+			if err != nil {
+				return nil, err
+			}
+			b.WriteString(r0)
+			for _, ch := range s {
+				b.WriteRune(ch)
+				rN, err := doReplace("", 0)
+				if err != nil {
+					return nil, err
+				}
+				b.WriteString(rN)
+			}
+			return String(b.String()), nil
+		}
 		var b strings.Builder
 		rest := s
 		offset := 0
 		for {
 			idx := strings.Index(rest, pattern)
-			if idx < 0 || pattern == "" {
+			if idx < 0 {
 				b.WriteString(rest)
 				break
 			}
@@ -345,6 +419,39 @@ func (i *Interpreter) stringReplace(ctx context.Context, s string, args []Value,
 		return nil, err
 	}
 	return String(s[:idx] + r + s[idx+len(pattern):]), nil
+}
+
+// runeHasAt reports whether sub appears in rs starting exactly at index at.
+func runeHasAt(rs, sub []rune, at int) bool {
+	if at < 0 || at+len(sub) > len(rs) {
+		return false
+	}
+	for k := range sub {
+		if rs[at+k] != sub[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// runeIndex returns the first index >= from at which sub occurs in rs, or -1.
+// An empty sub matches at from (clamped to len(rs)).
+func runeIndex(rs, sub []rune, from int) int {
+	if from < 0 {
+		from = 0
+	}
+	if len(sub) == 0 {
+		if from > len(rs) {
+			return len(rs)
+		}
+		return from
+	}
+	for k := from; k+len(sub) <= len(rs); k++ {
+		if runeHasAt(rs, sub, k) {
+			return k
+		}
+	}
+	return -1
 }
 
 // clampRange clamps x into [0, n] (for substring).

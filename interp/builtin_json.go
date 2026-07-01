@@ -24,7 +24,7 @@ func (i *Interpreter) initJSON() {
 			return Undef, nil
 		}
 		var b strings.Builder
-		ok, err := i.jsonStringify(ctx, &b, value, indent, "", map[*Object]bool{})
+		ok, err := i.jsonStringify(ctx, &b, "", value, indent, "", map[*Object]bool{})
 		if err != nil {
 			return nil, err
 		}
@@ -87,12 +87,12 @@ func jsonIndent(ctx context.Context, i *Interpreter, space Value) string {
 // jsonStringify serializes v. It returns ok=false when v is not serializable
 // (undefined, a function, or a symbol) at the top level, so callers can emit
 // undefined.
-func (i *Interpreter) jsonStringify(ctx context.Context, b *strings.Builder, v Value, indent, cur string, seen map[*Object]bool) (bool, error) {
+func (i *Interpreter) jsonStringify(ctx context.Context, b *strings.Builder, key string, v Value, indent, cur string, seen map[*Object]bool) (bool, error) {
 	// Honor a toJSON method when present.
 	if o, ok := v.(*Object); ok {
 		if tj, _ := o.GetStr(ctx, "toJSON"); tj != nil {
 			if fn, ok := tj.(*Object); ok && fn.IsCallable() {
-				res, err := fn.fn.call(ctx, o, nil)
+				res, err := fn.fn.call(ctx, o, []Value{String(key)})
 				if err != nil {
 					return false, err
 				}
@@ -155,7 +155,7 @@ func (i *Interpreter) jsonArray(ctx context.Context, b *strings.Builder, o *Obje
 		}
 		writeNewlineIndent(b, indent, next)
 		var sub strings.Builder
-		ok, err := i.jsonStringify(ctx, &sub, e, indent, next, seen)
+		ok, err := i.jsonStringify(ctx, &sub, intToStr(idx), e, indent, next, seen)
 		if err != nil {
 			return err
 		}
@@ -184,7 +184,7 @@ func (i *Interpreter) jsonObject(ctx context.Context, b *strings.Builder, o *Obj
 			return err
 		}
 		var sub strings.Builder
-		serOK, err := i.jsonStringify(ctx, &sub, val, indent, next, seen)
+		serOK, err := i.jsonStringify(ctx, &sub, name, val, indent, next, seen)
 		if err != nil {
 			return err
 		}

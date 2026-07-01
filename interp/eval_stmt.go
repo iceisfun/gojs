@@ -166,9 +166,13 @@ func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *E
 				}
 			}
 		}
-		if d.Init == nil && decl.Kind != token.VAR {
-			// Declared but uninitialized let/const still needs a live binding.
-			forEachPatternName(d.Target, func(n string) { bind(n, Undef) })
+		if d.Init == nil {
+			// A `var x;` with no initializer must NOT reset an existing hoisted
+			// binding (var x = 1; var x; leaves x === 1). let/const still need a
+			// live binding initialized to undefined.
+			if decl.Kind != token.VAR {
+				forEachPatternName(d.Target, func(n string) { bind(n, Undef) })
+			}
 			continue
 		}
 		if err := i.bindPattern(ctx, d.Target, value, env, bind); err != nil {

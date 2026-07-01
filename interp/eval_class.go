@@ -117,6 +117,10 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		if err := i.checkContext(); err != nil {
 			return nil, err
 		}
+		if err := i.enterCall(); err != nil {
+			return nil, err
+		}
+		defer i.leaveCall()
 		self := NewObject(proto)
 		env := NewEnvironment(classEnv, true)
 		env.homeObj = proto

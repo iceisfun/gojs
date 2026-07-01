@@ -16,7 +16,9 @@ func (i *Interpreter) initGlobals() {
 	i.global.defineOwn(StrKey("NaN"), &Property{Value: Number(math.NaN()), Writable: false, Enumerable: false, Configurable: false})
 	i.global.defineOwn(StrKey("Infinity"), &Property{Value: Number(math.Inf(1)), Writable: false, Enumerable: false, Configurable: false})
 
-	i.setGlobalFunc("parseInt", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	// parseInt and parseFloat are shared: Number.parseInt === parseInt and
+	// Number.parseFloat === parseFloat are the very same function objects.
+	parseIntFn := i.newNativeFunc("parseInt", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
@@ -27,13 +29,19 @@ func (i *Interpreter) initGlobals() {
 		}
 		return Number(parseIntImpl(s, radix)), nil
 	})
-	i.setGlobalFunc("parseFloat", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	parseFloatFn := i.newNativeFunc("parseFloat", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
 		return Number(parseFloatImpl(s)), nil
 	})
+	i.setGlobalHidden("parseInt", parseIntFn)
+	i.setGlobalHidden("parseFloat", parseFloatFn)
+	if numCtor, ok := i.GetGlobal("Number").(*Object); ok {
+		numCtor.SetHidden("parseInt", parseIntFn)
+		numCtor.SetHidden("parseFloat", parseFloatFn)
+	}
 	i.setGlobalFunc("isNaN", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		f, err := i.argNum(ctx, args, 0)
 		if err != nil {

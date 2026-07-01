@@ -19,6 +19,12 @@ import (
 //
 //	GOJS_T262_DIRS=language/expressions/addition,built-ins/Math go test ./tests/test262 -run TestT262 -v
 func TestT262(t *testing.T) {
+	// This mining harness reads thousands of files and is opt-in: it runs only
+	// when GOJS_T262=1 (or GOJS_T262_DIRS) is set, so a plain `go test ./...`
+	// stays fast and does not execute untrusted third-party fixtures.
+	if os.Getenv("GOJS_T262") == "" && os.Getenv("GOJS_T262_DIRS") == "" {
+		t.Skip("set GOJS_T262=1 (and optionally GOJS_T262_DIRS) to run Test262 mining")
+	}
 	if testing.Short() {
 		t.Skip("skipping Test262 mining under -short")
 	}

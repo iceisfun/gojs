@@ -36,20 +36,48 @@ func (i *Interpreter) initArray() {
 		var out []Value
 		mapFn, _ := arg(args, 1).(*Object)
 		idx := 0
-		err := i.iterate(ctx, arg(args, 0), func(v Value) error {
+		apply := func(v Value) (Value, error) {
 			if mapFn != nil && mapFn.IsCallable() {
 				mv, err := mapFn.fn.call(ctx, Undef, []Value{v, Number(float64(idx))})
 				if err != nil {
-					return err
+					return nil, err
 				}
 				v = mv
 			}
-			out = append(out, v)
 			idx++
-			return nil
-		})
-		if err != nil {
-			return nil, err
+			return v, nil
+		}
+		src := arg(args, 0)
+		// Prefer the iterator protocol; fall back to an array-like object with a
+		// length property (e.g. { length: 3, 0: "a" }).
+		if isIterable(i, src) {
+			err := i.iterate(ctx, src, func(v Value) error {
+				mv, err := apply(v)
+				if err != nil {
+					return err
+				}
+				out = append(out, mv)
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		} else if o, ok := src.(*Object); ok {
+			lenV, _ := o.GetStr(ctx, "length")
+			n := int(ToInteger(ToNumber(lenV)))
+			if n < 0 {
+				n = 0
+			}
+			for j := 0; j < n; j++ {
+				ev, _ := o.GetStr(ctx, intToStr(j))
+				mv, err := apply(ev)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, mv)
+			}
+		} else if IsNullish(src) {
+			return nil, i.throwError(ctx, "TypeError", "Cannot convert undefined or null to object")
 		}
 		return i.newArray(out), nil
 	})
@@ -74,6 +102,7 @@ func (i *Interpreter) initArray() {
 		{"map", 1, i.arrayMap},
 		{"filter", 1, i.arrayFilter},
 		{"reduce", 1, i.arrayReduce},
+		{"reduceRight", 1, i.arrayReduceRight},
 		{"find", 1, i.arrayFind},
 		{"findIndex", 1, i.arrayFindIndex},
 		{"some", 1, i.arraySome},
@@ -277,8 +306,9 @@ func (i *Interpreter) arrayIndexOf(ctx context.Context, this Value, args []Value
 		return nil, err
 	}
 	target := arg(args, 0)
-	for j, v := range o.elems {
-		if strictEquals(v, target) {
+	start := fromIndex(argIntOr(ctx, i, args, 1, 0), len(o.elems))
+	for j := start; j < len(o.elems); j++ {
+		if strictEquals(o.elems[j], target) {
 			return Number(float64(j)), nil
 		}
 	}
@@ -291,12 +321,25 @@ func (i *Interpreter) arrayIncludes(ctx context.Context, this Value, args []Valu
 		return nil, err
 	}
 	target := arg(args, 0)
-	for _, v := range o.elems {
-		if sameValueZero(v, target) {
+	start := fromIndex(argIntOr(ctx, i, args, 1, 0), len(o.elems))
+	for j := start; j < len(o.elems); j++ {
+		if sameValueZero(o.elems[j], target) {
 			return True, nil
 		}
 	}
 	return False, nil
+}
+
+// fromIndex resolves an indexOf/includes start index, clamping a negative value
+// relative to length and never below 0.
+func fromIndex(idx, n int) int {
+	if idx < 0 {
+		idx += n
+	}
+	if idx < 0 {
+		return 0
+	}
+	return idx
 }
 
 // iterCallback runs fn(this=thisArg, [element, index, array]) for each element.
@@ -492,7 +535,20 @@ func (i *Interpreter) arrayFlat(ctx context.Context, this Value, args []Value) (
 	}
 	depth := 1
 	if !IsUndefined(arg(args, 0)) {
-		depth = argIntOr(ctx, i, args, 0, 1)
+		d, err := i.argNum(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		// flat(Infinity) flattens all levels; guard the float->int conversion
+		// (int(+Inf) is undefined in Go).
+		switch {
+		case d >= float64(1<<30):
+			depth = 1 << 30
+		case d < 0:
+			depth = 0
+		default:
+			depth = int(ToInteger(d))
+		}
 	}
 	var flatten func(elems []Value, d int) []Value
 	flatten = func(elems []Value, d int) []Value {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"strconv"
+	"strings"
 )
 
 // This file installs the Symbol, Number, and Boolean intrinsics. String lives
@@ -144,7 +145,16 @@ func (i *Interpreter) initNumber() {
 	i.defineMethod(proto, "toFixed", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		f, _ := num(this)
 		digits, _ := i.argInt(ctx, args, 0)
-		return String(strconv.FormatFloat(f, 'f', digits, 64)), nil
+		if digits < 0 || digits > 100 {
+			return nil, i.throwError(ctx, "RangeError", "toFixed() digits argument must be between 0 and 100")
+		}
+		if math.IsNaN(f) {
+			return String("NaN"), nil
+		}
+		if math.Abs(f) >= 1e21 {
+			return String(NumberToString(f)), nil
+		}
+		return String(toFixedString(f, digits)), nil
 	})
 	i.defineMethod(proto, "toPrecision", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		f, _ := num(this)
@@ -152,7 +162,16 @@ func (i *Interpreter) initNumber() {
 			return String(NumberToString(f)), nil
 		}
 		p, _ := i.argInt(ctx, args, 0)
-		return String(strconv.FormatFloat(f, 'g', p, 64)), nil
+		if math.IsNaN(f) {
+			return String("NaN"), nil
+		}
+		if math.IsInf(f, 0) {
+			return String(NumberToString(f)), nil
+		}
+		if p < 1 || p > 100 {
+			return nil, i.throwError(ctx, "RangeError", "toPrecision() argument must be between 1 and 100")
+		}
+		return String(toPrecisionString(f, p)), nil
 	})
 
 	ctor := i.newNativeCtor("Number", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -223,6 +242,41 @@ func (i *Interpreter) initNumber() {
 	})
 
 	i.setGlobalHidden("Number", ctor)
+}
+
+// toPrecisionString formats f with exactly p significant digits, choosing fixed
+// or exponential notation per Number.prototype.toPrecision (§21.1.3.5): if the
+// decimal exponent e satisfies -6 <= e < p, use fixed notation; otherwise
+// exponential. Trailing zeros are preserved.
+func toPrecisionString(f float64, p int) string {
+	if f == 0 {
+		if p == 1 {
+			return "0"
+		}
+		return "0." + strings.Repeat("0", p-1)
+	}
+	// Determine the decimal exponent e of the leading significant digit.
+	e := int(math.Floor(math.Log10(math.Abs(f))))
+	if e < -6 || e >= p {
+		// Exponential notation with p-1 fractional digits.
+		return normalizeExponent(strconv.FormatFloat(f, 'e', p-1, 64))
+	}
+	// Fixed notation with (p - 1 - e) fractional digits.
+	frac := p - 1 - e
+	if frac < 0 {
+		frac = 0
+	}
+	return strconv.FormatFloat(f, 'f', frac, 64)
+}
+
+// toFixedString formats f with exactly `digits` fractional digits, rounding
+// half toward +Infinity as Number.prototype.toFixed specifies ("if there are
+// two such values pick the larger n"), which differs from Go's round-half-to-
+// even. So (2.5).toFixed(0) === "3" and (-2.5).toFixed(0) === "-2".
+func toFixedString(f float64, digits int) string {
+	scale := math.Pow(10, float64(digits))
+	rounded := math.Floor(f*scale+0.5) / scale
+	return strconv.FormatFloat(rounded, 'f', digits, 64)
 }
 
 // ---------------------------------------------------------------------------

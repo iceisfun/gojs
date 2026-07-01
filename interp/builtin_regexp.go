@@ -29,7 +29,11 @@ func (i *Interpreter) initRegExp() {
 		return Bool(re.MatchString(s)), nil
 	})
 	i.defineMethod(proto, "exec", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		re, ok := regexpOf(this)
+		reObj, ok := this.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Method RegExp.prototype.exec called on incompatible receiver")
+		}
+		re, ok := regexpOf(reObj)
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Method RegExp.prototype.exec called on incompatible receiver")
 		}
@@ -37,18 +41,38 @@ func (i *Interpreter) initRegExp() {
 		if err != nil {
 			return nil, err
 		}
-		m := re.FindStringSubmatchIndex(s)
+		rs := []rune(s)
+		// For a global/sticky regex, exec resumes from lastIndex and advances it.
+		global := regexpIsGlobal(reObj)
+		start := 0
+		if global {
+			liV, _ := reObj.GetStr(ctx, "lastIndex")
+			start = int(ToInteger(ToNumber(liV)))
+			if start < 0 || start > len(rs) {
+				reObj.SetData("lastIndex", Number(0))
+				return Nul, nil
+			}
+		}
+		m := re.FindStringSubmatchIndex(string(rs[start:]))
 		if m == nil {
+			if global {
+				reObj.SetData("lastIndex", Number(0))
+			}
 			return Nul, nil
 		}
-		groups := re.FindStringSubmatch(s)
-		vals := make([]Value, len(groups))
-		for idx, g := range groups {
-			vals[idx] = String(g)
+		// Shift byte offsets into the sliced string back onto the full string,
+		// then produce a rune-indexed match array.
+		base := len(string(rs[:start]))
+		for k := range m {
+			if m[k] >= 0 {
+				m[k] += base
+			}
 		}
-		result := i.newArray(vals)
-		result.SetData("index", Number(float64(len([]rune(s[:m[0]])))))
-		result.SetData("input", String(s))
+		result := i.submatchToArray(s, m)
+		if global {
+			endRune := len([]rune(s[:m[1]]))
+			reObj.SetData("lastIndex", Number(float64(endRune)))
+		}
 		return result, nil
 	})
 	i.defineMethod(proto, "toString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -157,6 +181,12 @@ func (i *Interpreter) initStringRegex() {
 		if err != nil {
 			return nil, err
 		}
+		// A RegExp argument must carry the global flag (spec §22.1.3.14).
+		if reObj, ok := arg(args, 0).(*Object); ok {
+			if _, isRe := regexpOf(reObj); isRe && !regexpIsGlobal(reObj) {
+				return nil, i.throwError(ctx, "TypeError", "String.prototype.matchAll called with a non-global RegExp argument")
+			}
+		}
 		_, re, err := coerceRegExp(ctx, arg(args, 0), "g")
 		if err != nil {
 			return nil, err
@@ -215,19 +245,59 @@ func (i *Interpreter) initStringRegex() {
 				if !IsUndefined(arg(args, 1)) {
 					limit, _ = i.argInt(ctx, args, 1)
 				}
-				parts := re.Split(s, -1)
-				out := make([]Value, 0, len(parts))
-				for j, p := range parts {
-					if limit >= 0 && j >= limit {
-						break
-					}
-					out = append(out, String(p))
-				}
-				return i.newArray(out), nil
+				return i.regexSplit(s, re, limit), nil
 			}
 		}
 		return i.stringSplitString(ctx, s, args)
 	})
+}
+
+// regexSplit implements String.prototype.split with a RegExp separator,
+// including ECMAScript's rule that capture groups from the separator are
+// interspersed into the result (§22.1.3.21). Zero-width matches are skipped so
+// the split does not loop.
+func (i *Interpreter) regexSplit(s string, re *regexp.Regexp, limit int) *Object {
+	if limit == 0 {
+		return i.newArray(nil)
+	}
+	var out []Value
+	push := func(v Value) bool {
+		out = append(out, v)
+		return !(limit >= 0 && len(out) >= limit)
+	}
+	// An empty input yields [""] unless the pattern matches the empty string.
+	if s == "" {
+		if re.MatchString("") {
+			return i.newArray(nil)
+		}
+		return i.newArray([]Value{String("")})
+	}
+	last := 0
+	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
+		start, end := m[0], m[1]
+		if end == last && start == last {
+			continue // skip zero-width match at the current position
+		}
+		if start >= len(s) {
+			break
+		}
+		if !push(String(s[last:start])) {
+			return i.newArray(out)
+		}
+		// Intersperse capture groups.
+		for g := 1; g < len(m)/2; g++ {
+			if m[2*g] < 0 {
+				if !push(Undef) {
+					return i.newArray(out)
+				}
+			} else if !push(String(s[m[2*g]:m[2*g+1]])) {
+				return i.newArray(out)
+			}
+		}
+		last = end
+	}
+	push(String(s[last:]))
+	return i.newArray(out)
 }
 
 // stringSplitString implements String.prototype.split with a string separator
@@ -388,6 +458,18 @@ func expandDollar(repl, src string, groups []string, matchStart, matchEnd int) s
 	return b.String()
 }
 
+// canonicalFlags returns the RegExp flags in the spec-mandated order
+// (d, g, i, m, s, u, v, y), deduplicated.
+func canonicalFlags(flags string) string {
+	var b strings.Builder
+	for _, f := range "dgimsuvy" {
+		if strings.ContainsRune(flags, f) {
+			b.WriteRune(f)
+		}
+	}
+	return b.String()
+}
+
 // regexpIsGlobal reports whether a RegExp object has the global flag.
 func regexpIsGlobal(o *Object) bool {
 	if p, ok := o.props[StrKey("global")]; ok {
@@ -445,7 +527,7 @@ func (i *Interpreter) newRegExp(ctx context.Context, pattern, flags string) (Val
 	o.class = "RegExp"
 	o.internal = map[string]any{"regexp": re}
 	o.SetHidden("source", String(pattern))
-	o.SetHidden("flags", String(flags))
+	o.SetHidden("flags", String(canonicalFlags(flags)))
 	o.SetHidden("global", Bool(strings.Contains(flags, "g")))
 	o.SetHidden("ignoreCase", Bool(strings.Contains(flags, "i")))
 	o.SetHidden("multiline", Bool(strings.Contains(flags, "m")))

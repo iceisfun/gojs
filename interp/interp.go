@@ -34,6 +34,11 @@ type Interpreter struct {
 	// rng is the per-interpreter PRNG backing Math.random.
 	rng *prng
 
+	// callDepth counts active JS function invocations; it bounds recursion so
+	// runaway/infinite recursion raises a RangeError instead of overflowing the
+	// Go goroutine stack (which would crash the host).
+	callDepth int
+
 	// wellKnownSymbols
 	symIterator      *Symbol
 	symAsyncIterator *Symbol
@@ -154,6 +159,23 @@ func (i *Interpreter) Close() error {
 	i.wg.Wait()
 	return nil
 }
+
+// maxCallDepth bounds nested JavaScript function invocations. It is well below
+// the point at which the Go goroutine stack would overflow, so deep or infinite
+// recursion becomes a catchable RangeError rather than a host crash.
+const maxCallDepth = 6000
+
+// enterCall increments the recursion counter, returning a RangeError once the
+// limit is exceeded. Pair with leaveCall via defer.
+func (i *Interpreter) enterCall() error {
+	i.callDepth++
+	if i.callDepth > maxCallDepth {
+		return i.throwError(i.ctx, "RangeError", "Maximum call stack size exceeded")
+	}
+	return nil
+}
+
+func (i *Interpreter) leaveCall() { i.callDepth-- }
 
 // checkContext returns a Throw-free error if the context has been cancelled, so
 // long-running evaluation can abort cooperatively.

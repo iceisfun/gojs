@@ -109,19 +109,61 @@ func (i *Interpreter) arrayAt(ctx context.Context, this Value, args []Value) (Va
 	return o.elems[idx], nil
 }
 
-// arrayLastIndexOf finds the last index of a value using strict equality.
+// arrayLastIndexOf finds the last index of a value using strict equality,
+// searching backward from an optional fromIndex (default: last element).
 func (i *Interpreter) arrayLastIndexOf(ctx context.Context, this Value, args []Value) (Value, error) {
 	o, err := i.thisArray(ctx, this)
 	if err != nil {
 		return nil, err
 	}
 	target := arg(args, 0)
-	for j := len(o.elems) - 1; j >= 0; j-- {
+	n := len(o.elems)
+	start := n - 1
+	if !IsUndefined(arg(args, 1)) {
+		start = argIntOr(ctx, i, args, 1, n-1)
+		if start < 0 {
+			start += n
+		}
+		if start >= n {
+			start = n - 1
+		}
+	}
+	for j := start; j >= 0; j-- {
 		if strictEquals(o.elems[j], target) {
 			return Number(float64(j)), nil
 		}
 	}
 	return Number(-1), nil
+}
+
+// arrayReduceRight is Array.prototype.reduceRight: fold from right to left.
+func (i *Interpreter) arrayReduceRight(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.thisArray(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	callback, ok := arg(args, 0).(*Object)
+	if !ok || !callback.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", "Reduce callback is not a function")
+	}
+	var acc Value
+	start := len(o.elems) - 1
+	if len(args) >= 2 {
+		acc = args[1]
+	} else {
+		if len(o.elems) == 0 {
+			return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
+		}
+		acc = o.elems[start]
+		start--
+	}
+	for j := start; j >= 0; j-- {
+		acc, err = callback.fn.call(ctx, Undef, []Value{acc, o.elems[j], Number(float64(j)), o})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return acc, nil
 }
 
 // arrayFindLast returns the last element satisfying the predicate.

@@ -625,6 +625,22 @@ func (i *Interpreter) initDate() {
 		return setDateMs(obj, float64(nt.UnixMilli())), nil
 	})
 
+	// The setUTC* setters alias their local counterparts: gojs Date operates
+	// entirely in UTC, so the local and UTC mutators are identical.
+	for local, utc := range map[string]string{
+		"setFullYear":     "setUTCFullYear",
+		"setMonth":        "setUTCMonth",
+		"setDate":         "setUTCDate",
+		"setHours":        "setUTCHours",
+		"setMinutes":      "setUTCMinutes",
+		"setSeconds":      "setUTCSeconds",
+		"setMilliseconds": "setUTCMilliseconds",
+	} {
+		if fn, ok := proto.props[StrKey(local)]; ok && fn.Value != nil {
+			proto.SetHidden(utc, fn.Value)
+		}
+	}
+
 	// -------------------------------------------------------------------------
 	// Date.prototype — string conversion methods
 	// -------------------------------------------------------------------------

@@ -52,9 +52,10 @@ func (c *capture) Warn(ctx context.Context, msg string) { c.Print(ctx, msg) }
 
 // Result is the outcome of a script run.
 type Result struct {
-	Output []string // captured console lines, in order
-	Value  interp.Value
-	Err    error
+	Output  []string // captured console lines, in order
+	Value   interp.Value
+	Err     error
+	ErrText string // human-readable rendering of a thrown value (its toString)
 }
 
 // assertPrologue is a minimal, test262-compatible assertion library injected
@@ -123,7 +124,17 @@ func Run(source string) Result {
 	done := make(chan Result, 1)
 	go func() {
 		v, err := vm.RunString("<harness>", assertPrologue+"\n"+source)
-		done <- Result{Value: v, Err: err}
+		r := Result{Value: v, Err: err}
+		// Render a thrown value while the VM is still alive, so assertion
+		// failures report their message rather than "[object Object]".
+		if tv, ok := interp.ThrownValue(err); ok {
+			if s, e := vm.ToString(tv); e == nil && s != "" {
+				r.ErrText = s
+			} else {
+				r.ErrText = interp.BriefValue(tv)
+			}
+		}
+		done <- r
 	}()
 
 	select {
@@ -143,8 +154,8 @@ func Expect(t *testing.T, source string) []string {
 	t.Helper()
 	r := Run(source)
 	if r.Err != nil {
-		if v, ok := interp.ThrownValue(r.Err); ok {
-			t.Fatalf("uncaught exception: %s", interp.BriefValue(v))
+		if r.ErrText != "" {
+			t.Fatalf("uncaught exception: %s", r.ErrText)
 		}
 		t.Fatalf("run error: %v", r.Err)
 	}

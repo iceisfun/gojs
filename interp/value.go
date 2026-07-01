@@ -232,5 +232,29 @@ func NumberToString(f float64) string {
 	if f == math.Trunc(f) && math.Abs(f) < 1e21 {
 		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
+	return normalizeExponent(strconv.FormatFloat(f, 'g', -1, 64))
+}
+
+// normalizeExponent rewrites a Go-formatted exponent to JavaScript's spelling:
+// no leading zeros in the exponent digits and an explicit sign (Go emits
+// "1.2e+02"; JS wants "1.2e+2"). A value with no exponent is returned unchanged.
+func normalizeExponent(s string) string {
+	e := strings.IndexAny(s, "eE")
+	if e < 0 {
+		return s
+	}
+	mantissa := s[:e]
+	exp := s[e+1:]
+	sign := "+"
+	if len(exp) > 0 && (exp[0] == '+' || exp[0] == '-') {
+		if exp[0] == '-' {
+			sign = "-"
+		}
+		exp = exp[1:]
+	}
+	exp = strings.TrimLeft(exp, "0")
+	if exp == "" {
+		exp = "0"
+	}
+	return mantissa + "e" + sign + exp
 }

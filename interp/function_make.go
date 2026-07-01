@@ -33,6 +33,10 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		if err := i.checkContext(); err != nil {
 			return nil, err
 		}
+		if err := i.enterCall(); err != nil {
+			return nil, err
+		}
+		defer i.leaveCall()
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
 		if def.Generator && kind == kindNormal {
