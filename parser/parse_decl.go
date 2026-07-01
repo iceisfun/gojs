@@ -148,7 +148,9 @@ func (p *parser) tryParseArrow() ast.Expr {
 	}
 	p.expect(token.ARROW)
 	if p.at(token.LBRACE) {
+		bodyUseStrict := p.scanUseStrict(p.idx + 1)
 		arrow.Body, _ = p.parseFunctionBody()
+		p.checkStrictSimpleParams(start.Pos, bodyUseStrict, arrow.Params)
 	} else {
 		arrow.Expression = true
 		arrow.Body = p.parseAssignExpr()
@@ -186,6 +188,17 @@ func (p *parser) matchParen(openIdx int) int {
 // ---------------------------------------------------------------------------
 
 // simpleParamList reports whether every parameter is a plain identifier.
+// checkStrictSimpleParams enforces the early error forbidding a "use strict"
+// directive in the body of a function whose parameter list is not simple — i.e.
+// contains a destructuring pattern, a default, or a rest element (ECMA-262
+// 15.2.1: a Syntax Error if ContainsUseStrict of the body is true and
+// IsSimpleParameterList of the parameters is false).
+func (p *parser) checkStrictSimpleParams(pos token.Pos, bodyHasUseStrict bool, params []ast.Expr) {
+	if bodyHasUseStrict && !simpleParamList(params) {
+		p.errorAt(pos, "Illegal 'use strict' directive in function with non-simple parameter list")
+	}
+}
+
 func simpleParamList(params []ast.Expr) bool {
 	for _, p := range params {
 		if _, ok := p.(*ast.Ident); !ok {
@@ -258,7 +271,16 @@ func (p *parser) parseParams() []ast.Expr {
 	p.expect(token.LPAREN)
 	var params []ast.Expr
 	for !p.at(token.RPAREN) && !p.at(token.EOF) {
-		params = append(params, p.parseBindingElement())
+		el := p.parseBindingElement()
+		params = append(params, el)
+		if _, isRest := el.(*ast.RestElement); isRest {
+			// A rest parameter must be the final parameter: neither another
+			// parameter nor a trailing comma may follow it (ECMA-262 15.1.1).
+			if p.at(token.COMMA) {
+				p.errorAt(p.cur().Pos, "Rest parameter must be last formal parameter")
+			}
+			break
+		}
 		if !p.accept(token.COMMA) {
 			break
 		}
@@ -336,11 +358,14 @@ func (p *parser) parseFuncDef(requireName bool) *ast.FuncDef {
 	// initializer's restrictions do not reach into its parameters or body.
 	prevField := p.inFieldInit
 	p.inFieldInit = false
+	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
+	bodyUseStrict := p.at(token.LBRACE) && p.scanUseStrict(p.idx+1)
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit = prevField
+	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
 }
@@ -486,11 +511,14 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	// A method establishes its own arguments/super scope (see parseFuncDef).
 	prevField := p.inFieldInit
 	p.inFieldInit = false
+	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
 	p.inFunction++
+	bodyUseStrict := p.at(token.LBRACE) && p.scanUseStrict(p.idx+1)
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit = prevField
+	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
 	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
