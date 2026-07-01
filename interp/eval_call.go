@@ -467,30 +467,11 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 		}
 		return i.throwError(ctx, "SyntaxError", "invalid assignment target")
 	case *ast.ArrayLit:
-		items, err := i.iterableToSlice(ctx, value)
-		if err != nil {
-			return err
-		}
-		for idx, el := range t.Elements {
-			if el == nil {
-				continue
-			}
-			if restTgt := restTargetOf(el); restTgt != nil {
-				var remaining []Value
-				if idx < len(items) {
-					remaining = append(remaining, items[idx:]...)
-				}
-				return i.assignPattern(ctx, restTgt, i.newArray(remaining), env, bindName)
-			}
-			var v Value = Undef
-			if idx < len(items) {
-				v = items[idx]
-			}
-			if err := i.assignPattern(ctx, el, v, env, bindName); err != nil {
-				return err
-			}
-		}
-		return nil
+		return i.iterArrayPattern(ctx, t.Elements, value,
+			func(el ast.Expr, v Value) error { return i.assignPattern(ctx, el, v, env, bindName) },
+			func(target ast.Expr, rest []Value) error {
+				return i.assignPattern(ctx, target, i.newArray(rest), env, bindName)
+			})
 	case *ast.ObjectLit:
 		obj, err := i.ToObject(ctx, value)
 		if err != nil {
