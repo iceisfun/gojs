@@ -157,7 +157,9 @@ func (i *Interpreter) makeArguments(args []Value) *Object {
 // runFunctionBody hoists declarations in the body and executes it, translating a
 // return signal into the function's return value.
 func (i *Interpreter) runFunctionBody(ctx context.Context, body *ast.BlockStmt, env *Environment) (Value, error) {
-	i.hoistDeclarations(ctx, body.Body, env, true)
+	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
+		return nil, err
+	}
 	_, err := i.execStmts(ctx, body.Body, env)
 	if err != nil {
 		if ret, ok := err.(*returnSignal); ok {

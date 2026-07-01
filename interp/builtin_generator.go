@@ -193,7 +193,9 @@ func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, home
 // separate from runFunctionBody only so future generator-specific handling has a
 // home.
 func (i *Interpreter) runGeneratorBody(ctx context.Context, body *ast.BlockStmt, env *Environment) (Value, error) {
-	i.hoistDeclarations(ctx, body.Body, env, true)
+	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
+		return Undef, err
+	}
 	_, err := i.execStmts(ctx, body.Body, env)
 	return Undef, err
 }

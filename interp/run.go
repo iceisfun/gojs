@@ -47,7 +47,9 @@ func (i *Interpreter) evalProgram(ctx context.Context, prog *ast.Program) (Value
 		// Strict mode currently affects only a few checks; recorded for future
 		// use. The global environment is shared across RunString calls.
 	}
-	i.hoistDeclarations(ctx, prog.Body, env, true)
+	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
+		return nil, err
+	}
 	result, err := i.execStmts(ctx, prog.Body, env)
 	if err != nil {
 		return nil, err

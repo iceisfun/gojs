@@ -292,7 +292,9 @@ func (i *Interpreter) classMemberKey(ctx context.Context, m *ast.ClassMember, en
 
 // runConstructorBody runs a class constructor body, translating a return signal.
 func (i *Interpreter) runConstructorBody(ctx context.Context, body *ast.BlockStmt, env *Environment) (Value, error) {
-	i.hoistDeclarations(ctx, body.Body, env, true)
+	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
+		return nil, err
+	}
 	_, err := i.execStmts(ctx, body.Body, env)
 	if err != nil {
 		if ret, ok := err.(*returnSignal); ok {

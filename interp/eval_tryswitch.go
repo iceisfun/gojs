@@ -40,7 +40,9 @@ func (i *Interpreter) evalCatch(ctx context.Context, handler *ast.CatchClause, c
 			return nil, err
 		}
 	}
-	i.hoistDeclarations(ctx, handler.Body.Body, scope, false)
+	if err := i.hoistDeclarations(ctx, handler.Body.Body, scope, false); err != nil {
+		return nil, err
+	}
 	return i.execStmts(ctx, handler.Body.Body, scope)
 }
 
@@ -54,7 +56,9 @@ func (i *Interpreter) evalSwitch(ctx context.Context, s *ast.SwitchStmt, env *En
 	scope := NewEnvironment(env, false)
 	// Hoist lexical declarations from all case bodies into the switch scope.
 	for _, c := range s.Cases {
-		i.hoistDeclarations(ctx, c.Body, scope, false)
+		if err := i.hoistDeclarations(ctx, c.Body, scope, false); err != nil {
+			return nil, err
+		}
 	}
 
 	matched := -1

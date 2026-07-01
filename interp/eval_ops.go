@@ -77,6 +77,20 @@ func (i *Interpreter) evalTypeof(ctx context.Context, operand ast.Expr, env *Env
 
 // evalDelete implements the delete operator on member expressions.
 func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Environment) (Value, error) {
+	// delete of a bare identifier: a lexical/local binding cannot be deleted
+	// (returns false); a global property is deleted subject to its configurable
+	// flag (a var-created global is non-configurable, so delete returns false);
+	// an unresolved name yields true.
+	if id, ok := operand.(*ast.Ident); ok {
+		if b := env.lookup(id.Name); b != nil {
+			return False, nil
+		}
+		key := StrKey(id.Name)
+		if i.global.HasOwn(key) {
+			return Bool(i.global.Delete(key)), nil
+		}
+		return True, nil
+	}
 	member, ok := operand.(*ast.MemberExpr)
 	if !ok {
 		return True, nil // delete of a non-reference is a no-op that returns true

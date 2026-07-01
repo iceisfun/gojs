@@ -33,7 +33,9 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 	}
 
 	env := i.globalEnv
-	i.hoistDeclarations(ctx, prog.Body, env, true)
+	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
+		return nil, err
+	}
 	result, err := i.execStmts(ctx, prog.Body, env)
 	if err != nil {
 		return nil, err

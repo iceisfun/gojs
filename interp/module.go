@@ -99,7 +99,10 @@ func (i *Interpreter) requireModule(ctx context.Context, specifier, referrer str
 	define("__filename", String(id))
 	define("__dirname", String(moduleDir(id)))
 
-	i.hoistDeclarations(ctx, prog.Body, env, true)
+	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
+		delete(i.modules, id)
+		return nil, err
+	}
 	if _, err := i.execStmts(ctx, prog.Body, env); err != nil {
 		if _, ok := err.(*returnSignal); !ok {
 			// Evaluation failed; drop the half-built module so a retry re-runs it.

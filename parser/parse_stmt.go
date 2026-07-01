@@ -120,6 +120,10 @@ func (p *parser) parseVarDecl() *ast.VarDecl {
 	decl := &ast.VarDecl{Keyword: kw.Pos, Kind: kw.Type}
 	for {
 		d := p.parseVarDeclarator()
+		// A const declaration must have an initializer (ECMA-262 §14.3.1.1).
+		if kw.Type == token.CONST && d.Init == nil {
+			p.errorAt(d.Target.Pos(), "Missing initializer in const declaration")
+		}
 		decl.Decls = append(decl.Decls, d)
 		if !p.accept(token.COMMA) {
 			break

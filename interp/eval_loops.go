@@ -103,7 +103,9 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 	if s.Init != nil {
 		switch init := s.Init.(type) {
 		case *ast.VarDecl:
-			i.hoistDeclarations(ctx, []ast.Stmt{init}, loopEnv, false)
+			if err := i.hoistDeclarations(ctx, []ast.Stmt{init}, loopEnv, false); err != nil {
+				return nil, err
+			}
 			if err := i.evalVarDecl(ctx, init, loopEnv); err != nil {
 				return nil, err
 			}

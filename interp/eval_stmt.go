@@ -30,14 +30,28 @@ func (i *Interpreter) execStmts(ctx context.Context, stmts []ast.Stmt, env *Envi
 // When fnLevel is true (function body or global), var and nested function-decl
 // names are hoisted to this (function) scope. Lexical declarations (let/const/
 // class) and this level's function declarations are always processed.
-func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, env *Environment, fnLevel bool) {
+func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, env *Environment, fnLevel bool) error {
+	// varNames holds the var/function names hoisted to this scope, used to
+	// detect a var-vs-lexical collision in the same scope (an early error).
+	varNames := map[string]bool{}
 	if fnLevel {
-		names := map[string]bool{}
-		collectVarNames(stmts, names)
-		for n := range names {
-			env.declareVar(n, nil)
+		collectVarNames(stmts, varNames)
+		for n := range varNames {
+			i.declareVarBinding(env, n, nil)
 		}
 	}
+	// lexNames tracks lexical (let/const/class) names declared directly in this
+	// block so a duplicate lexical declaration is rejected.
+	lexNames := map[string]bool{}
+	declareLex := func(name string, mutable bool) error {
+		if lexNames[name] || varNames[name] {
+			return i.throwError(ctx, "SyntaxError", "Identifier '"+name+"' has already been declared")
+		}
+		lexNames[name] = true
+		env.declareLexical(name, mutable)
+		return nil
+	}
+
 	for _, s := range stmts {
 		switch st := s.(type) {
 		case *ast.FuncDecl:
@@ -46,21 +60,66 @@ func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, e
 			if st.Def.Name != nil {
 				name = st.Def.Name.Name
 			}
-			env.vars[name] = &binding{value: fn, mutable: true, initialized: true}
+			// A global-scope function declaration becomes a globalThis property.
+			if env == i.globalEnv {
+				i.defineGlobalVar(name, fn)
+			} else {
+				env.vars[name] = &binding{value: fn, mutable: true, initialized: true}
+			}
 		case *ast.VarDecl:
 			if st.Kind == token.LET || st.Kind == token.CONST {
 				for _, d := range st.Decls {
+					var derr error
 					forEachPatternName(d.Target, func(n string) {
-						env.declareLexical(n, st.Kind == token.LET)
+						if derr == nil {
+							derr = declareLex(n, st.Kind == token.LET)
+						}
 					})
+					if derr != nil {
+						return derr
+					}
 				}
 			}
 		case *ast.ClassDecl:
 			if st.Def.Name != nil {
-				env.declareLexical(st.Def.Name.Name, true)
+				if err := declareLex(st.Def.Name.Name, true); err != nil {
+					return err
+				}
 			}
 		}
 	}
+	return nil
+}
+
+// declareVarBinding creates a hoisted var binding, routing global-scope vars
+// onto the global object (so they become globalThis properties) rather than the
+// declarative environment.
+func (i *Interpreter) declareVarBinding(env *Environment, name string, v Value) {
+	if env == i.globalEnv {
+		i.defineGlobalVar(name, v)
+		return
+	}
+	env.declareVar(name, v)
+}
+
+// defineGlobalVar creates or updates a global `var`/function binding as a
+// property of the global object. Such properties are non-configurable (so
+// `delete x` is a no-op that returns false), writable, and enumerable. An
+// existing property (a prior var, or a built-in) keeps its descriptor and only
+// takes the new value.
+func (i *Interpreter) defineGlobalVar(name string, v Value) {
+	key := StrKey(name)
+	if p, ok := i.global.props[key]; ok {
+		if v != nil && !p.Accessor {
+			p.Value = v
+		}
+		return
+	}
+	init := Value(Undef)
+	if v != nil {
+		init = v
+	}
+	i.global.defineOwn(key, &Property{Value: init, Writable: true, Enumerable: true, Configurable: false})
 }
 
 // evalStmt evaluates a single statement.
@@ -135,7 +194,9 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 // evalBlock runs a block in a fresh lexical scope.
 func (i *Interpreter) evalBlock(ctx context.Context, block *ast.BlockStmt, env *Environment) (Value, error) {
 	scope := NewEnvironment(env, false)
-	i.hoistDeclarations(ctx, block.Body, scope, false)
+	if err := i.hoistDeclarations(ctx, block.Body, scope, false); err != nil {
+		return nil, err
+	}
 	return i.execStmts(ctx, block.Body, scope)
 }
 
@@ -153,8 +214,11 @@ func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *E
 		bind := func(name string, v Value) {
 			switch decl.Kind {
 			case token.VAR:
-				// Assign into the pre-hoisted var binding.
-				if b := env.lookup(name); b != nil {
+				// Global-scope vars live on the global object; others assign
+				// into their pre-hoisted binding.
+				if env == i.globalEnv {
+					i.defineGlobalVar(name, v)
+				} else if b := env.lookup(name); b != nil {
 					b.value = v
 					b.initialized = true
 				} else {

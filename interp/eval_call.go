@@ -345,11 +345,14 @@ func (i *Interpreter) assignTo(ctx context.Context, target ast.Expr, value Value
 // assignment (non-strict semantics).
 func (i *Interpreter) assignIdent(ctx context.Context, name string, value Value, env *Environment) error {
 	if b := env.lookup(name); b != nil {
-		if !b.mutable && b.initialized {
+		// A write to a lexical binding still in its Temporal Dead Zone throws.
+		if !b.initialized {
+			return i.throwError(ctx, "ReferenceError", "Cannot access '"+name+"' before initialization")
+		}
+		if !b.mutable {
 			return i.throwError(ctx, "TypeError", "Assignment to constant variable.")
 		}
 		b.value = value
-		b.initialized = true
 		return nil
 	}
 	// Implicit global.
