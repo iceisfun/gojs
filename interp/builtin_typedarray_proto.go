@@ -910,13 +910,14 @@ func (i *Interpreter) taWith(ctx context.Context, this Value, args []Value) (Val
 	if err != nil {
 		return nil, err
 	}
-	rel, err := i.argInt(ctx, args, 0)
+	relN, err := i.ToNumberV(ctx, arg(args, 0))
 	if err != nil {
 		return nil, err
 	}
-	actual := rel
-	if actual < 0 {
-		actual += length
+	relative := ToInteger(relN)
+	actual := relative
+	if relative < 0 {
+		actual = float64(length) + relative
 	}
 	// Coerce the value to the content type (which may throw TypeError).
 	value := arg(args, 1)
@@ -934,7 +935,9 @@ func (i *Interpreter) taWith(ctx context.Context, this Value, args []Value) (Val
 		}
 		conv = Number(n)
 	}
-	if actual < 0 || actual >= length {
+	// IsValidIntegerIndex is evaluated after coercion against the current length.
+	actualIndex, ok := td.validIndex(actual)
+	if !ok {
 		return nil, i.throwError(ctx, "RangeError", "TypedArray.prototype.with: invalid index")
 	}
 	target, err := i.taSpeciesCreateSameKind(ctx, o, length)
@@ -942,7 +945,7 @@ func (i *Interpreter) taWith(ctx context.Context, this Value, args []Value) (Val
 		return nil, err
 	}
 	for k := 0; k < length; k++ {
-		if k == actual {
+		if k == actualIndex {
 			i.writeElem(target.typedArray, k, conv)
 		} else {
 			i.writeElem(target.typedArray, k, taGetIdx(td, k))
