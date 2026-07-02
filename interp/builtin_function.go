@@ -166,10 +166,20 @@ func (i *Interpreter) ordinaryHasInstance(ctx context.Context, ctor *Object, v V
 	if !ok {
 		return false, i.throwError(ctx, "TypeError", "Function has non-object prototype in instanceof check")
 	}
-	for p := obj.proto; p != nil; p = p.proto {
-		if p == proto {
+	// Walk the prototype chain via [[GetPrototypeOf]] so a Proxy's trap runs.
+	cur := obj
+	for {
+		pv, err := i.getProtoV(ctx, cur)
+		if err != nil {
+			return false, err
+		}
+		next, ok := pv.(*Object)
+		if !ok {
+			return false, nil
+		}
+		if next == proto {
 			return true, nil
 		}
+		cur = next
 	}
-	return false, nil
 }
