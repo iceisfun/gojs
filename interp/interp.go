@@ -136,11 +136,21 @@ type intrinsics struct {
 	generatorProto            *Object
 	asyncIteratorProto        *Object // %AsyncIteratorPrototype%
 	asyncGeneratorProto       *Object // %AsyncGeneratorPrototype%
-	dateProto                 *Object
-	arrayBufferProto          *Object // %ArrayBuffer.prototype%
-	dataViewProto             *Object // %DataView.prototype%
-	typedArrayProto           *Object // %TypedArray.prototype%
-	typedArrayCtor            *Object // %TypedArray% (the abstract intrinsic)
+
+	// The generator/async function-family intrinsics. These constructors are not
+	// global bindings; they are reachable only through the prototype chains of
+	// generator/async functions (e.g. Object.getPrototypeOf(function*(){}).constructor).
+	genFuncProto      *Object // %GeneratorFunction.prototype% (aka %Generator%)
+	genFuncCtor       *Object // %GeneratorFunction%
+	asyncGenFuncProto *Object // %AsyncGeneratorFunction.prototype% (aka %AsyncGenerator%)
+	asyncGenFuncCtor  *Object // %AsyncGeneratorFunction%
+	asyncFuncProto    *Object // %AsyncFunction.prototype%
+	asyncFuncCtor     *Object // %AsyncFunction%
+	dateProto         *Object
+	arrayBufferProto  *Object // %ArrayBuffer.prototype%
+	dataViewProto     *Object // %DataView.prototype%
+	typedArrayProto   *Object // %TypedArray.prototype%
+	typedArrayCtor    *Object // %TypedArray% (the abstract intrinsic)
 	// typedArrayKindProtos / typedArrayKindCtors map each concrete kind to its
 	// per-kind %TypedArray.prototype% subclass and constructor.
 	typedArrayKindProtos map[taKind]*Object
