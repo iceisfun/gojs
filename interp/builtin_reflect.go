@@ -26,22 +26,34 @@ func (i *Interpreter) getV(ctx context.Context, o *Object, key PropertyKey, rece
 // setV performs [[Set]] with an explicit receiver, returning whether the write
 // succeeded.
 func (i *Interpreter) setV(ctx context.Context, o *Object, key PropertyKey, v, receiver Value) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.set(ctx, key, v, receiver)
+	}
 	return i.ordinarySet(ctx, o, key, v, receiver)
 }
 
 // hasV performs [[HasProperty]].
 func (i *Interpreter) hasV(ctx context.Context, o *Object, key PropertyKey) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.has(ctx, key)
+	}
 	return o.Has(key), nil
 }
 
 // deleteV performs [[Delete]].
 func (i *Interpreter) deleteV(ctx context.Context, o *Object, key PropertyKey) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.deleteProperty(ctx, key)
+	}
 	return o.Delete(key), nil
 }
 
 // getOwnPropertyV performs [[GetOwnProperty]], returning the descriptor or
 // ok=false when the property is absent.
 func (i *Interpreter) getOwnPropertyV(ctx context.Context, o *Object, key PropertyKey) (*Property, bool, error) {
+	if o.proxy != nil {
+		return o.proxy.getOwnProperty(ctx, key)
+	}
 	p, ok := o.getOwn(key)
 	return p, ok, nil
 }
@@ -49,17 +61,26 @@ func (i *Interpreter) getOwnPropertyV(ctx context.Context, o *Object, key Proper
 // ownKeysV performs [[OwnPropertyKeys]], returning every own key (string then
 // symbol) in the spec-mandated order.
 func (i *Interpreter) ownKeysV(ctx context.Context, o *Object) ([]PropertyKey, error) {
+	if o.proxy != nil {
+		return o.proxy.ownKeys(ctx)
+	}
 	return o.ownPropertyKeys(), nil
 }
 
 // definePropertyV performs [[DefineOwnProperty]] from a descriptor object,
 // returning whether it was applied.
 func (i *Interpreter) definePropertyV(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.defineProperty(ctx, key, desc)
+	}
 	return i.defineOwnFromDescriptor(ctx, o, key, desc)
 }
 
 // getProtoV performs [[GetPrototypeOf]], returning the prototype object or Null.
 func (i *Interpreter) getProtoV(ctx context.Context, o *Object) (Value, error) {
+	if o.proxy != nil {
+		return o.proxy.getPrototypeOf(ctx)
+	}
 	if o.proto == nil {
 		return Nul, nil
 	}
@@ -69,16 +90,25 @@ func (i *Interpreter) getProtoV(ctx context.Context, o *Object) (Value, error) {
 // setProtoV performs [[SetPrototypeOf]] (proto is an *Object or Null), returning
 // whether it succeeded.
 func (i *Interpreter) setProtoV(ctx context.Context, o *Object, proto Value) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.setPrototypeOf(ctx, proto)
+	}
 	return i.ordinarySetPrototypeOf(o, proto), nil
 }
 
 // isExtensibleV performs [[IsExtensible]].
 func (i *Interpreter) isExtensibleV(ctx context.Context, o *Object) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.isExtensible(ctx)
+	}
 	return o.extensible, nil
 }
 
 // preventExtensionsV performs [[PreventExtensions]].
 func (i *Interpreter) preventExtensionsV(ctx context.Context, o *Object) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.preventExtensions(ctx)
+	}
 	o.extensible = false
 	return true, nil
 }
@@ -111,8 +141,14 @@ func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKe
 		if existing.Accessor || !existing.Writable {
 			return false, nil
 		}
+		if recv.proxy != nil {
+			return recv.proxy.defineDataValue(ctx, key, v)
+		}
 		recv.writeData(key, v)
 		return true, nil
+	}
+	if recv.proxy != nil {
+		return recv.proxy.defineDataValue(ctx, key, v)
 	}
 	if !recv.extensible {
 		return false, nil

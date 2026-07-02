@@ -94,14 +94,21 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		return i.newArray(i.enumerableKeys(o, func(k string, _ Value) Value { return String(k) })), nil
+		vals, err := i.enumerableKeys(ctx, o, func(k string, _ Value) Value { return String(k) })
+		if err != nil {
+			return nil, err
+		}
+		return i.newArray(vals), nil
 	})
 	i.defineMethod(ctor, "values", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, err := i.ToObject(ctx, arg(args, 0))
 		if err != nil {
 			return nil, err
 		}
-		vals := i.enumerableKeys(o, func(_ string, v Value) Value { return v })
+		vals, err := i.enumerableKeys(ctx, o, func(_ string, v Value) Value { return v })
+		if err != nil {
+			return nil, err
+		}
 		return i.newArray(vals), nil
 	})
 	i.defineMethod(ctor, "entries", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -109,9 +116,12 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		pairs := i.enumerableKeys(o, func(k string, v Value) Value {
+		pairs, err := i.enumerableKeys(ctx, o, func(k string, v Value) Value {
 			return i.newArray([]Value{String(k), v})
 		})
+		if err != nil {
+			return nil, err
+		}
 		return i.newArray(pairs), nil
 	})
 	i.defineMethod(ctor, "assign", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -180,21 +190,28 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		if o.proto == nil {
-			return Nul, nil
-		}
-		return o.proto, nil
+		return i.getProtoV(ctx, o)
 	})
 	i.defineMethod(ctor, "setPrototypeOf", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if IsNullish(arg(args, 0)) {
+			return nil, i.throwError(ctx, "TypeError", "Object.setPrototypeOf called on null or undefined")
+		}
+		proto := arg(args, 1)
+		if _, ok := proto.(*Object); !ok {
+			if _, ok := proto.(Null); !ok {
+				return nil, i.throwError(ctx, "TypeError", "Object prototype may only be an Object or null")
+			}
+		}
 		o, ok := arg(args, 0).(*Object)
 		if !ok {
 			return arg(args, 0), nil
 		}
-		switch p := arg(args, 1).(type) {
-		case *Object:
-			o.proto = p
-		case Null:
-			o.proto = nil
+		status, err := i.setProtoV(ctx, o, proto)
+		if err != nil {
+			return nil, err
+		}
+		if !status {
+			return nil, i.throwError(ctx, "TypeError", "Object.setPrototypeOf: cannot set prototype")
 		}
 		return o, nil
 	})
@@ -235,9 +252,15 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
+		keys, err := i.ownKeysV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
 		var out []Value
-		for _, name := range o.OwnKeys() {
-			out = append(out, String(name))
+		for _, k := range keys {
+			if !k.IsSymbol() {
+				out = append(out, String(k.Str))
+			}
 		}
 		return i.newArray(out), nil
 	})
@@ -278,7 +301,10 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		p, ok := o.getOwn(key)
+		p, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			return Undef, nil
 		}
@@ -302,8 +328,12 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
+		keys, err := i.ownKeysV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
 		var syms []Value
-		for _, k := range o.keys {
+		for _, k := range keys {
 			if k.IsSymbol() {
 				syms = append(syms, k.Sym)
 			}
@@ -312,11 +342,20 @@ func (i *Interpreter) initObject() {
 	})
 	i.defineMethod(ctor, "isExtensible", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, ok := arg(args, 0).(*Object)
-		return Bool(ok && o.extensible), nil
+		if !ok {
+			return False, nil
+		}
+		ext, err := i.isExtensibleV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+		return Bool(ext), nil
 	})
 	i.defineMethod(ctor, "preventExtensions", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if o, ok := arg(args, 0).(*Object); ok {
-			o.extensible = false
+			if _, err := i.preventExtensionsV(ctx, o); err != nil {
+				return nil, err
+			}
 		}
 		return arg(args, 0), nil
 	})
@@ -412,16 +451,32 @@ func (i *Interpreter) descriptorToObject(p *Property) *Object {
 }
 
 // enumerableKeys collects a value for each own enumerable string-keyed property
-// of o, in key order, via project.
-func (i *Interpreter) enumerableKeys(o *Object, project func(string, Value) Value) []Value {
-	var out []Value
-	for _, name := range o.OwnKeys() {
-		if p, ok := o.getOwn(StrKey(name)); ok && p.Enumerable {
-			v, _ := o.GetStr(context.Background(), name)
-			out = append(out, project(name, v))
-		}
+// of o, in key order, via project. It routes through the object internal
+// methods so a Proxy's ownKeys/getOwnPropertyDescriptor/get traps run.
+func (i *Interpreter) enumerableKeys(ctx context.Context, o *Object, project func(string, Value) Value) ([]Value, error) {
+	keys, err := i.ownKeysV(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var out []Value
+	for _, k := range keys {
+		if k.IsSymbol() {
+			continue
+		}
+		p, ok, err := i.getOwnPropertyV(ctx, o, k)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !p.Enumerable {
+			continue
+		}
+		v, err := i.getV(ctx, o, k, o)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, project(k.Str, v))
+	}
+	return out, nil
 }
 
 // applyDescriptor is the Throw-flag form of OrdinaryDefineOwnProperty used by
@@ -429,12 +484,12 @@ func (i *Interpreter) enumerableKeys(o *Object, project func(string, Value) Valu
 // an invariant forbids the change. Reflect.defineProperty uses
 // defineOwnFromDescriptor directly, observing the boolean result instead.
 func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) error {
-	ok, err := i.defineOwnFromDescriptor(ctx, o, key, desc)
+	ok, err := i.definePropertyV(ctx, o, key, desc)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		if _, exists := o.getOwn(key); !exists {
+		if _, exists := o.getOwn(key); o.proxy == nil && !exists {
 			return i.throwError(ctx, "TypeError",
 				"Cannot define property "+keyName(key)+", object is not extensible")
 		}

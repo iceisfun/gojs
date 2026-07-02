@@ -20,6 +20,9 @@ func (o *Object) GetStr(ctx context.Context, name string) (Value, error) {
 // getWithReceiver resolves key starting at o but binds getters' `this` to
 // receiver (which matters for inherited accessors).
 func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver Value) (Value, error) {
+	if o.proxy != nil {
+		return o.proxy.get(ctx, key, receiver)
+	}
 	for cur := o; cur != nil; cur = cur.proto {
 		if p, ok := cur.getOwn(key); ok {
 			if p.Accessor {
@@ -66,6 +69,9 @@ func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
 // with the Throw flag set, e.g. RegExpBuiltinExec assigning lastIndex — must
 // raise a TypeError; see (*Interpreter).setThrow.
 func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool, error) {
+	if o.proxy != nil {
+		return o.proxy.set(ctx, key, v, o)
+	}
 	// Search the prototype chain for an accessor or a non-writable data
 	// property that governs the assignment.
 	for cur := o; cur != nil; cur = cur.proto {

@@ -63,6 +63,7 @@ func (i *Interpreter) bootstrap() {
 	i.initDate()
 	i.initPromise()
 	i.initReflect()
+	i.initProxy()
 	i.initConsole()
 	i.initGlobals()
 	i.initTimers()

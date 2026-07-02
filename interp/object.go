@@ -118,6 +118,10 @@ type Object struct {
 	primitive Value          // wrapped primitive (String/Number/Boolean/Date)
 	internal  map[string]any // misc internal slots (RegExp source, Map data, ...)
 
+	// proxy is non-nil for a Proxy exotic object; it routes every essential
+	// internal method through the handler's traps (see builtin_proxy.go).
+	proxy *proxyState
+
 	// private holds ECMAScript private class elements (#fields, #methods, and
 	// private accessors), keyed by PrivateName identity. These are not ordinary
 	// properties: they are invisible to property enumeration, [[Get]]/[[Set]],
