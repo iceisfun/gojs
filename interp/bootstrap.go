@@ -36,6 +36,8 @@ func (i *Interpreter) bootstrap() {
 	i.iteratorProto = NewObject(i.objectProto)
 	i.generatorProto = NewObject(i.iteratorProto)
 	i.dateProto = NewObject(i.objectProto)
+	i.arrayBufferProto = NewObject(i.objectProto)
+	i.dataViewProto = NewObject(i.objectProto)
 	i.nativeErrorProtos = make(map[string]*Object)
 	i.nativeErrorCtors = make(map[string]*Object)
 
@@ -61,6 +63,8 @@ func (i *Interpreter) bootstrap() {
 	i.initCollections()
 	i.initIterator()
 	i.initDate()
+	i.initArrayBuffer()
+	i.initDataView()
 	i.initPromise()
 	i.initConsole()
 	i.initGlobals()
