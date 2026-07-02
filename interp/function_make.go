@@ -100,8 +100,8 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 
 	length := countParams(def.Params)
 	fnObj.fn = &functionData{call: call, name: name, length: length}
-	fnObj.SetHidden("length", Number(float64(length)))
-	fnObj.SetHidden("name", String(name))
+	setFuncLength(fnObj, length)
+	setFuncNameProp(fnObj, name)
 
 	// Ordinary (non-arrow, non-async, non-generator) functions are
 	// constructable and carry a fresh .prototype object.
@@ -147,7 +147,7 @@ func (i *Interpreter) setFuncName(fn *Object, key PropertyKey, prefix string) {
 		name = prefix + " " + base
 	}
 	fn.fn.name = name
-	fn.SetHidden("name", String(name))
+	setFuncNameProp(fn, name)
 }
 
 // bindThisValue implements the OrdinaryCallBindThis coercion for a normal

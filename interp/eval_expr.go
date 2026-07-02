@@ -62,7 +62,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.FuncExpr:
 		fn := i.makeFunction(e.Def, env, kindNormal, nil)
 		if e.Def.Name == nil && name != "" {
-			fn.SetHidden("name", String(name))
+			setFuncNameProp(fn, name)
 		}
 		return fn, nil
 	case *ast.ArrowFunc:
@@ -75,7 +75,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 				// static member named "name" (part of the class body) takes
 				// precedence — so only fill in the empty-string default.
 				if cur, ok := o.getOwn(StrKey("name")); !ok || cur.Value == String("") {
-					o.SetHidden("name", String(name))
+					setFuncNameProp(o, name)
 				}
 			}
 		}
@@ -153,7 +153,7 @@ func (i *Interpreter) evalArrow(ctx context.Context, e *ast.ArrowFunc, env *Envi
 	def.Body = body
 	fn := i.makeFunction(def, env, kindArrow, nil)
 	if name != "" {
-		fn.SetHidden("name", String(name))
+		setFuncNameProp(fn, name)
 	}
 	return fn
 }

@@ -19,6 +19,20 @@ func (i *Interpreter) newNativeFunc(name string, length int, fn CallFn) *Object 
 	return o
 }
 
+// setFuncLength defines a function's "length" own property with the
+// spec-mandated attributes { writable: false, enumerable: false,
+// configurable: true }.
+func setFuncLength(o *Object, length int) {
+	o.defineOwn(StrKey("length"), &Property{Value: Number(float64(length)), Writable: false, Enumerable: false, Configurable: true})
+}
+
+// setFuncNameProp defines a function's "name" own property with the
+// spec-mandated attributes { writable: false, enumerable: false,
+// configurable: true }.
+func setFuncNameProp(o *Object, name string) {
+	o.defineOwn(StrKey("name"), &Property{Value: String(name), Writable: false, Enumerable: false, Configurable: true})
+}
+
 // newNativeCtor creates a constructable function. call backs plain invocation;
 // construct backs `new`. If construct is nil, call is reused for both.
 func (i *Interpreter) newNativeCtor(name string, length int, call, construct CallFn) *Object {

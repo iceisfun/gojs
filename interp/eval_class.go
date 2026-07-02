@@ -237,8 +237,8 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 	if ctorDef != nil {
 		fnObj.fn.length = countParams(ctorDef.Params)
 	}
-	fnObj.SetHidden("name", String(name))
-	fnObj.SetHidden("length", Number(float64(fnObj.fn.length)))
+	setFuncLength(fnObj, fnObj.fn.length)
+	setFuncNameProp(fnObj, name)
 	return fnObj
 }
 
@@ -355,7 +355,7 @@ func (i *Interpreter) installClassMethod(ctx context.Context, target, home *Obje
 	}
 	fnExpr := m.Value.(*ast.FuncExpr)
 	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
-	fn.SetHidden("name", String(keyName(key)))
+	setFuncNameProp(fn, keyName(key))
 	switch m.Kind {
 	case ast.PropGet:
 		i.mergeAccessor(target, key, fn, nil)
@@ -378,7 +378,7 @@ func (i *Interpreter) installPrivateMember(ctx context.Context, target, home *Ob
 	pn := classEnv.resolvePrivate(name)
 	fnExpr := m.Value.(*ast.FuncExpr)
 	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
-	fn.SetHidden("name", String(name))
+	setFuncNameProp(fn, name)
 	switch m.Kind {
 	case ast.PropGet:
 		p, ok := target.getPrivate(pn)
