@@ -59,12 +59,14 @@ func main() {
 	if permissive {
 		tsOpts = append(tsOpts, ts.Permissive())
 	}
+	color := os.Getenv("NO_COLOR") == "" // https://no-color.org
 	opts := ts.WithTypeScript(interp.NewDirModuleProvider(filepath.Dir(abs)), tsOpts...)
 	opts = append(opts,
 		interp.WithPrintProvider(interp.NewDefaultPrintProvider()),
 		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
 		interp.WithOsProvider(interp.NewDefaultOsProvider()),
+		interp.WithErrorColor(color),
 	)
 	vm := interp.New(opts...)
 
@@ -81,6 +83,11 @@ func main() {
 		if v, ok := interp.ThrownValue(err); ok {
 			// Rich, colorized, source-mapped stack + code frame for uncaught errors.
 			fmt.Fprintln(os.Stderr, vm.FormatError(v))
+			hint := "Hint:"
+			if color {
+				hint = "\x1b[33mHint:\x1b[0m"
+			}
+			fmt.Fprintln(os.Stderr, hint, "Uncaught exceptions exit with code 1.")
 		} else {
 			fmt.Fprintln(os.Stderr, err)
 		}

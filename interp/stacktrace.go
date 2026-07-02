@@ -139,13 +139,18 @@ func plainStack(i *Interpreter, name, message string, frames []stackFrame) strin
 
 // ANSI palette used by the rich renderer.
 const (
-	ansiReset   = "\x1b[0m"
-	ansiBoldRed = "\x1b[1;31m"
-	ansiRed     = "\x1b[31m"
-	ansiCyan    = "\x1b[36m"
-	ansiGray    = "\x1b[90m"
-	ansiYellow  = "\x1b[33m"
+	ansiReset    = "\x1b[0m"
+	ansiBoldRed  = "\x1b[1;31m"
+	ansiBoldBlue = "\x1b[1;34m"
+	ansiRed      = "\x1b[31m"
+	ansiCyan     = "\x1b[36m"
+	ansiGray     = "\x1b[90m"
+	ansiYellow   = "\x1b[33m"
 )
+
+// codeFrameContext is the number of source lines shown on each side of the
+// offending line in a code frame.
+const codeFrameContext = 2
 
 // FormatError renders v as a rich, developer-facing stack trace: a header, the
 // full call stack (source-mapped), and a code frame pointing at the throw site.
@@ -169,14 +174,7 @@ func (i *Interpreter) FormatError(v Value) string {
 		}
 		return color + s + ansiReset
 	}
-
-	var b strings.Builder
-	b.WriteString(c(ansiBoldRed, name))
-	if message != "" {
-		b.WriteString(": ")
-		b.WriteString(message)
-	}
-	for _, f := range frames {
+	frameLine := func(b *strings.Builder, f stackFrame) {
 		src, line, col := i.mapPos(f.pos)
 		b.WriteString("\n    ")
 		b.WriteString(c(ansiGray, "at "))
@@ -184,12 +182,29 @@ func (i *Interpreter) FormatError(v Value) string {
 		b.WriteString(" ")
 		b.WriteString(c(ansiGray, fmt.Sprintf("(%s:%d:%d)", src, line, col)))
 	}
-	// Code frame for the throw site (the innermost frame).
+
+	var b strings.Builder
+	// Header + the throw-site location.
+	b.WriteString(c(ansiBoldRed, name))
+	if message != "" {
+		b.WriteString(": ")
+		b.WriteString(message)
+	}
 	if len(frames) > 0 {
+		frameLine(&b, frames[0])
+		// Code frame at the throw site.
 		src, line, col := i.mapPos(frames[0].pos)
 		if frame := i.codeFrame(src, line, col); frame != "" {
 			b.WriteString("\n\n")
 			b.WriteString(frame)
+		}
+	}
+	// Full call stack (JS frames only — no host/Go frames).
+	if len(frames) > 1 {
+		b.WriteString("\n\n")
+		b.WriteString(c(ansiBoldBlue, "Stack trace:"))
+		for _, f := range frames {
+			frameLine(&b, f)
 		}
 	}
 	return b.String()
@@ -214,27 +229,27 @@ func (i *Interpreter) codeFrame(source string, line, col int) string {
 		return cc + s + ansiReset
 	}
 	var b strings.Builder
-	start := line - 1
+	start := line - codeFrameContext
 	if start < 1 {
 		start = 1
 	}
-	end := line + 1
+	end := line + codeFrameContext
 	if end > len(lines) {
 		end = len(lines)
 	}
+	width := len(fmt.Sprintf("%d", end)) // right-align gutter numbers
 	for n := start; n <= end; n++ {
 		src := strings.TrimRight(lines[n-1], "\r")
+		num := fmt.Sprintf("%*d", width, n)
 		if n == line {
-			fmt.Fprintf(&b, "%s %s | %s\n", color(ansiRed, ">"), color(ansiYellow, fmt.Sprintf("%d", n)), src)
-			// caret line
-			pad := strings.Repeat(" ", len(fmt.Sprintf("%d", n)))
+			fmt.Fprintf(&b, "%s %s | %s\n", color(ansiRed, ">"), color(ansiYellow, num), src)
 			gutter := col - 1
 			if gutter < 0 {
 				gutter = 0
 			}
-			fmt.Fprintf(&b, "  %s | %s%s\n", pad, strings.Repeat(" ", gutter), color(ansiRed, "^"))
+			fmt.Fprintf(&b, "  %s | %s%s\n", strings.Repeat(" ", width), strings.Repeat(" ", gutter), color(ansiRed, "^"))
 		} else {
-			fmt.Fprintf(&b, "  %s | %s\n", color(ansiGray, fmt.Sprintf("%d", n)), src)
+			fmt.Fprintf(&b, "  %s | %s\n", color(ansiGray, num), src)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
