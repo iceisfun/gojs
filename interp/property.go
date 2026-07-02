@@ -71,12 +71,14 @@ func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
 // with the Throw flag set, e.g. RegExpBuiltinExec assigning lastIndex — must
 // raise a TypeError; see (*Interpreter).setThrow.
 func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool, error) {
-	if o.proxy != nil {
-		return o.proxy.set(ctx, key, v, o)
-	}
 	// Search the prototype chain for an accessor or a non-writable data
 	// property that governs the assignment.
 	for cur := o; cur != nil; cur = cur.proto {
+		// A Proxy anywhere on the chain governs the whole write via its set
+		// trap, with the original object as the receiver.
+		if cur.proxy != nil {
+			return cur.proxy.set(ctx, key, v, o)
+		}
 		p, ok := cur.getOwn(key)
 		if !ok {
 			continue

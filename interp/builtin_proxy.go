@@ -350,7 +350,67 @@ func (p *proxyState) defineProperty(ctx context.Context, key PropertyKey, descOb
 	if err != nil {
 		return false, err
 	}
-	return ToBoolean(res), nil
+	if !ToBoolean(res) {
+		return false, nil
+	}
+	// Invariants (§10.5.6): reconcile the accepted definition with the target.
+	targetDesc, hasTarget, err := i.getOwnPropertyV(ctx, p.target, key)
+	if err != nil {
+		return false, err
+	}
+	ext, err := i.isExtensibleV(ctx, p.target)
+	if err != nil {
+		return false, err
+	}
+	settingConfigFalse := false
+	if descObj.HasOwn(StrKey("configurable")) {
+		cv, err := descObj.GetStr(ctx, "configurable")
+		if err != nil {
+			return false, err
+		}
+		settingConfigFalse = !ToBoolean(cv)
+	}
+	if !hasTarget {
+		if !ext {
+			return false, i.throwError(ctx, "TypeError", "proxy defineProperty: cannot add a property to a non-extensible target")
+		}
+		if settingConfigFalse {
+			return false, i.throwError(ctx, "TypeError", "proxy defineProperty: cannot define a non-configurable property absent from the target")
+		}
+		return true, nil
+	}
+	compat, err := i.isCompatibleDescriptor(ctx, ext, key, descObj, targetDesc)
+	if err != nil {
+		return false, err
+	}
+	if !compat {
+		return false, i.throwError(ctx, "TypeError", "proxy defineProperty: descriptor is incompatible with the target's property")
+	}
+	if settingConfigFalse && targetDesc.Configurable {
+		return false, i.throwError(ctx, "TypeError", "proxy defineProperty: cannot report a configurable target property as non-configurable")
+	}
+	if !targetDesc.Accessor && !targetDesc.Configurable && targetDesc.Writable && descObj.HasOwn(StrKey("writable")) {
+		wv, err := descObj.GetStr(ctx, "writable")
+		if err != nil {
+			return false, err
+		}
+		if !ToBoolean(wv) {
+			return false, i.throwError(ctx, "TypeError", "proxy defineProperty: cannot make a non-configurable writable target property non-writable")
+		}
+	}
+	return true, nil
+}
+
+// isCompatibleDescriptor reports whether descObj can be applied to a property
+// whose current descriptor is current on an object with the given
+// extensibility, without mutating anything real. It runs
+// ValidateAndApplyPropertyDescriptor against a throwaway object seeded with
+// current, reusing the ordinary [[DefineOwnProperty]] logic.
+func (i *Interpreter) isCompatibleDescriptor(ctx context.Context, extensible bool, key PropertyKey, descObj *Object, current *Property) (bool, error) {
+	scratch := &Object{props: map[PropertyKey]*Property{}, extensible: extensible, class: "Object"}
+	cp := *current
+	scratch.defineOwn(key, &cp)
+	return i.defineOwnFromDescriptor(ctx, scratch, key, descObj)
 }
 
 // defineDataValue supports OrdinarySet's CreateDataProperty step when the
