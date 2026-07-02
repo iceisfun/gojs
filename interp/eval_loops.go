@@ -254,9 +254,16 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 	}
 	// Keys are collected once up front, but a property deleted before it is
 	// visited must not be visited, so existence is re-checked at each step.
-	keys := i.enumerateKeys(obj)
+	keys, err := i.enumerateKeys(ctx, obj)
+	if err != nil {
+		return nil, err
+	}
 	for _, k := range keys {
-		if !i.stillEnumerable(ctx, obj, k) {
+		enum, err := i.stillEnumerable(ctx, obj, k)
+		if err != nil {
+			return nil, err
+		}
+		if !enum {
 			continue
 		}
 		sig, bodyErr := runBody(String(k))
@@ -274,14 +281,28 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 
 // stillEnumerable reports whether name is still an enumerable property somewhere
 // on obj's prototype chain, so a for-in enumeration skips properties deleted
-// (or made non-enumerable) before they are visited.
-func (i *Interpreter) stillEnumerable(ctx context.Context, obj *Object, name string) bool {
-	for cur := obj; cur != nil; cur = cur.proto {
-		if p, ok := cur.getOwn(StrKey(name)); ok {
-			return p.Enumerable
+// (or made non-enumerable) before they are visited. It routes through the
+// object internal methods so a Proxy's traps run.
+func (i *Interpreter) stillEnumerable(ctx context.Context, obj *Object, name string) (bool, error) {
+	for cur := obj; cur != nil; {
+		p, ok, err := i.getOwnPropertyV(ctx, cur, StrKey(name))
+		if err != nil {
+			return false, err
 		}
+		if ok {
+			return p.Enumerable, nil
+		}
+		proto, err := i.getProtoV(ctx, cur)
+		if err != nil {
+			return false, err
+		}
+		next, ok := proto.(*Object)
+		if !ok {
+			break
+		}
+		cur = next
 	}
-	return false
+	return false, nil
 }
 
 // bindForTarget binds a for-in/of loop value to the loop's left-hand side,
@@ -302,22 +323,41 @@ func (i *Interpreter) bindForTarget(ctx context.Context, left ast.Node, v Value,
 }
 
 // enumerateKeys returns the enumerable string keys of obj and its prototype
-// chain, de-duplicated, in insertion order (for for-in).
-func (i *Interpreter) enumerateKeys(obj *Object) []string {
+// chain, de-duplicated, in insertion order (for for-in). It routes through the
+// object internal methods so a Proxy's ownKeys/getOwnPropertyDescriptor/
+// getPrototypeOf traps run.
+func (i *Interpreter) enumerateKeys(ctx context.Context, obj *Object) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
-	for cur := obj; cur != nil; cur = cur.proto {
-		for _, name := range cur.OwnKeys() {
-			if seen[name] {
+	for cur := obj; cur != nil; {
+		keys, err := i.ownKeysV(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			if k.IsSymbol() || seen[k.Str] {
 				continue
 			}
-			seen[name] = true
-			if p, ok := cur.getOwn(StrKey(name)); ok && p.Enumerable {
-				out = append(out, name)
+			seen[k.Str] = true
+			p, ok, err := i.getOwnPropertyV(ctx, cur, k)
+			if err != nil {
+				return nil, err
+			}
+			if ok && p.Enumerable {
+				out = append(out, k.Str)
 			}
 		}
+		proto, err := i.getProtoV(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
+		next, ok := proto.(*Object)
+		if !ok {
+			break
+		}
+		cur = next
 	}
-	return out
+	return out, nil
 }
 
 // errStopIteration is a sentinel used to break out of the iterate helper.

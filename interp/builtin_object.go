@@ -15,7 +15,11 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		return Bool(o.HasOwn(key)), nil
+		_, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		return Bool(ok), nil
 	})
 	i.defineMethod(proto, "isPrototypeOf", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		target, ok := arg(args, 0).(*Object)
@@ -42,7 +46,11 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		if p, ok := o.getOwn(key); ok {
+		p, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			return Bool(p.Enumerable), nil
 		}
 		return False, nil
