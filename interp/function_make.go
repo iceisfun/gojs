@@ -124,7 +124,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 				env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 			}
 		}
-		return i.runFunctionBody(ctx, def.Body, env)
+		return i.runFunctionBody(ctx, funcFrameName(fnObj, name), def.Body, env)
 	}
 
 	length := countParams(def.Params)
@@ -308,7 +308,8 @@ func (i *Interpreter) makeArguments(args []Value) *Object {
 
 // runFunctionBody hoists declarations in the body and executes it, translating a
 // return signal into the function's return value.
-func (i *Interpreter) runFunctionBody(ctx context.Context, body *ast.BlockStmt, env *Environment) (Value, error) {
+func (i *Interpreter) runFunctionBody(ctx context.Context, name string, body *ast.BlockStmt, env *Environment) (Value, error) {
+	defer i.enterFrame(name)()
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return nil, err
 	}

@@ -206,7 +206,7 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			if err := i.bindParams(ctx, ctorDef.Params, args, env); err != nil {
 				return nil, err
 			}
-			ret, err := i.runConstructorBody(ctx, ctorDef.Body, env)
+			ret, err := i.runConstructorBody(ctx, "new "+frameName(name), ctorDef.Body, env)
 			if err != nil {
 				return nil, err
 			}
@@ -466,7 +466,8 @@ func (i *Interpreter) classMemberKey(ctx context.Context, m *ast.ClassMember, en
 }
 
 // runConstructorBody runs a class constructor body, translating a return signal.
-func (i *Interpreter) runConstructorBody(ctx context.Context, body *ast.BlockStmt, env *Environment) (Value, error) {
+func (i *Interpreter) runConstructorBody(ctx context.Context, name string, body *ast.BlockStmt, env *Environment) (Value, error) {
+	defer i.enterFrame(name)()
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return nil, err
 	}

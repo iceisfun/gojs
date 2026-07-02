@@ -106,7 +106,7 @@ func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 		}
 		// The stack trace lives in an internal slot, exposed via the
 		// Error.prototype.stack accessor rather than an own data property.
-		setErrorStack(obj, i.errorStack(name, msg))
+		i.captureError(obj, name, msg)
 		return obj, nil
 	}
 	return i.newNativeCtor(name, 1, build, build)
@@ -121,7 +121,7 @@ func (i *Interpreter) newError(name, message string) *Object {
 	obj := NewObject(proto)
 	obj.class = "Error"
 	obj.SetHidden("message", String(message))
-	setErrorStack(obj, i.errorStack(name, message))
+	i.captureError(obj, name, message)
 	return obj
 }
 

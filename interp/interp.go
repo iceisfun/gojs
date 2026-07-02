@@ -50,9 +50,18 @@ type Interpreter struct {
 
 	// sourceMapper, when set, maps generated (transpiled) positions in error
 	// stacks back to their original source (e.g. TypeScript). curPos is the
-	// position of the statement currently executing, captured for error frames.
+	// position of the top-level statement executing; callStack holds one frame
+	// per active function call (innermost last), each tracking the position of
+	// the statement currently executing within it — together they form the
+	// captured stack trace of an error.
 	sourceMapper SourceMapper
 	curPos       token.Pos
+	callStack    []stackFrame
+	// sources retains parsed source text by name, so error rendering can show a
+	// code frame (the offending line with a caret). errorColor enables ANSI color
+	// in FormatError's rendered stacks.
+	sources    map[string]string
+	errorColor bool
 
 	// security holds opt-in hardening switches (see Security / WithSecurity).
 	security Security
@@ -232,12 +241,22 @@ func (i *Interpreter) NetProvider() NetProvider { return i.net }
 // are 1-based; ok is false when the position is not mapped.
 type SourceMapper interface {
 	MapPosition(source string, line, column int) (origSource string, origLine, origColumn int, ok bool)
+	// SourceText returns the original source text for a mapped source name (used
+	// to render code frames), or ok=false if unavailable.
+	SourceText(origSource string) (string, bool)
 }
 
 // WithSourceMapper installs a SourceMapper used to rewrite positions in error
 // stacks back to their original source.
 func WithSourceMapper(m SourceMapper) Option {
 	return func(i *Interpreter) { i.sourceMapper = m }
+}
+
+// WithErrorColor enables (default) or disables ANSI color in the rich error
+// rendering produced by FormatError. Disable it when output goes to a log or web
+// sink rather than a terminal.
+func WithErrorColor(on bool) Option {
+	return func(i *Interpreter) { i.errorColor = on }
 }
 
 // SourceMapper returns the configured source mapper, or nil.
@@ -283,7 +302,7 @@ func WithRegExpEngine(e RegExpEngine) Option {
 
 // New creates an Interpreter with the standard global environment installed.
 func New(opts ...Option) *Interpreter {
-	i := &Interpreter{limits: defaultLimits()}
+	i := &Interpreter{limits: defaultLimits(), errorColor: true}
 	for _, opt := range opts {
 		opt(i)
 	}

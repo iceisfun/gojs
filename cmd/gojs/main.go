@@ -79,7 +79,8 @@ func main() {
 	// (module/exports/require) and its imports resolve.
 	if _, err := vm.RunString("<entry>", "require('./"+filepath.Base(abs)+"')"); err != nil {
 		if v, ok := interp.ThrownValue(err); ok {
-			fmt.Fprintln(os.Stderr, interp.BriefValue(v))
+			// Rich, colorized, source-mapped stack + code frame for uncaught errors.
+			fmt.Fprintln(os.Stderr, vm.FormatError(v))
 		} else {
 			fmt.Fprintln(os.Stderr, err)
 		}

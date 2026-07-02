@@ -135,9 +135,14 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 	}
 	// Record the position of the statement being executed, so an error
 	// constructed here can report a source frame (mapped back through a
-	// SourceMapper for transpiled code).
+	// SourceMapper for transpiled code). The position updates the innermost
+	// active call frame, or the module position when at top level.
 	if p := stmt.Pos(); p.Line > 0 {
-		i.curPos = p
+		if n := len(i.callStack); n > 0 {
+			i.callStack[n-1].pos = p
+		} else {
+			i.curPos = p
+		}
 	}
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:

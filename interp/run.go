@@ -15,6 +15,7 @@ import (
 // value of the program (the value of its last expression statement) after the
 // event loop has drained. sourceName appears in error messages.
 func (i *Interpreter) RunString(sourceName, source string) (Value, error) {
+	i.registerSource(sourceName, source)
 	prog, err := parser.Parse(sourceName, source)
 	if err != nil {
 		// A parse failure is a SyntaxError; surface it as a thrown JS value so

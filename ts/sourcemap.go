@@ -13,10 +13,22 @@ import (
 type Mapper struct {
 	mu   sync.RWMutex
 	maps map[string]*consumer // module source name -> decoded map
+	text map[string]string    // original .ts source text, by source name
 }
 
 // NewMapper returns an empty source-map registry.
-func NewMapper() *Mapper { return &Mapper{maps: map[string]*consumer{}} }
+func NewMapper() *Mapper {
+	return &Mapper{maps: map[string]*consumer{}, text: map[string]string{}}
+}
+
+// SourceText returns the original TypeScript source for a mapped source name,
+// used to render code frames.
+func (m *Mapper) SourceText(source string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.text[source]
+	return s, ok
+}
 
 // MapPosition implements interp.SourceMapper: it maps a generated (transpiled)
 // 1-based position for source back to the original .ts position.
@@ -30,13 +42,20 @@ func (m *Mapper) MapPosition(source string, line, column int) (string, int, int,
 	return c.lookup(line, column)
 }
 
-// record decodes raw and stores it under the generated module's source name.
-func (m *Mapper) record(source string, raw *sourcemap.RawSourceMap) {
+// record decodes raw and stores it (and the original .ts text) under both the
+// generated module's source name and the map's own source name, so lookups by
+// either resolve.
+func (m *Mapper) record(source, tsText string, raw *sourcemap.RawSourceMap) {
 	if raw == nil {
 		return
 	}
+	c := newConsumer(raw)
 	m.mu.Lock()
-	m.maps[source] = newConsumer(raw)
+	m.maps[source] = c
+	m.text[source] = tsText
+	if c.source != "" {
+		m.text[c.source] = tsText
+	}
 	m.mu.Unlock()
 }
 

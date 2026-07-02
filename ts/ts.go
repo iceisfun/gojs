@@ -156,7 +156,7 @@ func (p *provider) Load(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	if p.mapper != nil {
-		p.mapper.record(id, raw)
+		p.mapper.record(id, src, raw)
 	}
 	return js, nil
 }

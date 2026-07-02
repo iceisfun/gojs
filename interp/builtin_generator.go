@@ -114,7 +114,7 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 			case <-gs.ctx.Done():
 				return
 			}
-			_, err := i.runGeneratorBody(gs.ctx, def.Body, env)
+			_, err := i.runGeneratorBody(gs.ctx, defName(def), def.Body, env)
 			var final yieldMsg
 			switch e := err.(type) {
 			case nil:
@@ -281,7 +281,8 @@ func (i *Interpreter) initGenerator() {
 // runGeneratorBody executes a generator body, hoisting declarations first. It is
 // separate from runFunctionBody only so future generator-specific handling has a
 // home.
-func (i *Interpreter) runGeneratorBody(ctx context.Context, body *ast.BlockStmt, env *Environment) (Value, error) {
+func (i *Interpreter) runGeneratorBody(ctx context.Context, name string, body *ast.BlockStmt, env *Environment) (Value, error) {
+	defer i.enterFrame(name)()
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return Undef, err
 	}

@@ -65,6 +65,10 @@ type SourceMapper = interp.SourceMapper
 // WithSourceMapper installs a source mapper for error-stack positions.
 var WithSourceMapper = interp.WithSourceMapper
 
+// WithErrorColor toggles ANSI color in FormatError's rich stack rendering
+// (default on).
+var WithErrorColor = interp.WithErrorColor
+
 // Value type aliases for building/inspecting JavaScript values from Go.
 type (
 	// Object is a JavaScript object (also arrays and functions).

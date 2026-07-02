@@ -74,6 +74,7 @@ func (i *Interpreter) requireModule(ctx context.Context, specifier, referrer str
 	if err != nil {
 		return nil, i.throwError(ctx, "Error", "Cannot load module '"+id+"': "+err.Error())
 	}
+	i.registerSource(id, src)
 	prog, err := parser.Parse(id, src)
 	if err != nil {
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
