@@ -18,32 +18,59 @@ import (
 	"github.com/iceisfun/gojs/ts"
 )
 
+// safeArgs returns the arguments after "gojs run", or nil.
+func safeArgs(a []string) []string {
+	if len(a) < 3 {
+		return nil
+	}
+	return a[2:]
+}
+
 func main() {
-	if len(os.Args) < 3 || os.Args[1] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: gojs run <file.ts|file.js>")
+	// usage: gojs run [--permissive] <file> [args…]
+	permissive := false
+	var file string
+	var scriptArgs []string
+	for _, a := range safeArgs(os.Args) {
+		switch {
+		case a == "--permissive" || a == "-p":
+			permissive = true
+		case file == "":
+			file = a
+		default:
+			scriptArgs = append(scriptArgs, a)
+		}
+	}
+	if len(os.Args) < 2 || os.Args[1] != "run" || file == "" {
+		fmt.Fprintln(os.Stderr, "usage: gojs run [--permissive] <file.ts|file.js> [args…]")
 		os.Exit(2)
 	}
 
-	abs, err := filepath.Abs(os.Args[2])
+	abs, err := filepath.Abs(file)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gojs:", err)
 		os.Exit(1)
 	}
 
-	vm := interp.New(
-		// The entry's directory is the module root; the ts.Provider transpiles
-		// TypeScript modules on load (this is the file-inclusion hook — swap the
-		// base provider to serve modules from anywhere).
-		interp.WithModuleProvider(ts.Provider(interp.NewDirModuleProvider(filepath.Dir(abs)))),
+	// The entry's directory is the module root. WithTypeScript transpiles .ts
+	// modules on load and installs a source mapper, so error stacks report .ts
+	// positions; --permissive tolerates TypeScript syntax errors.
+	var tsOpts []ts.Option
+	if permissive {
+		tsOpts = append(tsOpts, ts.Permissive())
+	}
+	opts := ts.WithTypeScript(interp.NewDirModuleProvider(filepath.Dir(abs)), tsOpts...)
+	opts = append(opts,
 		interp.WithPrintProvider(interp.NewDefaultPrintProvider()),
 		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
 		interp.WithOsProvider(interp.NewDefaultOsProvider()),
 	)
+	vm := interp.New(opts...)
 
 	// A Node-like process global for standalone runs. argv is
 	// [ "gojs", <script>, <args…> ] to match Node's argv[0]/argv[1] convention.
-	if err := process.Install(vm, process.WithArgs(append([]string{"gojs", abs}, os.Args[3:]...)...)); err != nil {
+	if err := process.Install(vm, process.WithArgs(append([]string{"gojs", abs}, scriptArgs...)...)); err != nil {
 		fmt.Fprintln(os.Stderr, "gojs:", err)
 		os.Exit(1)
 	}

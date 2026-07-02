@@ -25,35 +25,42 @@ import (
 // Transpile converts TypeScript source to CommonJS JavaScript, the module form
 // gojs's require()/module system evaluates. fileName is used for diagnostics and
 // selects TSX parsing for a .tsx name.
-func Transpile(fileName, src string) (js string, err error) {
-	// The transpiler runs upstream typescript-go transforms; guard against a
-	// panic in a transform so it surfaces as an error rather than crashing the
-	// host process (transforms lean on unimplemented type-checker corners).
-	defer func() {
-		if r := recover(); r != nil {
-			js, err = "", fmt.Errorf("transpile %s: %v", fileName, r)
-		}
-	}()
-	return transpiler.Module(src, transpiler.Options{
-		FileName: fileName,
-		Module:   core.ModuleKindCommonJS,
-		JSX:      strings.HasSuffix(fileName, ".tsx"),
-	})
+func Transpile(fileName, src string) (string, error) {
+	js, _, err := transpileWith(fileName, src, false, false)
+	return js, err
 }
 
-// transpileWithMap is Transpile plus a v3 source map (generated JS positions ->
-// original TypeScript), used when a Mapper is recording maps for error stacks.
-func transpileWithMap(fileName, src string) (js string, raw *sourcemap.RawSourceMap, err error) {
+// config holds per-provider transpilation settings.
+type config struct{ permissive bool }
+
+// Option configures TypeScript transpilation for a Provider / WithTypeScript.
+type Option func(*config)
+
+// Permissive transpiles TypeScript even when it has syntax errors (matching
+// ts.transpileModule) instead of rejecting it. The default is strict: malformed
+// TypeScript is reported as an error rather than run.
+func Permissive() Option { return func(c *config) { c.permissive = true } }
+
+// transpileWith converts TypeScript to CommonJS JavaScript, optionally producing
+// a source map and/or tolerating syntax errors. It recovers a transform panic
+// (unimplemented type-checker corners) into an error rather than crashing.
+func transpileWith(fileName, src string, permissive, withMap bool) (js string, raw *sourcemap.RawSourceMap, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			js, raw, err = "", nil, fmt.Errorf("transpile %s: %v", fileName, r)
 		}
 	}()
-	return transpiler.ModuleWithSourceMap(src, transpiler.Options{
-		FileName: fileName,
-		Module:   core.ModuleKindCommonJS,
-		JSX:      strings.HasSuffix(fileName, ".tsx"),
-	})
+	o := transpiler.Options{
+		FileName:           fileName,
+		Module:             core.ModuleKindCommonJS,
+		JSX:                strings.HasSuffix(fileName, ".tsx"),
+		IgnoreSyntaxErrors: permissive,
+	}
+	if withMap {
+		return transpiler.ModuleWithSourceMap(src, o)
+	}
+	js, err = transpiler.Module(src, o)
+	return js, nil, err
 }
 
 // IsTypeScript reports whether a module id names a TypeScript source file.
@@ -75,8 +82,12 @@ func IsTypeScript(id string) bool {
 //
 // Resolution is delegated entirely to base, so host behavior over what a
 // specifier means is preserved.
-func Provider(base interp.ModuleProvider) interp.ModuleProvider {
-	return &provider{base: base}
+func Provider(base interp.ModuleProvider, opts ...Option) interp.ModuleProvider {
+	var c config
+	for _, o := range opts {
+		o(&c)
+	}
+	return &provider{base: base, permissive: c.permissive}
 }
 
 // WithTypeScript returns the VM options for running TypeScript with
@@ -86,17 +97,22 @@ func Provider(base interp.ModuleProvider) interp.ModuleProvider {
 //
 //	opts := append(ts.WithTypeScript(base), gojs.WithPrintProvider(pp))
 //	vm := gojs.New(opts...)
-func WithTypeScript(base interp.ModuleProvider) []interp.Option {
+func WithTypeScript(base interp.ModuleProvider, opts ...Option) []interp.Option {
+	var c config
+	for _, o := range opts {
+		o(&c)
+	}
 	m := NewMapper()
 	return []interp.Option{
-		interp.WithModuleProvider(&provider{base: base, mapper: m}),
+		interp.WithModuleProvider(&provider{base: base, mapper: m, permissive: c.permissive}),
 		interp.WithSourceMapper(m),
 	}
 }
 
 type provider struct {
-	base   interp.ModuleProvider
-	mapper *Mapper // when set, transpile with a source map and record it
+	base       interp.ModuleProvider
+	mapper     *Mapper // when set, transpile with a source map and record it
+	permissive bool
 }
 
 func (p *provider) Resolve(ctx context.Context, specifier, referrer string) (string, error) {
@@ -135,15 +151,14 @@ func (p *provider) Load(ctx context.Context, id string) (string, error) {
 	if err != nil || !IsTypeScript(id) {
 		return src, err
 	}
-	if p.mapper != nil {
-		js, raw, err := transpileWithMap(id, src)
-		if err != nil {
-			return "", err
-		}
-		p.mapper.record(id, raw)
-		return js, nil
+	js, raw, err := transpileWith(id, src, p.permissive, p.mapper != nil)
+	if err != nil {
+		return "", err
 	}
-	return Transpile(id, src)
+	if p.mapper != nil {
+		p.mapper.record(id, raw)
+	}
+	return js, nil
 }
 
 // RunString transpiles a self-contained TypeScript program and runs it on vm as

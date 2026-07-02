@@ -1,6 +1,7 @@
 package ts
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/iceisfun/gojs/interp"
@@ -52,5 +53,24 @@ func TestRequireTypeScript(t *testing.T) {
 	}
 	if v != interp.Number(42) {
 		t.Fatalf("got %v, want 42", v)
+	}
+}
+
+// TestStrictVsPermissive: malformed TS is rejected by default but tolerated
+// under Permissive().
+func TestStrictVsPermissive(t *testing.T) {
+	src := map[string]string{"bad.ts": "const x: number = 1;\n,oops!!!\n"}
+	base := interp.NewMapModuleProvider(src)
+
+	_, errStrict := interp.New(interp.WithModuleProvider(Provider(base))).
+		RunString("<e>", `require("./bad.ts")`)
+	if errStrict == nil || !strings.Contains(errStrict.Error(), "bad.ts:2") {
+		t.Fatalf("strict should reject with bad.ts:2, got: %v", errStrict)
+	}
+
+	_, errPerm := interp.New(interp.WithModuleProvider(Provider(base, Permissive()))).
+		RunString("<e>", `require("./bad.ts")`)
+	if errPerm != nil && strings.Contains(errPerm.Error(), "bad.ts:2:") {
+		t.Fatalf("permissive should not reject at transpile, got: %v", errPerm)
 	}
 }
