@@ -5,9 +5,10 @@
 // declared expectation (positive or negative).
 //
 // It is deliberately conservative: tests using features gojs does not implement
-// (modules, async completion via $DONE, raw/generated forms, and a configurable
-// feature denylist) are reported as skipped rather than failed, so the pass
-// rate reflects real conformance of implemented features.
+// (modules, raw/generated forms, and a configurable feature denylist) are
+// reported as skipped rather than failed, so the pass rate reflects real
+// conformance of implemented features. Async tests (flags: [async]) are run:
+// the runner supplies $DONE and inspects the reported completion.
 package test262
 
 import (
@@ -152,9 +153,6 @@ func skipReason(m Meta) string {
 	if m.Flags["module"] {
 		return "module"
 	}
-	if m.Flags["async"] {
-		return "async $DONE"
-	}
 	if m.Flags["raw"] {
 		return "raw"
 	}
@@ -238,6 +236,17 @@ func runMode(path, src string, m Meta, mode string) Result {
 	defer vm.Close()
 	installT262Host(vm)
 
+	// An async test (flags: [async]) signals its outcome by calling $DONE — with
+	// no/undefined argument on success, or an error on failure. gojs's RunString
+	// drains the event loop before returning, so by then every promise reaction
+	// and timer the test scheduled has run and $DONE has been called. We install
+	// $DONE natively (rather than via harness/doneprintHandle.js) so it is a real
+	// own property of globalThis, which asyncHelpers.js's asyncTest requires.
+	var sink asyncSink
+	if m.Flags["async"] {
+		installAsyncDone(vm, &sink)
+	}
+
 	full := prelude + harness + "\n" + src
 	done := make(chan error, 1)
 	go func() {
@@ -287,8 +296,73 @@ func runMode(path, src string, m Meta, mode string) Result {
 		res.Reason = describe(runErr)
 		return res
 	}
+	if m.Flags["async"] {
+		switch {
+		case sink.failed:
+			res.Outcome = Fail
+			res.Reason = "async: " + sink.failure
+		case sink.done:
+			res.Outcome = Pass
+		default:
+			res.Outcome = Fail
+			res.Reason = "async test did not signal completion ($DONE not called)"
+		}
+		return res
+	}
 	res.Outcome = Pass
 	return res
+}
+
+// asyncSink records the completion an async test reports through $DONE (or the
+// print-based $DONE from harness/doneprintHandle.js). It is written from the VM
+// goroutine and read back only after that goroutine has finished (channel
+// receive establishes the happens-before), so no synchronization is needed.
+type asyncSink struct {
+	done    bool   // $DONE was called
+	failed  bool   // it was called with an error argument
+	failure string // the rendered error, when failed
+}
+
+// installAsyncDone installs the $DONE hook (and a compatible print) that an
+// async Test262 test uses to report completion, recording the outcome in sink.
+func installAsyncDone(vm *interp.Interpreter, sink *asyncSink) {
+	// $DONE(err?): success when called with no argument or a nullish one;
+	// otherwise the argument is the failure reason.
+	vm.SetGlobal("$DONE", vm.NewFunction("$DONE", func(args []interp.Value) (interp.Value, error) {
+		sink.done = true
+		if len(args) == 0 {
+			return interp.Undef, nil
+		}
+		v := args[0]
+		if v == interp.Undef || v == interp.Nul {
+			return interp.Undef, nil
+		}
+		msg, err := vm.ToString(v)
+		if err != nil || msg == "" {
+			msg = interp.BriefValue(v)
+		}
+		sink.failed = true
+		sink.failure = msg
+		return interp.Undef, nil
+	}))
+	// harness/doneprintHandle.js defines a $DONE that routes through print with a
+	// sentinel message; support it too, so a test that includes that harness
+	// explicitly still reports through the same sink.
+	vm.SetGlobal("print", vm.NewFunction("print", func(args []interp.Value) (interp.Value, error) {
+		if len(args) == 0 {
+			return interp.Undef, nil
+		}
+		s, _ := vm.ToString(args[0])
+		switch {
+		case s == "Test262:AsyncTestComplete":
+			sink.done = true
+		case strings.HasPrefix(s, "Test262:AsyncTestFailure:"):
+			sink.done = true
+			sink.failed = true
+			sink.failure = strings.TrimPrefix(s, "Test262:AsyncTestFailure:")
+		}
+		return interp.Undef, nil
+	}))
 }
 
 // installT262Host installs the $262 host object that some Test262 tests use.
