@@ -77,8 +77,15 @@ func (i *Interpreter) initFunction() {
 		})
 		// A bound constructor stays constructable, ignoring boundThis on `new`.
 		if fn.fn.construct != nil {
-			bound.fn.construct = func(ctx context.Context, newThis Value, callArgs []Value) (Value, error) {
-				return fn.fn.construct(ctx, newThis, append(append([]Value{}, boundArgs...), callArgs...))
+			bound.fn.construct = func(ctx context.Context, newTarget Value, callArgs []Value) (Value, error) {
+				// Per BoundFunctionCreate's [[Construct]]: when new.target is the
+				// bound function itself, substitute the target so the instance's
+				// prototype derives from the target, not the (prototype-less) bound
+				// wrapper.
+				if newTarget == Value(bound) {
+					newTarget = fn
+				}
+				return fn.fn.construct(ctx, newTarget, append(append([]Value{}, boundArgs...), callArgs...))
 			}
 			bound.fn.ctor = true
 		}

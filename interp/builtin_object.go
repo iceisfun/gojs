@@ -424,13 +424,34 @@ func (i *Interpreter) enumerableKeys(o *Object, project func(string, Value) Valu
 	return out
 }
 
-// applyDescriptor implements OrdinaryDefineOwnProperty /
-// ValidateAndApplyPropertyDescriptor (§10.1.6) with the Throw flag set: it
-// merges only the fields the descriptor actually specifies onto any existing
-// property (leaving the rest untouched), enforces the invariants for
-// non-configurable and non-writable properties, and raises a TypeError when a
-// change is disallowed.
+// applyDescriptor is the Throw-flag form of OrdinaryDefineOwnProperty used by
+// Object.defineProperty: it applies the descriptor and raises a TypeError when
+// an invariant forbids the change. Reflect.defineProperty uses
+// defineOwnFromDescriptor directly, observing the boolean result instead.
 func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) error {
+	ok, err := i.defineOwnFromDescriptor(ctx, o, key, desc)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if _, exists := o.getOwn(key); !exists {
+			return i.throwError(ctx, "TypeError",
+				"Cannot define property "+keyName(key)+", object is not extensible")
+		}
+		return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+	}
+	return nil
+}
+
+// defineOwnFromDescriptor implements OrdinaryDefineOwnProperty /
+// ValidateAndApplyPropertyDescriptor (§10.1.6). It merges only the fields the
+// descriptor actually specifies onto any existing property (leaving the rest
+// untouched) and enforces the invariants for non-configurable and non-writable
+// properties. It returns whether the definition was applied: an unmet invariant
+// yields (false, nil), while a malformed descriptor (accessors combined with a
+// value/writable, or a non-callable getter/setter) — a ToPropertyDescriptor
+// failure that throws even for Reflect.defineProperty — yields a non-nil error.
+func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
 	// Which attributes does the descriptor specify? Presence — not truthiness —
 	// determines what gets applied; absent fields are inherited from the
 	// current property (or take spec defaults for a brand-new one).
@@ -442,7 +463,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 	hasSet := desc.HasOwn(StrKey("set"))
 
 	if (hasGet || hasSet) && (hasValue || hasWritable) {
-		return i.throwError(ctx, "TypeError",
+		return false, i.throwError(ctx, "TypeError",
 			"Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, "+keyName(key))
 	}
 
@@ -469,7 +490,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 		if fn, ok := v.(*Object); ok && fn.IsCallable() {
 			getter = fn
 		} else if !IsUndefined(v) {
-			return i.throwError(ctx, "TypeError", "Getter must be a function: "+keyName(key))
+			return false, i.throwError(ctx, "TypeError", "Getter must be a function: "+keyName(key))
 		}
 	}
 	if hasSet {
@@ -477,7 +498,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 		if fn, ok := v.(*Object); ok && fn.IsCallable() {
 			setter = fn
 		} else if !IsUndefined(v) {
-			return i.throwError(ctx, "TypeError", "Setter must be a function: "+keyName(key))
+			return false, i.throwError(ctx, "TypeError", "Setter must be a function: "+keyName(key))
 		}
 	}
 	isAccessorDesc := hasGet || hasSet
@@ -486,8 +507,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 	current, exists := o.getOwn(key)
 	if !exists {
 		if !o.extensible {
-			return i.throwError(ctx, "TypeError",
-				"Cannot define property "+keyName(key)+", object is not extensible")
+			return false, nil
 		}
 		p := &Property{Enumerable: enumerable, Configurable: configurable}
 		if isAccessorDesc {
@@ -499,35 +519,35 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 			p.Writable = writable
 		}
 		o.defineOwn(key, p)
-		return nil
+		return true, nil
 	}
 
 	// The property already exists: a non-configurable property constrains which
 	// redefinitions are permitted (§10.1.6.3).
 	if !current.Configurable {
 		if hasConf && configurable {
-			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			return false, nil
 		}
 		if hasEnum && enumerable != current.Enumerable {
-			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			return false, nil
 		}
 		switch {
 		case isAccessorDesc && !current.Accessor, isDataDesc && current.Accessor:
 			// Changing the kind of a non-configurable property is forbidden.
-			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			return false, nil
 		case current.Accessor:
 			if hasGet && getter != current.Get {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 			if hasSet && setter != current.Set {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 		case !current.Writable:
 			if hasWritable && writable {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 			if hasValue && !sameValue(value, current.Value) {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 		}
 	}
@@ -564,7 +584,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 		np.Configurable = configurable
 	}
 	o.defineOwn(key, &np)
-	return nil
+	return true, nil
 }
 
 // defineProperties applies each own enumerable descriptor in props to o.
