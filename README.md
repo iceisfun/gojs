@@ -57,6 +57,12 @@ automation, and running untrusted snippets under tight host control.
   `Close()` cancels it and drains all timer goroutines.
 - **Precise diagnostics** — every token and AST node carries a source span
   (line/column/offset) for underline-quality error messages.
+- **TypeScript** — run `.ts`/`.tsx` directly. The optional
+  [`ts`](ts) package transpiles TypeScript to JavaScript in-process (embedding a
+  hoisting of Microsoft's [typescript-go](https://github.com/microsoft/typescript-go)),
+  so `gojs run app.ts` and embedded TypeScript just work. Type-stripping is
+  checker-free; the gojs core stays dependency-free (only importing `ts` pulls
+  the compiler in). See the [`typescript`](examples/typescript) example.
 - **No cgo, no C dependencies, single static binary.**
 
 ## Capability model
@@ -255,6 +261,43 @@ Implemented intrinsics and globals (see [Limitations](#limitations) for gaps):
 | Errors        | full `Error` hierarchy, subclassable                                        |
 | Globals       | `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURIComponent`, `Date`, `Promise`, timers |
 
+## TypeScript
+
+gojs can run TypeScript with no external tooling. The [`ts`](ts) package
+transpiles `.ts`/`.tsx` to JavaScript in-process — it embeds
+[`github.com/iceisfun/typescript`](https://github.com/iceisfun/typescript), a
+hoisting of Microsoft's typescript-go compiler out of its `internal/` packages —
+and runs the result on the VM. Importing `ts` is what pulls that dependency into
+a build; embeddings that only run JavaScript keep the zero-dependency core.
+
+```go
+import "github.com/iceisfun/gojs/ts"
+
+// Self-contained script:
+vm := gojs.New(gojs.WithPrintProvider(gojs.NewDefaultPrintProvider()))
+ts.RunString(vm, "app.ts", `const n: number = 21; console.log(n * 2);`) // 42
+
+// Multi-file: ts.Provider wraps any ModuleProvider so .ts modules are
+// transpiled on load; import/require between them resolve through it.
+vm = gojs.New(
+    gojs.WithPrintProvider(gojs.NewDefaultPrintProvider()),
+    gojs.WithModuleProvider(ts.Provider(gojs.NewDirModuleProvider("./src"))),
+)
+vm.RunString("<entry>", `require("./main.ts")`)
+```
+
+From the CLI:
+
+```bash
+gojs run app.ts        # transpile + run a TypeScript entry file
+```
+
+Transpilation is **checker-free** (the `isolatedModules` model): type
+annotations, `interface`s, generics, and class visibility are erased/lowered,
+but the program is **not type-checked** — the goal is to *run* TypeScript. `enum`
+/ `namespace` lowering and `.ts`-origin line numbers in stack traces are not yet
+wired. See the [`typescript`](examples/typescript) example.
+
 ## Examples
 
 Runnable programs live under [`examples/`](examples), each with its own README:
@@ -266,6 +309,7 @@ Runnable programs live under [`examples/`](examples), each with its own README:
 | [`call_js`](examples/call_js)           | Call script functions from Go                           |
 | [`providers`](examples/providers)       | Custom `PrintProvider` + timers on the event loop       |
 | [`modules`](examples/modules)           | Intercept `require()` with a `ModuleProvider`           |
+| [`typescript`](examples/typescript)     | Run TypeScript (transpiled in-process) with imports     |
 | [`limits`](examples/limits)             | Bound recursion and CPU with `Limits`                   |
 | [`sandbox`](examples/sandbox)           | Hardened sandbox: no I/O, no eval, timeout on runaway    |
 
@@ -306,7 +350,8 @@ gojs/
 ├── ast/              AST node types
 ├── parser/           recursive-descent parser
 ├── interp/           evaluator, values, built-ins, providers, event loop, host API
-├── cmd/gojs/         command-line runner
+├── ts/               optional TypeScript support (transpile + run; pulls in typescript-go)
+├── cmd/gojs/         command-line runner (runs .js and .ts)
 ├── examples/         runnable embedding examples (each with a README)
 └── tests/
     ├── harness/      behavioral JS conformance suite (self-asserting programs)
@@ -345,7 +390,9 @@ This is a first pass. Notable gaps and approximations:
   synchronous unwrap rather than a full module-graph suspension.
 - **Strings** are stored as Go UTF-8 and indexed by rune, not UTF-16 code
   units — an approximation for characters outside the BMP.
-- **Modules** (`import`/`export`) are not yet executed.
+- **Modules** — CommonJS `require()` works through a `ModuleProvider` (see the
+  `modules` and `typescript` examples). Native ES `import`/`export` is not
+  executed directly; TypeScript's ES modules run by transpiling to CommonJS.
 - **`eval` / `Function(...)`** dynamic code is intentionally unsupported
   (sandbox posture).
 - **`RegExp`** is backed by RE2, so backreferences, lookaround, and named
