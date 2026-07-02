@@ -147,6 +147,14 @@ func (i *Interpreter) arrayConstruct(ctx context.Context, this Value, args []Val
 			if float64(n) != float64(length) || length < 0 {
 				return nil, i.throwError(ctx, "RangeError", "Invalid array length")
 			}
+			// gojs backs arrays densely (length == len(elems)), so a valid-but-huge
+			// length like new Array(2**32-1) would eagerly allocate billions of
+			// holes and exhaust host memory — a DoS from a one-line untrusted
+			// script. Refuse lengths past the dense backing limit rather than OOM;
+			// spec-correct sparse arrays of that size are a known unsupported case.
+			if length > maxDenseArrayLen {
+				return nil, i.throwError(ctx, "RangeError", "array length exceeds gojs dense-array limit")
+			}
 			// Array(n) produces a sparse array of n holes, not n undefineds.
 			elems := make([]Value, length)
 			for j := range elems {
