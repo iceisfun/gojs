@@ -2,7 +2,7 @@ module github.com/iceisfun/gojs
 
 go 1.26
 
-require github.com/iceisfun/typescript v0.0.0-20260702205104-672b743d48a1
+require github.com/iceisfun/typescript v0.0.0-20260702205758-291ffa6e82cd
 
 require (
 	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect

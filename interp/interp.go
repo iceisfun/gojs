@@ -19,6 +19,8 @@ package interp
 import (
 	"context"
 	"sync"
+
+	"github.com/iceisfun/gojs/token"
 )
 
 // Interpreter is a single JavaScript runtime instance: a global object and
@@ -45,6 +47,12 @@ type Interpreter struct {
 	clock   TimeProvider
 	os      OsProvider
 	net     NetProvider
+
+	// sourceMapper, when set, maps generated (transpiled) positions in error
+	// stacks back to their original source (e.g. TypeScript). curPos is the
+	// position of the statement currently executing, captured for error frames.
+	sourceMapper SourceMapper
+	curPos       token.Pos
 
 	// security holds opt-in hardening switches (see Security / WithSecurity).
 	security Security
@@ -217,6 +225,23 @@ func WithNetProvider(p NetProvider) Option {
 // NetProvider returns the configured outbound-dial provider, or nil. Networking
 // host packages consult it when building their default client/dialer.
 func (i *Interpreter) NetProvider() NetProvider { return i.net }
+
+// SourceMapper translates a generated (transpiled) source position back to its
+// original position, so error stacks can report original .ts line/column for
+// code that was transpiled to JavaScript (see the ts package). line and column
+// are 1-based; ok is false when the position is not mapped.
+type SourceMapper interface {
+	MapPosition(source string, line, column int) (origSource string, origLine, origColumn int, ok bool)
+}
+
+// WithSourceMapper installs a SourceMapper used to rewrite positions in error
+// stacks back to their original source.
+func WithSourceMapper(m SourceMapper) Option {
+	return func(i *Interpreter) { i.sourceMapper = m }
+}
+
+// SourceMapper returns the configured source mapper, or nil.
+func (i *Interpreter) SourceMapper() SourceMapper { return i.sourceMapper }
 
 // PrintProvider returns the configured console-output sink, or nil. It lets host
 // packages (e.g. host/process's process.stdout) route their output through the

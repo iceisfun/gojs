@@ -1,6 +1,9 @@
 package interp
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // This file implements the Error.prototype.stack accessor (the error-stack
 // accessor proposal). stack is an accessor property of %Error.prototype%; error
@@ -8,6 +11,39 @@ import "context"
 // implementation-defined trace stored in the [[ErrorData]] object's internal
 // slot; the setter follows SetterThatIgnoresPrototypeProperties so that writing
 // through it stamps an own data property on the receiver.
+
+// errorStack builds the initial stack string for a freshly constructed error:
+// "Name: message" plus a source frame for the statement currently executing,
+// mapped back to its original source (e.g. TypeScript) when a SourceMapper is
+// installed. gojs does not yet capture a full call stack, so this is a single
+// best-effort frame — enough to point at the offending .ts line.
+func (i *Interpreter) errorStack(name, message string) string {
+	s := name
+	if message != "" {
+		s += ": " + message
+	}
+	if frame := i.currentFrame(); frame != "" {
+		s += "\n    at " + frame
+	}
+	return s
+}
+
+// currentFrame formats the current execution position as "source:line:column",
+// applying the SourceMapper when one is installed. It returns "" when no
+// position has been recorded.
+func (i *Interpreter) currentFrame() string {
+	p := i.curPos
+	if p.Line <= 0 {
+		return ""
+	}
+	src, line, col := p.Source, p.Line, p.Column
+	if i.sourceMapper != nil {
+		if os, ol, oc, ok := i.sourceMapper.MapPosition(src, line, col); ok {
+			src, line, col = os, ol, oc
+		}
+	}
+	return fmt.Sprintf("%s:%d:%d", src, line, col)
+}
 
 // setErrorStack records the (implementation-defined) stack trace for an error
 // instance in its internal slot, where the get stack accessor finds it.

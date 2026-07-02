@@ -18,6 +18,7 @@ import (
 
 	"github.com/iceisfun/gojs/interp"
 	"github.com/iceisfun/typescript/core"
+	"github.com/iceisfun/typescript/sourcemap"
 	"github.com/iceisfun/typescript/transpiler"
 )
 
@@ -34,6 +35,21 @@ func Transpile(fileName, src string) (js string, err error) {
 		}
 	}()
 	return transpiler.Module(src, transpiler.Options{
+		FileName: fileName,
+		Module:   core.ModuleKindCommonJS,
+		JSX:      strings.HasSuffix(fileName, ".tsx"),
+	})
+}
+
+// transpileWithMap is Transpile plus a v3 source map (generated JS positions ->
+// original TypeScript), used when a Mapper is recording maps for error stacks.
+func transpileWithMap(fileName, src string) (js string, raw *sourcemap.RawSourceMap, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			js, raw, err = "", nil, fmt.Errorf("transpile %s: %v", fileName, r)
+		}
+	}()
+	return transpiler.ModuleWithSourceMap(src, transpiler.Options{
 		FileName: fileName,
 		Module:   core.ModuleKindCommonJS,
 		JSX:      strings.HasSuffix(fileName, ".tsx"),
@@ -63,7 +79,25 @@ func Provider(base interp.ModuleProvider) interp.ModuleProvider {
 	return &provider{base: base}
 }
 
-type provider struct{ base interp.ModuleProvider }
+// WithTypeScript returns the VM options for running TypeScript with
+// source-mapped error stacks: a transpiling module provider over base, plus the
+// matching source mapper so a thrown error's stack reports the original .ts
+// line/column. Compose it with other options:
+//
+//	opts := append(ts.WithTypeScript(base), gojs.WithPrintProvider(pp))
+//	vm := gojs.New(opts...)
+func WithTypeScript(base interp.ModuleProvider) []interp.Option {
+	m := NewMapper()
+	return []interp.Option{
+		interp.WithModuleProvider(&provider{base: base, mapper: m}),
+		interp.WithSourceMapper(m),
+	}
+}
+
+type provider struct {
+	base   interp.ModuleProvider
+	mapper *Mapper // when set, transpile with a source map and record it
+}
 
 func (p *provider) Resolve(ctx context.Context, specifier, referrer string) (string, error) {
 	id, err := p.base.Resolve(ctx, specifier, referrer)
@@ -100,6 +134,14 @@ func (p *provider) Load(ctx context.Context, id string) (string, error) {
 	src, err := p.base.Load(ctx, id)
 	if err != nil || !IsTypeScript(id) {
 		return src, err
+	}
+	if p.mapper != nil {
+		js, raw, err := transpileWithMap(id, src)
+		if err != nil {
+			return "", err
+		}
+		p.mapper.record(id, raw)
+		return js, nil
 	}
 	return Transpile(id, src)
 }

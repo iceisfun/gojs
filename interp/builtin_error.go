@@ -88,11 +88,13 @@ func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 		// caller folds this object's own properties onto the real instance.)
 		obj := NewObject(proto)
 		obj.class = "Error"
+		msg := ""
 		if m := arg(args, 0); !IsUndefined(m) {
 			s, err := i.ToStringV(ctx, m)
 			if err != nil {
 				return nil, err
 			}
+			msg = s
 			obj.SetHidden("message", String(s))
 		}
 		// Options bag: { cause }.
@@ -104,7 +106,7 @@ func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 		}
 		// The stack trace lives in an internal slot, exposed via the
 		// Error.prototype.stack accessor rather than an own data property.
-		setErrorStack(obj, name+": captured stack unavailable")
+		setErrorStack(obj, i.errorStack(name, msg))
 		return obj, nil
 	}
 	return i.newNativeCtor(name, 1, build, build)
@@ -119,7 +121,7 @@ func (i *Interpreter) newError(name, message string) *Object {
 	obj := NewObject(proto)
 	obj.class = "Error"
 	obj.SetHidden("message", String(message))
-	setErrorStack(obj, name+": "+message)
+	setErrorStack(obj, i.errorStack(name, message))
 	return obj
 }
 

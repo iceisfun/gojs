@@ -133,6 +133,12 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 	if err := i.step(); err != nil {
 		return nil, err
 	}
+	// Record the position of the statement being executed, so an error
+	// constructed here can report a source frame (mapped back through a
+	// SourceMapper for transpiled code).
+	if p := stmt.Pos(); p.Line > 0 {
+		i.curPos = p
+	}
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		return i.evalExpr(ctx, s.X, env)

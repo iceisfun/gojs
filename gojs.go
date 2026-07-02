@@ -58,6 +58,13 @@ var (
 	NewDefaultNetProvider = interp.NewDefaultNetProvider
 )
 
+// SourceMapper maps transpiled positions in error stacks back to their original
+// source (e.g. TypeScript). Alias for [interp.SourceMapper].
+type SourceMapper = interp.SourceMapper
+
+// WithSourceMapper installs a source mapper for error-stack positions.
+var WithSourceMapper = interp.WithSourceMapper
+
 // Value type aliases for building/inspecting JavaScript values from Go.
 type (
 	// Object is a JavaScript object (also arrays and functions).
