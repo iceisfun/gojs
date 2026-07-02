@@ -570,17 +570,44 @@ func isHexDigit(ch rune) bool {
 	return isDigit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
 }
 
-// isIdentStart reports whether ch may start an identifier.
+// isIdentStart reports whether ch may start an identifier. It implements the
+// ECMAScript IdentifierStartChar production: '$', '_', or any code point with
+// the Unicode ID_Start property. ID_Start is derived from categories L and Nl
+// plus Other_ID_Start, with Pattern_Syntax and Pattern_White_Space code points
+// (such as U+2E2F VERTICAL TILDE, a Lm letter) removed.
 func isIdentStart(ch rune) bool {
-	return ch == '$' || ch == '_' ||
-		(ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-		(ch > 0x7F && unicode.IsLetter(ch))
+	if ch == '$' || ch == '_' ||
+		(ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+		return true
+	}
+	if ch <= 0x7F {
+		return false
+	}
+	if unicode.In(ch, unicode.Pattern_Syntax, unicode.Pattern_White_Space) {
+		return false
+	}
+	return unicode.In(ch, unicode.L, unicode.Nl, unicode.Other_ID_Start)
 }
 
-// isIdentPart reports whether ch may continue an identifier.
+// isIdentPart reports whether ch may continue an identifier. It implements the
+// ECMAScript IdentifierPartChar production: ID_Start plus the Unicode
+// ID_Continue additions (Mn, Mc, Nd, Pc, Other_ID_Continue) and the ZWNJ/ZWJ
+// joiners U+200C and U+200D.
 func isIdentPart(ch rune) bool {
-	return isIdentStart(ch) || isDigit(ch) ||
-		(ch > 0x7F && (unicode.IsDigit(ch) || unicode.IsMark(ch) || ch == 0x200C || ch == 0x200D))
+	if isIdentStart(ch) || isDigit(ch) {
+		return true
+	}
+	// ZWNJ and ZWJ are permitted in IdentifierPart.
+	if ch == 0x200C || ch == 0x200D {
+		return true
+	}
+	if ch <= 0x7F {
+		return false
+	}
+	if unicode.In(ch, unicode.Pattern_Syntax, unicode.Pattern_White_Space) {
+		return false
+	}
+	return unicode.In(ch, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue)
 }
 
 // isLineTerminator reports whether ch is an ECMAScript line terminator.
