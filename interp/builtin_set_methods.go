@@ -12,22 +12,22 @@ import (
 // Map/Set (OrdinaryCreateFromConstructor's prototype lookup and
 // AddEntriesFromIterable-style iteration with IteratorClose on failure).
 
-// protoFromNewTarget implements the prototype lookup of
-// OrdinaryCreateFromConstructor (§10.1.13): Get(newTarget, "prototype"); if it
-// is an Object use it, otherwise fall back to the intrinsic default.
-func (i *Interpreter) protoFromNewTarget(ctx context.Context, newTarget Value, def *Object) *Object {
+// protoFromNewTarget implements GetPrototypeFromConstructor (§10.1.13): it reads
+// Get(newTarget, "prototype") — propagating an abrupt completion from the getter
+// — and returns the result if it is an Object, otherwise the intrinsic default.
+func (i *Interpreter) protoFromNewTarget(ctx context.Context, newTarget Value, def *Object) (*Object, error) {
 	nt, ok := newTarget.(*Object)
 	if !ok {
-		return def
+		return def, nil
 	}
 	pv, err := nt.GetStr(ctx, "prototype")
 	if err != nil {
-		return def
+		return nil, err
 	}
 	if po, ok := pv.(*Object); ok {
-		return po
+		return po, nil
 	}
-	return def
+	return def, nil
 }
 
 // addFromIterable drives the iterator protocol over iterable, invoking add for

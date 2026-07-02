@@ -56,8 +56,8 @@ type Result struct {
 // noise.
 var unsupportedFeatures = map[string]bool{
 	"Proxy": false, "Reflect": false, "TypedArray": true, "ArrayBuffer": true,
-	"SharedArrayBuffer": true, "Atomics": true, "WeakRef": true,
-	"FinalizationRegistry": true, "Temporal": true, "Intl": true,
+	"SharedArrayBuffer": true, "Atomics": true, "WeakRef": false,
+	"FinalizationRegistry": false, "Temporal": true, "Intl": true,
 	"tail-call-optimization": true, "import-assertions": true,
 	"decorators": true, "explicit-resource-management": true,
 	"IsHTMLDDA": true, "__proto__": false,

@@ -14,14 +14,32 @@ import (
 // ---------------------------------------------------------------------------
 
 // Symbol is a unique, immutable primitive used as a property key. Two symbols
-// are equal only by pointer identity (except registered symbols, not yet
-// implemented).
+// are equal only by pointer identity.
 type Symbol struct {
 	Desc string // optional description, for debugging and Symbol.prototype.toString
 	// HasDesc reports whether a description was supplied. It distinguishes
 	// Symbol() (description undefined) from Symbol("") (empty-string
 	// description), which Symbol.prototype.description must report differently.
 	HasDesc bool
+	// Registered marks a symbol produced by Symbol.for and held in the
+	// GlobalSymbolRegistry. Registered symbols are excluded from CanBeHeldWeakly
+	// (§7.3.11): they can never be reclaimed, so keying a WeakMap/WeakSet or
+	// registering a WeakRef/FinalizationRegistry target with one is a TypeError.
+	Registered bool
+}
+
+// canBeHeldWeakly implements CanBeHeldWeakly (§7.3.11): a value may serve as a
+// weak-collection key, WeakRef target, or FinalizationRegistry target if it is
+// an Object or a Symbol that is not in the GlobalSymbolRegistry.
+func canBeHeldWeakly(v Value) bool {
+	switch x := v.(type) {
+	case *Object:
+		return true
+	case *Symbol:
+		return !x.Registered
+	default:
+		return false
+	}
 }
 
 // Typeof returns "symbol".

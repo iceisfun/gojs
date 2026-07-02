@@ -219,6 +219,8 @@ func (i *Interpreter) initCollections() {
 	i.initSet()
 	i.initWeakMap()
 	i.initWeakSet()
+	i.initWeakRef()
+	i.initFinalizationRegistry()
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +244,11 @@ func (i *Interpreter) initMap() {
 		return nil, i.throwError(ctx, "TypeError", "Constructor Map requires 'new'")
 	}
 	mapConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		obj := NewObject(i.protoFromNewTarget(ctx, newTarget, proto))
+		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		if err != nil {
+			return nil, err
+		}
+		obj := NewObject(proto0)
 		obj.class = "Map"
 		m := &orderedMap{}
 		obj.internal = map[string]any{"Map": m}
@@ -539,7 +545,11 @@ func (i *Interpreter) initSet() {
 		return nil, i.throwError(ctx, "TypeError", "Constructor Set requires 'new'")
 	}
 	setConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		obj := NewObject(i.protoFromNewTarget(ctx, newTarget, proto))
+		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		if err != nil {
+			return nil, err
+		}
+		obj := NewObject(proto0)
 		obj.class = "Set"
 		s := &orderedSet{}
 		obj.internal = map[string]any{"Set": s}
@@ -721,67 +731,79 @@ func (i *Interpreter) initSet() {
 // ---------------------------------------------------------------------------
 
 // initWeakMap builds and registers the WeakMap constructor and
-// WeakMap.prototype. WeakMap supports only object keys; attempting to use a
-// non-object key throws a TypeError. No iteration or size are exposed.
+// WeakMap.prototype. Per §24.3, WeakMap keys must satisfy CanBeHeldWeakly
+// (§7.3.11): an Object or a non-registered Symbol. set() throws a TypeError for
+// any other key; has/get/delete simply report absence (they never throw for an
+// unsuitable key, since such a key can never be present).
 //
 // NOTE: This implementation stores keys by identity in the same orderedMap
-// structure (sameValueZero on *Object pointers matches identity). True weak
-// references would require a finalizer-based approach; this first-pass version
-// keeps things simple, matching the semantics contract but not the GC behavior.
+// structure (sameValueZero matches object/symbol identity). gojs has no
+// GC-finalization hook, so entries are held strongly forever and are never
+// reclaimed. That is a conforming implementation choice — a spec-compliant
+// engine is permitted to never collect (see wontfix/weak-references-never-cleared).
 func (i *Interpreter) initWeakMap() {
 	weakMapProto := NewObject(i.objectProto)
 	weakMapProto.class = "WeakMap"
 
-	// Constructor: new WeakMap(iterable?)
-	wmConstruct := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var obj *Object
-		if o, ok := this.(*Object); ok && o != i.global && o.class == "WeakMap" {
-			obj = o
-		} else {
-			obj = NewObject(weakMapProto)
-			obj.class = "WeakMap"
+	// Constructor: new WeakMap(iterable?). §24.3.1.1. Called without new
+	// (NewTarget undefined) → TypeError.
+	wmCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return nil, i.throwError(ctx, "TypeError", "Constructor WeakMap requires 'new'")
+	}
+	wmConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		proto0, err := i.protoFromNewTarget(ctx, newTarget, weakMapProto)
+		if err != nil {
+			return nil, err
 		}
+		obj := NewObject(proto0)
+		obj.class = "WeakMap"
 		m := &orderedMap{}
 		obj.internal = map[string]any{"WeakMap": m}
 
-		if iterable := arg(args, 0); !IsNullish(iterable) && !IsUndefined(iterable) {
-			err := i.iterate(ctx, iterable, func(item Value) error {
-				var pair []Value
-				if itemObj, ok := item.(*Object); ok && itemObj.isArray {
-					pair = itemObj.denseCopy()
-				} else {
-					if err2 := i.iterate(ctx, item, func(v Value) error {
-						pair = append(pair, v)
-						return nil
-					}); err2 != nil {
-						return i.throwError(ctx, "TypeError", "WeakMap iterable items must be key-value pairs")
-					}
-				}
-				k := arg(pair, 0)
-				if _, ok := k.(*Object); !ok {
-					return i.throwError(ctx, "TypeError", "Invalid value used as weak map key")
-				}
-				m.set(k, arg(pair, 1))
-				return nil
-			})
+		// AddEntriesFromIterable (§24.3.1.1 step 8): read a user-visible adder and
+		// invoke it per [key,value] pair so overrides/side effects are observed.
+		if iterable := arg(args, 0); !IsNullish(iterable) {
+			adder, err := obj.GetStr(ctx, "set")
 			if err != nil {
+				return nil, err
+			}
+			ao, ok := adder.(*Object)
+			if !ok || !ao.IsCallable() {
+				return nil, i.throwError(ctx, "TypeError", "WeakMap: 'set' is not callable")
+			}
+			if err := i.addFromIterable(ctx, iterable, func(item Value) error {
+				itemObj, ok := item.(*Object)
+				if !ok {
+					return i.throwError(ctx, "TypeError", "WeakMap iterable items must be objects")
+				}
+				k, err := itemObj.GetStr(ctx, "0")
+				if err != nil {
+					return err
+				}
+				v, err := itemObj.GetStr(ctx, "1")
+				if err != nil {
+					return err
+				}
+				_, e := i.call(ctx, adder, obj, []Value{k, v})
+				return e
+			}); err != nil {
 				return nil, err
 			}
 		}
 		return obj, nil
 	}
 
-	ctor := i.newNativeCtor("WeakMap", 0, wmConstruct, wmConstruct)
+	ctor := i.newNativeCtor("WeakMap", 0, wmCall, wmConstruct)
 	linkCtor(ctor, weakMapProto)
 
-	// set(key, value) → this — key must be an object
+	// set(key, value) → this — key must be CanBeHeldWeakly.
 	i.defineMethod(weakMapProto, "set", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		m := weakMapSlot(this)
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.set called on incompatible receiver")
 		}
 		k := arg(args, 0)
-		if _, ok := k.(*Object); !ok {
+		if !canBeHeldWeakly(k) {
 			return nil, i.throwError(ctx, "TypeError", "Invalid value used as weak map key")
 		}
 		m.set(k, arg(args, 1))
@@ -793,6 +815,9 @@ func (i *Interpreter) initWeakMap() {
 		m := weakMapSlot(this)
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.get called on incompatible receiver")
+		}
+		if !canBeHeldWeakly(arg(args, 0)) {
+			return Undef, nil
 		}
 		if v, ok := m.get(arg(args, 0)); ok {
 			return v, nil
@@ -806,6 +831,9 @@ func (i *Interpreter) initWeakMap() {
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.has called on incompatible receiver")
 		}
+		if !canBeHeldWeakly(arg(args, 0)) {
+			return False, nil
+		}
 		return Bool(m.has(arg(args, 0))), nil
 	})
 
@@ -815,7 +843,67 @@ func (i *Interpreter) initWeakMap() {
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.delete called on incompatible receiver")
 		}
+		if !canBeHeldWeakly(arg(args, 0)) {
+			return False, nil
+		}
 		return Bool(m.delete(arg(args, 0))), nil
+	})
+
+	// getOrInsert(key, value) → existing or inserted value (Upsert proposal).
+	i.defineMethod(weakMapProto, "getOrInsert", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		m := weakMapSlot(this)
+		if m == nil {
+			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.getOrInsert called on incompatible receiver")
+		}
+		key := arg(args, 0)
+		if !canBeHeldWeakly(key) {
+			return nil, i.throwError(ctx, "TypeError", "Invalid value used as weak map key")
+		}
+		if v, ok := m.get(key); ok {
+			return v, nil
+		}
+		value := arg(args, 1)
+		m.set(key, value)
+		return value, nil
+	})
+
+	// getOrInsertComputed(key, callback) → existing value or the value computed
+	// by callback (Upsert proposal).
+	i.defineMethod(weakMapProto, "getOrInsertComputed", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		m := weakMapSlot(this)
+		if m == nil {
+			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.getOrInsertComputed called on incompatible receiver")
+		}
+		key := arg(args, 0)
+		if !canBeHeldWeakly(key) {
+			return nil, i.throwError(ctx, "TypeError", "Invalid value used as weak map key")
+		}
+		cb, ok := arg(args, 1).(*Object)
+		if !ok || !cb.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "WeakMap.prototype.getOrInsertComputed callback is not callable")
+		}
+		if v, ok := m.get(key); ok {
+			return v, nil
+		}
+		value, err := cb.fn.call(ctx, Undef, []Value{key})
+		if err != nil {
+			return nil, err
+		}
+		// The callback may have mutated the map; re-check before inserting.
+		if idx := m.find(key); idx >= 0 {
+			m.entries[idx].val = value
+		} else {
+			m.set(key, value)
+		}
+		return value, nil
+	})
+
+	// WeakMap.prototype[Symbol.toStringTag] = "WeakMap" (§24.3.3.5).
+	weakMapProto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value:        String("WeakMap"),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
 	})
 
 	i.setGlobalHidden("WeakMap", ctor)
@@ -826,50 +914,61 @@ func (i *Interpreter) initWeakMap() {
 // ---------------------------------------------------------------------------
 
 // initWeakSet builds and registers the WeakSet constructor and
-// WeakSet.prototype. Values must be objects; non-objects throw a TypeError.
-// No iteration or size are exposed.
+// WeakSet.prototype. Per §24.4, values must satisfy CanBeHeldWeakly (§7.3.11):
+// an Object or a non-registered Symbol. add() throws a TypeError otherwise;
+// has/delete report absence without throwing. Like WeakMap, entries are never
+// reclaimed (gojs has no GC-finalization hook — a conforming choice).
 func (i *Interpreter) initWeakSet() {
 	weakSetProto := NewObject(i.objectProto)
 	weakSetProto.class = "WeakSet"
 
-	// Constructor: new WeakSet(iterable?)
-	wsConstruct := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var obj *Object
-		if o, ok := this.(*Object); ok && o != i.global && o.class == "WeakSet" {
-			obj = o
-		} else {
-			obj = NewObject(weakSetProto)
-			obj.class = "WeakSet"
+	// Constructor: new WeakSet(iterable?). §24.4.1.1. Called without new
+	// (NewTarget undefined) → TypeError.
+	wsCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return nil, i.throwError(ctx, "TypeError", "Constructor WeakSet requires 'new'")
+	}
+	wsConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		proto0, err := i.protoFromNewTarget(ctx, newTarget, weakSetProto)
+		if err != nil {
+			return nil, err
 		}
+		obj := NewObject(proto0)
+		obj.class = "WeakSet"
 		s := &orderedSet{}
 		obj.internal = map[string]any{"WeakSet": s}
 
-		if iterable := arg(args, 0); !IsNullish(iterable) && !IsUndefined(iterable) {
-			err := i.iterate(ctx, iterable, func(v Value) error {
-				if _, ok := v.(*Object); !ok {
-					return i.throwError(ctx, "TypeError", "Invalid value used in weak set")
-				}
-				s.add(v)
-				return nil
-			})
+		// §24.4.1.1 step 8: read a user-visible adder ("add") and invoke it per
+		// value so overrides/side effects are observed.
+		if iterable := arg(args, 0); !IsNullish(iterable) {
+			adder, err := obj.GetStr(ctx, "add")
 			if err != nil {
+				return nil, err
+			}
+			ao, ok := adder.(*Object)
+			if !ok || !ao.IsCallable() {
+				return nil, i.throwError(ctx, "TypeError", "WeakSet: 'add' is not callable")
+			}
+			if err := i.addFromIterable(ctx, iterable, func(v Value) error {
+				_, e := i.call(ctx, adder, obj, []Value{v})
+				return e
+			}); err != nil {
 				return nil, err
 			}
 		}
 		return obj, nil
 	}
 
-	ctor := i.newNativeCtor("WeakSet", 0, wsConstruct, wsConstruct)
+	ctor := i.newNativeCtor("WeakSet", 0, wsCall, wsConstruct)
 	linkCtor(ctor, weakSetProto)
 
-	// add(value) → this — value must be an object
+	// add(value) → this — value must be CanBeHeldWeakly.
 	i.defineMethod(weakSetProto, "add", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s := weakSetSlot(this)
 		if s == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakSet.prototype.add called on incompatible receiver")
 		}
 		v := arg(args, 0)
-		if _, ok := v.(*Object); !ok {
+		if !canBeHeldWeakly(v) {
 			return nil, i.throwError(ctx, "TypeError", "Invalid value used in weak set")
 		}
 		s.add(v)
@@ -882,6 +981,9 @@ func (i *Interpreter) initWeakSet() {
 		if s == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakSet.prototype.has called on incompatible receiver")
 		}
+		if !canBeHeldWeakly(arg(args, 0)) {
+			return False, nil
+		}
 		return Bool(s.has(arg(args, 0))), nil
 	})
 
@@ -891,7 +993,18 @@ func (i *Interpreter) initWeakSet() {
 		if s == nil {
 			return nil, i.throwError(ctx, "TypeError", "WeakSet.prototype.delete called on incompatible receiver")
 		}
+		if !canBeHeldWeakly(arg(args, 0)) {
+			return False, nil
+		}
 		return Bool(s.delete(arg(args, 0))), nil
+	})
+
+	// WeakSet.prototype[Symbol.toStringTag] = "WeakSet" (§24.4.3.5).
+	weakSetProto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value:        String("WeakSet"),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
 	})
 
 	i.setGlobalHidden("WeakSet", ctor)
