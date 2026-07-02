@@ -172,6 +172,7 @@ func (i *Interpreter) getIteratorFlattenable(ctx context.Context, obj Value, str
 type iterHelperState struct {
 	done    bool
 	started bool
+	running bool // true while pull is executing; guards against re-entrancy
 	pull    func(ctx context.Context) (Value, bool, error)
 	live    []*iterRecord
 }
@@ -203,11 +204,16 @@ func (i *Interpreter) iteratorHelperNext(ctx context.Context, this Value, _ []Va
 	if st == nil {
 		return nil, i.throwError(ctx, "TypeError", "next called on an incompatible receiver")
 	}
+	if st.running {
+		return nil, i.throwError(ctx, "TypeError", "Iterator Helper is already running")
+	}
 	if st.done {
 		return i.newIterResult(Undef, true), nil
 	}
 	st.started = true
+	st.running = true
 	v, done, err := st.pull(ctx)
+	st.running = false
 	if err != nil {
 		st.done = true
 		return nil, err
@@ -223,6 +229,9 @@ func (i *Interpreter) iteratorHelperReturn(ctx context.Context, this Value, _ []
 	st := helperState(this)
 	if st == nil {
 		return nil, i.throwError(ctx, "TypeError", "return called on an incompatible receiver")
+	}
+	if st.running {
+		return nil, i.throwError(ctx, "TypeError", "Iterator Helper is already running")
 	}
 	if st.done {
 		return i.newIterResult(Undef, true), nil

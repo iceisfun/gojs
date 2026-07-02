@@ -214,6 +214,18 @@ func TestIteratorCallbackErrorClosesSource(t *testing.T) {
 	`)
 }
 
+func TestIteratorHelperReentrancyGuard(t *testing.T) {
+	Expect(t, `
+		var loop = 0, enter = 0;
+		function* g() { while (true) { loop++; yield; } }
+		function mapper() { enter++; iter.next(); }
+		var iter = g().map(mapper);
+		assert.throws(TypeError, function () { iter.next(); }, "re-entrant next throws");
+		assert.sameValue(loop, 1);
+		assert.sameValue(enter, 1);
+	`)
+}
+
 func TestStringIterator(t *testing.T) {
 	Expect(t, `
 		var it = "abc"[Symbol.iterator]();
