@@ -30,16 +30,23 @@ func (b *setBuilder) addRune(r rune) { b.addRange(r, r) }
 // addClassEscape adds the code points denoted by \d \D \w \W \s \S. The negated
 // forms are represented by complementing the positive set over the full code
 // point range, so membership stays a simple range test.
-func (b *setBuilder) addClassEscape(k ClassEscKind) {
+func (b *setBuilder) addClassEscape(k ClassEscKind, foldWord bool) {
+	// Under /iu, GetWordCharacters (§22.2.2.7.3) folds ſ (U+017F) and the Kelvin
+	// sign (U+212A) into the word set (their canonical forms are word chars), so
+	// \W — the complement of that extended set — must exclude them.
+	wr := wordRanges
+	if foldWord {
+		wr = wordFoldRanges
+	}
 	switch k {
 	case EscDigit:
 		b.addRange('0', '9')
 	case EscNotDigit:
 		b.addComplement(digitRanges)
 	case EscWord:
-		b.addRanges(wordRanges)
+		b.addRanges(wr)
 	case EscNotWord:
-		b.addComplement(wordRanges)
+		b.addComplement(wr)
 	case EscSpace:
 		b.addRanges(spaceRanges)
 	case EscNotSpace:
@@ -161,6 +168,10 @@ func subtract(a, b *runeSet) *runeSet {
 var digitRanges = []rrange{{'0', '9'}}
 
 var wordRanges = []rrange{{'0', '9'}, {'A', 'Z'}, {'_', '_'}, {'a', 'z'}}
+
+// wordFoldRanges is wordRanges extended with the two non-ASCII code points whose
+// Unicode simple case fold is an ASCII word character; used only under /iu.
+var wordFoldRanges = []rrange{{'0', '9'}, {'A', 'Z'}, {'_', '_'}, {'a', 'z'}, {0x017F, 0x017F}, {0x212A, 0x212A}}
 
 // spaceRanges is WhiteSpace ∪ LineTerminator (§22.2.2, \s): tab/LF/VT/FF/CR,
 // space, NBSP, the Zs Space_Separator category, LINE/PARAGRAPH SEPARATOR, and

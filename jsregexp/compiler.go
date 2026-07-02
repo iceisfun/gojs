@@ -255,7 +255,7 @@ func (c *compiler) compileClassSet(cs *ClassSet) (charSetV, error) {
 		case ClassRange:
 			b.addRange(it.Lo, it.Hi)
 		case ClassEscape:
-			b.addClassEscape(it.Kind)
+			b.addClassEscape(it.Kind, c.ic && c.u)
 		case ClassProperty:
 			s, err := resolveProperty(it.Name, it.Value)
 			if err != nil {

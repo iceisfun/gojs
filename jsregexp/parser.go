@@ -367,11 +367,15 @@ func (p *parser) parseModifiers() *Modifiers {
 		}
 	}
 	set(true)
+	hasAdd := m.AddI || m.AddM || m.AddS
 	if p.peek() == '-' {
 		p.advance()
 		set(false)
-		if !m.SubI && !m.SubM && !m.SubS {
-			p.fail("expected modifier after '-'")
+		// §22.2.1: for (?flags-flags:...) it is a Syntax Error only when BOTH the
+		// add and remove flag sets are empty. An empty remove set with a non-empty
+		// add set (e.g. (?s-:...)) is valid.
+		if !hasAdd && !m.SubI && !m.SubM && !m.SubS {
+			p.fail("empty regular expression modifiers")
 		}
 	}
 	if p.peek() != ':' {
