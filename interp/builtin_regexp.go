@@ -588,8 +588,9 @@ func (i *Interpreter) newRegExp(ctx context.Context, pattern, flags string) (Val
 	o.internal = map[string]any{"regexp": re}
 	// source and the flag booleans are exposed via RegExp.prototype accessors
 	// (initRegExpAccessors), which read them from the compiled engine. lastIndex
-	// is the sole own data property (writable, non-enumerable, non-configurable).
-	o.SetData("lastIndex", Number(0))
+	// is the sole own data property: RegExpAlloc (§22.2.3.2.1) defines it as
+	// writable but non-enumerable and non-configurable.
+	o.defineOwn(StrKey("lastIndex"), &Property{Value: Number(0), Writable: true})
 	return o, nil
 }
 

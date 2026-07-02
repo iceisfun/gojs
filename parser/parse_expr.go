@@ -414,8 +414,7 @@ func (p *parser) parsePrimary() ast.Expr {
 	case token.REGEX:
 		p.next()
 		flags := regexFlags(tk.Raw)
-		unicode := strings.ContainsRune(flags, 'u') || strings.ContainsRune(flags, 'v')
-		if err := validateRegexpLiteral(tk.Literal, unicode); err != nil {
+		if err := validateRegexpLiteral(tk.Literal, flags); err != nil {
 			p.errorAt(tk.Pos, "%s", err.Error())
 		}
 		return &ast.RegexLit{ValuePos: tk.Pos, Pattern: tk.Literal, Flags: flags, Raw: tk.Raw}
