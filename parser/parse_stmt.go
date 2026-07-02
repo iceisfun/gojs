@@ -123,12 +123,17 @@ func (p *parser) parseBlock() *ast.BlockStmt {
 // runtime (e.g. strict-mode `this` binding).
 func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
 	prevStrict := p.strict
+	// A function body is outside any formal parameter list, so yield/await
+	// suspension checks for the parameter context do not reach in.
+	prevParams := p.inParams
+	p.inParams = false
 	if p.at(token.LBRACE) && p.scanUseStrict(p.idx+1) {
 		p.strict = true
 	}
 	strict := p.strict
 	blk := p.parseBraceBody()
 	p.strict = prevStrict
+	p.inParams = prevParams
 	return blk, strict
 }
 

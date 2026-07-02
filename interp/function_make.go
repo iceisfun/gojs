@@ -28,6 +28,28 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 	}
 	fnObj := NewObject(i.functionProto)
 	fnObj.class = "Function"
+	// A generator/async-generator/async function object's [[Prototype]] is the
+	// matching %…Function.prototype% intrinsic rather than %Function.prototype%,
+	// so its .constructor chain reaches %GeneratorFunction% / etc. Arrow functions
+	// are never generators/async-generators and keep %Function.prototype%.
+	if kind == kindNormal {
+		switch {
+		case def.Generator && def.Async:
+			if i.asyncGenFuncProto != nil {
+				fnObj.SetProto(i.asyncGenFuncProto)
+			}
+		case def.Generator:
+			if i.genFuncProto != nil {
+				fnObj.SetProto(i.genFuncProto)
+			}
+		case def.Async:
+			if i.asyncFuncProto != nil {
+				fnObj.SetProto(i.asyncFuncProto)
+			}
+		}
+	} else if kind == kindArrow && def.Async && i.asyncFuncProto != nil {
+		fnObj.SetProto(i.asyncFuncProto)
+	}
 
 	// A function is strict if its body carries "use strict" or it is lexically
 	// nested in strict code; modules force strict globally.
@@ -117,6 +139,23 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		fnObj.defineOwn(StrKey("prototype"), &Property{Value: proto, Writable: true, Enumerable: false, Configurable: false})
 		fnObj.fn.construct = i.makeConstruct(fnObj, call)
 		fnObj.fn.ctor = true
+	}
+
+	// Generator and async-generator function instances carry an own .prototype
+	// data property whose [[Prototype]] is %GeneratorPrototype% /
+	// %AsyncGeneratorPrototype% (ECMA-262 §27.3/§27.4). It is
+	// { writable:true, enumerable:false, configurable:false }, and unlike an
+	// ordinary function's .prototype it has no "constructor" back-reference. Async
+	// (non-generator) functions have no .prototype at all.
+	if kind == kindNormal && def.Generator {
+		instProto := i.generatorProto
+		if def.Async {
+			instProto = i.asyncGeneratorProto
+		}
+		if instProto != nil {
+			proto := NewObject(instProto)
+			fnObj.defineOwn(StrKey("prototype"), &Property{Value: proto, Writable: true, Enumerable: false, Configurable: false})
+		}
 	}
 
 	// Annex B legacy "caller"/"arguments": only sloppy plain function

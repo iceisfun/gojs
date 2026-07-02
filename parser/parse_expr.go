@@ -108,6 +108,11 @@ func (p *parser) parseAssignExpr() ast.Expr {
 // parseYield parses a yield or yield* expression.
 func (p *parser) parseYield() ast.Expr {
 	kw := p.next() // yield
+	// A YieldExpression may not appear in a generator's formal parameter list
+	// (ECMA-262 UniqueFormalParameters / CreateDynamicFunction).
+	if p.inParams && p.inGenerator {
+		p.errorAt(kw.Pos, "yield expression is not allowed in formal parameters")
+	}
 	y := &ast.YieldExpr{Keyword: kw.Pos}
 	if p.accept(token.STAR) {
 		y.Delegate = true
@@ -187,6 +192,11 @@ func (p *parser) parseUnary() ast.Expr {
 		return &ast.UpdateExpr{OpPos: op.Pos, Op: op.Type, Operand: operand, Prefix: true}
 	case token.AWAIT:
 		op := p.next()
+		// An AwaitExpression may not appear in an async function's formal parameter
+		// list (ECMA-262 CreateDynamicFunction, step for "async"/"async generator").
+		if p.inParams && p.inAsync {
+			p.errorAt(op.Pos, "await expression is not allowed in formal parameters")
+		}
 		operand := p.parseUnary()
 		return &ast.AwaitExpr{Keyword: op.Pos, Argument: operand}
 	}
@@ -426,9 +436,9 @@ func (p *parser) parsePrimary() ast.Expr {
 		// identifier (arrow forms are handled earlier in parseAssignExpr).
 		if p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore {
 			p.next() // async
-			fn := p.parseFunctionExpr(false)
-			fn.Def.Async = true
-			return fn
+			// Parse with async=true so the parameter list is parsed in an async
+			// context (an AwaitExpression in the parameters is an early error).
+			return p.parseFunctionExpr(true)
 		}
 		p.next()
 		return &ast.Ident{NamePos: tk.Pos, Name: "async"}

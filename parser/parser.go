@@ -76,6 +76,14 @@ type parser struct {
 	// function boundary to that function's own kind.
 	inGenerator bool
 	inAsync     bool
+	// inParams is true while parsing a formal parameter list (including default
+	// value initializers), and false inside the function body. Combined with
+	// inGenerator/inAsync it enforces the early errors forbidding a YieldExpression
+	// in a generator's parameters and an AwaitExpression in an async function's
+	// parameters (ECMA-262 CreateDynamicFunction / UniqueFormalParameters). It is
+	// cleared when entering a function body so a nested function/arrow appearing in
+	// a default value has its own (empty) parameter context.
+	inParams bool
 	// superCallOK is true only while parsing the body of a derived class
 	// constructor, where a SuperCall (super(...)) is allowed. It is transparent
 	// through arrow functions but reset at every other function/method boundary

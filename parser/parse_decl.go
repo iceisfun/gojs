@@ -161,7 +161,11 @@ func (p *parser) tryParseArrow() ast.Expr {
 		p.checkStrictSimpleParams(start.Pos, bodyUseStrict, arrow.Params)
 	} else {
 		arrow.Expression = true
+		// A concise body is outside the parameter list.
+		prevParams := p.inParams
+		p.inParams = false
 		arrow.Body = p.parseAssignExpr()
+		p.inParams = prevParams
 	}
 	p.inAsync = prevAsync
 	// Arrow functions never permit duplicate parameter names.
@@ -276,6 +280,9 @@ func (p *parser) checkParamDuplicates(params []ast.Expr, strict bool) {
 
 // parseParams parses a parenthesized formal parameter list.
 func (p *parser) parseParams() []ast.Expr {
+	prevParams := p.inParams
+	p.inParams = true
+	defer func() { p.inParams = prevParams }()
 	p.expect(token.LPAREN)
 	var params []ast.Expr
 	for !p.at(token.RPAREN) && !p.at(token.EOF) {
