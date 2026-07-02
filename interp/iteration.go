@@ -9,8 +9,15 @@ import "context"
 // method and a self-returning Symbol.iterator. next yields (value, ok); ok
 // false signals completion.
 func (i *Interpreter) newIterator(next func() (Value, bool)) *Object {
-	it := NewObject(i.iteratorProto)
-	it.class = "Array Iterator"
+	return i.newIteratorProto(i.iteratorProto, "Array Iterator", next)
+}
+
+// newIteratorProto is newIterator with an explicit [[Prototype]] and class, so
+// callers can hang the iterator off a dedicated intrinsic (e.g.
+// %ArrayIteratorPrototype%) that itself inherits %Iterator.prototype%.
+func (i *Interpreter) newIteratorProto(proto *Object, class string, next func() (Value, bool)) *Object {
+	it := NewObject(proto)
+	it.class = class
 	i.defineMethod(it, "next", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		res := NewObject(i.objectProto)
 		v, ok := next()

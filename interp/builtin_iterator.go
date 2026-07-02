@@ -246,6 +246,15 @@ func (i *Interpreter) iteratorHelperReturn(ctx context.Context, this Value, _ []
 func (i *Interpreter) initIterator() {
 	proto := i.iteratorProto
 
+	// %ArrayIteratorPrototype% — an intermediate prototype so that array (and
+	// Map/Set-shaped) iterators inherit from %Iterator.prototype% one level up,
+	// matching the real prototype chain.
+	arrayIterProto := NewObject(proto)
+	i.arrayIteratorProto = arrayIterProto
+	arrayIterProto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value: String("Array Iterator"), Writable: false, Enumerable: false, Configurable: true,
+	})
+
 	// %IteratorHelperPrototype% — [[Prototype]] is %Iterator.prototype%.
 	helperProto := NewObject(proto)
 	i.iteratorHelperProto = helperProto

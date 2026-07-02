@@ -609,7 +609,7 @@ func (i *Interpreter) arrayKeys(ctx context.Context, this Value, args []Value) (
 		return nil, err
 	}
 	idx := 0
-	return i.newIterator(func() (Value, bool) {
+	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
 		if idx >= len(o.elems) {
 			return Undef, false
 		}
@@ -625,7 +625,7 @@ func (i *Interpreter) arrayValues(ctx context.Context, this Value, args []Value)
 		return nil, err
 	}
 	idx := 0
-	return i.newIterator(func() (Value, bool) {
+	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
 		if idx >= len(o.elems) {
 			return Undef, false
 		}
@@ -642,7 +642,7 @@ func (i *Interpreter) arrayEntries(ctx context.Context, this Value, args []Value
 		return nil, err
 	}
 	idx := 0
-	return i.newIterator(func() (Value, bool) {
+	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
 		if idx >= len(o.elems) {
 			return Undef, false
 		}

@@ -33,10 +33,13 @@ func TestIteratorToStringTagSetter(t *testing.T) {
 		// Setting on the prototype itself throws (emulates non-writable data prop).
 		assert.throws(TypeError, function () { proto[Symbol.toStringTag] = "x"; });
 		assert.throws(TypeError, function () { proto.constructor = 1; });
-		// Setting on an instance creates an own data property.
-		var it = Iterator.from([1]);
+		// Setting on an object that inherits the accessor creates an own data
+		// property (SetterThatIgnoresPrototypeProperties).
+		var it = Object.create(Iterator.prototype);
 		it[Symbol.toStringTag] = "custom";
 		assert.sameValue(Object.getOwnPropertyDescriptor(it, Symbol.toStringTag).value, "custom");
+		it.constructor = "c";
+		assert.sameValue(Object.getOwnPropertyDescriptor(it, "constructor").value, "c");
 	`)
 }
 
