@@ -269,9 +269,14 @@ func (i *Interpreter) taFill(ctx context.Context, this Value, args []Value) (Val
 	if err != nil {
 		return nil, err
 	}
-	// A side effect may have shrunk the view; re-clamp.
-	if l := td.length(); l < length {
-		length = l
+	// The coercions above may have detached or shrunk the view; the spec
+	// re-checks the witness record here and re-clamps the fill range.
+	oob, curLen := td.outOfBounds()
+	if oob {
+		return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.fill called on an out-of-bounds TypedArray")
+	}
+	if curLen < length {
+		length = curLen
 		if end > length {
 			end = length
 		}
@@ -310,34 +315,39 @@ func (i *Interpreter) taCopyWithin(ctx context.Context, this Value, args []Value
 		return nil, err
 	}
 	count := end - start
-	if count > length-target {
-		count = length - target
+	if lim := length - target; count > lim {
+		count = lim
 	}
 	if count <= 0 {
 		return o, nil
 	}
 	// The argument coercions above may have detached or resized the buffer; the
-	// spec re-checks the witness record and re-reads the length here.
+	// spec re-checks the witness record and re-reads the length here, then
+	// re-clamps the copy so it stays within the (possibly smaller) view.
 	oob, curLen := td.outOfBounds()
 	if oob {
 		return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.copyWithin called on an out-of-bounds TypedArray")
 	}
-	if curLen < length {
-		length = curLen
+	if start >= curLen || target >= curLen {
+		return o, nil
 	}
-	// Copy the raw bytes to preserve overlap semantics.
+	if start+count > curLen {
+		count = curLen - start
+	}
+	if target+count > curLen {
+		count = curLen - target
+	}
+	if count <= 0 {
+		return o, nil
+	}
+	// A single overlap-safe byte move (Go's copy behaves like memmove).
 	ab, _ := arrayBufferOf(td.buffer)
 	size := taKinds[td.kind].size
 	base := td.byteOffset
-	for n := 0; n < count; n++ {
-		var from, to int
-		from = start + n
-		to = target + n
-		if from >= length || to >= length || from < 0 || to < 0 {
-			continue
-		}
-		copy(ab.data[base+to*size:base+to*size+size], append([]byte(nil), ab.data[base+from*size:base+from*size+size]...))
-	}
+	src := base + start*size
+	dst := base + target*size
+	n := count * size
+	copy(ab.data[dst:dst+n], ab.data[src:src+n])
 	return o, nil
 }
 
