@@ -341,3 +341,107 @@ func TestDateMonthRollover(t *testing.T) {
 			"Date.UTC month 13 rolls to Feb of next year");
 	`)
 }
+
+// TestDateTimeClip verifies TimeClip: out-of-range values become NaN, -0
+// normalises to +0, and fractional milliseconds are truncated.
+func TestDateTimeClip(t *testing.T) {
+	Expect(t, `
+		assert.sameValue(new Date(8640000000000001).getTime(), NaN, "over max is NaN");
+		assert.sameValue(new Date(-8640000000000001).getTime(), NaN, "under min is NaN");
+		assert.sameValue(new Date(8640000000000000).getTime(), 8640000000000000, "max in range");
+		assert.sameValue(new Date(Infinity).getTime(), NaN, "Infinity is NaN");
+		assert.sameValue(1 / new Date(-0).getTime(), Infinity, "-0 normalises to +0");
+		assert.sameValue(new Date(6.54321).getTime(), 6, "fractional ms truncated");
+	`)
+}
+
+// TestDateInvalidSetters verifies setter semantics on an invalid date: all
+// arguments are coerced first, and the slot is not clobbered by side effects.
+func TestDateInvalidSetters(t *testing.T) {
+	Expect(t, `
+		var d = new Date(NaN);
+		assert.sameValue(d.setHours(0), NaN, "setHours on invalid returns NaN");
+		assert.sameValue(d.getTime(), NaN, "still invalid");
+
+		// coercion happens before the invalid check; a valueOf side effect that
+		// repairs the date must survive.
+		var dt = new Date(NaN);
+		var calls = 0;
+		var v = { valueOf: function () { calls++; dt.setTime(0); return 1; } };
+		var r = dt.setHours(v);
+		assert.sameValue(calls, 1, "valueOf called exactly once");
+		assert.sameValue(r, NaN, "result is NaN");
+		assert.sameValue(dt.getTime(), 0, "slot updated by valueOf, not clobbered");
+
+		// setHours() with no argument coerces undefined -> NaN.
+		var d2 = new Date(0);
+		assert.sameValue(d2.setHours(), NaN, "setHours() with no arg is NaN");
+	`)
+}
+
+// TestDateNewValueTimeClip verifies setters clip overflowing new values to NaN.
+func TestDateNewValueTimeClip(t *testing.T) {
+	Expect(t, `
+		var d = new Date(0);
+		assert.sameValue(d.setMilliseconds(8640000000000001), NaN, "overflow -> NaN");
+		assert.sameValue(d.getTime(), NaN, "slot is NaN after overflow");
+	`)
+}
+
+// TestDateStringFormats verifies the exact toString/toUTCString/toDateString
+// formats, including negative-year padding.
+func TestDateStringFormats(t *testing.T) {
+	Expect(t, `
+		var d = new Date(0);
+		assert.sameValue(d.toString(),
+			"Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)",
+			"toString at epoch");
+		assert.sameValue(d.toUTCString(), "Thu, 01 Jan 1970 00:00:00 GMT",
+			"toUTCString at epoch");
+		assert.sameValue(d.toDateString(), "Thu Jan 01 1970", "toDateString");
+		assert.sameValue(new Date("-000001-07-01T00:00Z").toUTCString().split(" ")[3],
+			"-0001", "negative year padded to at least 4 digits");
+		assert.sameValue(new Date(-8640000000000000).toISOString(),
+			"-271821-04-20T00:00:00.000Z", "min date ISO extended year");
+		assert.sameValue(new Date(8640000000000000).toISOString(),
+			"+275760-09-13T00:00:00.000Z", "max date ISO extended year");
+	`)
+}
+
+// TestDateParseRoundTrip verifies Date.parse handles ISO offsetless date-time,
+// extended-year rejection, and round-trips toString/toUTCString/toISOString.
+func TestDateParseRoundTrip(t *testing.T) {
+	Expect(t, `
+		assert.sameValue(Date.parse("1970-01-01T00:00:00"), 0, "offsetless datetime is UTC here");
+		assert.sameValue(Date.parse("1970-01-01"), 0, "date-only is UTC");
+		assert.sameValue(Date.parse("-000000-03-31T00:45Z"), NaN, "minus-zero extended year rejected");
+		var z = new Date(0);
+		assert.sameValue(Date.parse(z.toString()), 0, "round-trip toString");
+		assert.sameValue(Date.parse(z.toUTCString()), 0, "round-trip toUTCString");
+		assert.sameValue(Date.parse(z.toISOString()), 0, "round-trip toISOString");
+	`)
+}
+
+// TestDateToPrimitiveAndJSON verifies Date[@@toPrimitive] hint handling and
+// that toJSON delegates through the receiver's toISOString.
+func TestDateToPrimitiveAndJSON(t *testing.T) {
+	Expect(t, `
+		var d = new Date(0);
+		assert.sameValue(typeof d[Symbol.toPrimitive], "function", "@@toPrimitive present");
+		assert.sameValue(d[Symbol.toPrimitive]("number"), 0, "number hint");
+		assert.sameValue(d[Symbol.toPrimitive]("string"), d.toString(), "string hint");
+		assert.throws(TypeError, function () { d[Symbol.toPrimitive]("bogus"); }, "invalid hint throws");
+
+		// toJSON delegates to the receiver's toISOString.
+		var called = 0;
+		var obj = { toISOString: function () { called++; return "X"; } };
+		assert.sameValue(Date.prototype.toJSON.call(obj), "X", "toJSON invokes toISOString");
+		assert.sameValue(called, 1, "toISOString called once");
+		assert.sameValue(new Date(NaN).toJSON(), null, "invalid date toJSON is null");
+	`)
+}
+
+// TestDateProtoNoDateValue verifies Date.prototype has no [[DateValue]] slot.
+func TestDateProtoNoDateValue(t *testing.T) {
+	ExpectError(t, `Date.prototype.getTime();`, "TypeError")
+}

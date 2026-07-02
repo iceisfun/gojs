@@ -1,6 +1,6 @@
 package interp
 
-// builtin_date.go — ECMA-262 §20.4 (Date Objects)
+// builtin_date.go — ECMA-262 §21.4 (Date Objects)
 //
 // Date objects store a single internal [[DateValue]] slot as a Number
 // (float64) of milliseconds since the Unix epoch (1 January 1970 00:00:00
@@ -8,10 +8,11 @@ package interp
 //
 // # Timezone note
 //
-// This implementation operates entirely in UTC. The local-time accessor
-// variants (getFullYear, getMonth, …) are aliases for their getUTC*
-// counterparts. getTimezoneOffset() always returns 0. This is documented
-// per method.
+// This implementation operates entirely in UTC. LocalTime(t) == t and
+// UTC(t) == t, so the local-time accessor variants (getFullYear, getMonth, …)
+// are aliases for their getUTC* counterparts and getTimezoneOffset() returns 0
+// for valid dates (NaN for invalid ones). This keeps behaviour deterministic
+// and independent of the host timezone.
 //
 // # Clock gate
 //
@@ -23,128 +24,484 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"time"
+	"strconv"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
-// dateNow — clock-gated "current time in milliseconds" (ECMA-262 §20.4.4.1)
+// Time-value constants (ECMA-262 §21.4.1)
 // ---------------------------------------------------------------------------
 
-// dateNow returns the current time as milliseconds since the Unix epoch. It
-// consults i.clock when the TimeProvider is non-nil; when nil, it returns 0
-// (the Unix epoch) so the sandbox stays deterministic without a real clock.
+const (
+	msPerSecond  = 1000.0
+	msPerMinute  = 60000.0
+	msPerHour    = 3600000.0
+	msPerDay     = 86400000.0
+	maxTimeValue = 8.64e15 // 100,000,000 days either side of the epoch
+)
+
+var weekdayNames = [7]string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+var monthNames = [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+
+// dtFinite reports whether x is neither NaN nor an infinity.
+func dtFinite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
+
+// floorMod implements ECMAScript's modulo (result has the sign of the divisor).
+func floorMod(a, b float64) float64 { return a - b*math.Floor(a/b) }
+
+// ---------------------------------------------------------------------------
+// Abstract time operations (ECMA-262 §21.4.1.3 – §21.4.1.11)
+// ---------------------------------------------------------------------------
+
+func dayNumber(t float64) float64     { return math.Floor(t / msPerDay) }
+func timeWithinDay(t float64) float64 { return floorMod(t, msPerDay) }
+
+func daysInYear(y float64) float64 {
+	switch {
+	case math.Mod(y, 4) != 0:
+		return 365
+	case math.Mod(y, 100) != 0:
+		return 366
+	case math.Mod(y, 400) != 0:
+		return 365
+	default:
+		return 366
+	}
+}
+
+func dayFromYear(y float64) float64 {
+	return 365*(y-1970) + math.Floor((y-1969)/4) - math.Floor((y-1901)/100) + math.Floor((y-1601)/400)
+}
+
+func timeFromYear(y float64) float64 { return msPerDay * dayFromYear(y) }
+
+func yearFromTime(t float64) float64 {
+	y := math.Floor(t/(msPerDay*365.2425)) + 1970
+	for timeFromYear(y) > t {
+		y--
+	}
+	for timeFromYear(y+1) <= t {
+		y++
+	}
+	return y
+}
+
+func inLeapYear(t float64) bool { return daysInYear(yearFromTime(t)) == 366 }
+
+func dayWithinYear(t float64) float64 { return dayNumber(t) - dayFromYear(yearFromTime(t)) }
+
+// monthAndDate returns the 0-based month and 1-based day of month for t.
+func monthAndDate(t float64) (int, int) {
+	d := int(dayWithinYear(t))
+	feb := 28
+	if inLeapYear(t) {
+		feb = 29
+	}
+	months := [12]int{31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	m := 0
+	for m < 12 && d >= months[m] {
+		d -= months[m]
+		m++
+	}
+	if m > 11 {
+		m = 11
+	}
+	return m, d + 1
+}
+
+func monthFromTime(t float64) int { m, _ := monthAndDate(t); return m }
+func dateFromTime(t float64) int  { _, d := monthAndDate(t); return d }
+
+func weekDay(t float64) int      { return int(floorMod(dayNumber(t)+4, 7)) }
+func hourFromTime(t float64) int { return int(floorMod(math.Floor(t/msPerHour), 24)) }
+func minFromTime(t float64) int  { return int(floorMod(math.Floor(t/msPerMinute), 60)) }
+func secFromTime(t float64) int  { return int(floorMod(math.Floor(t/msPerSecond), 60)) }
+func msFromTime(t float64) int   { return int(floorMod(t, 1000)) }
+
+// ---------------------------------------------------------------------------
+// MakeTime / MakeDay / MakeDate / TimeClip (ECMA-262 §21.4.1.12 – §21.4.1.15)
+// ---------------------------------------------------------------------------
+
+func makeTime(hour, min, sec, ms float64) float64 {
+	if !dtFinite(hour) || !dtFinite(min) || !dtFinite(sec) || !dtFinite(ms) {
+		return math.NaN()
+	}
+	h := math.Trunc(hour)
+	m := math.Trunc(min)
+	s := math.Trunc(sec)
+	milli := math.Trunc(ms)
+	return ((h*msPerHour + m*msPerMinute) + s*msPerSecond) + milli
+}
+
+func makeDay(year, month, date float64) float64 {
+	if !dtFinite(year) || !dtFinite(month) || !dtFinite(date) {
+		return math.NaN()
+	}
+	y := math.Trunc(year)
+	m := math.Trunc(month)
+	dt := math.Trunc(date)
+	ym := y + math.Floor(m/12)
+	if !dtFinite(ym) {
+		return math.NaN()
+	}
+	mn := int(floorMod(m, 12))
+	feb := 28.0
+	if daysInYear(ym) == 366 {
+		feb = 29
+	}
+	monthDays := [12]float64{31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	days := dayFromYear(ym)
+	for i := 0; i < mn; i++ {
+		days += monthDays[i]
+	}
+	return days + dt - 1
+}
+
+func makeDate(day, time float64) float64 {
+	if !dtFinite(day) || !dtFinite(time) {
+		return math.NaN()
+	}
+	return day*msPerDay + time
+}
+
+func timeClip(t float64) float64 {
+	if !dtFinite(t) {
+		return math.NaN()
+	}
+	if math.Abs(t) > maxTimeValue {
+		return math.NaN()
+	}
+	// ToIntegerOrInfinity truncates; adding +0 normalises -0 to +0.
+	return math.Trunc(t) + 0
+}
+
+// yearPromote applies the two-digit year offset used by the multi-argument
+// Date constructor and Date.UTC: ToInteger(y) ∈ [0, 99] ⇒ 1900 + ToInteger(y).
+func yearPromote(y float64) float64 {
+	if math.IsNaN(y) {
+		return y
+	}
+	yi := math.Trunc(y)
+	if yi >= 0 && yi <= 99 {
+		return 1900 + yi
+	}
+	return y
+}
+
+// ---------------------------------------------------------------------------
+// String formatting (ECMA-262 §21.4.4.41.1 – §21.4.4.41.4)
+// ---------------------------------------------------------------------------
+
+// yearStr formats a signed year zero-padded to at least four digits.
+func yearStr(y int) string {
+	sign := ""
+	if y < 0 {
+		sign = "-"
+		y = -y
+	}
+	return fmt.Sprintf("%s%04d", sign, y)
+}
+
+func dateString(t float64) string {
+	m, d := monthAndDate(t)
+	return fmt.Sprintf("%s %s %02d %s",
+		weekdayNames[weekDay(t)], monthNames[m], d, yearStr(int(yearFromTime(t))))
+}
+
+func timeString(t float64) string {
+	return fmt.Sprintf("%02d:%02d:%02d GMT", hourFromTime(t), minFromTime(t), secFromTime(t))
+}
+
+// timeZoneString is "+0000 (Coordinated Universal Time)" in this UTC runtime.
+func timeZoneString() string { return "+0000 (Coordinated Universal Time)" }
+
+func dateToString(t float64) string {
+	return dateString(t) + " " + timeString(t) + timeZoneString()
+}
+
+func dateToUTCString(t float64) string {
+	m, d := monthAndDate(t)
+	return fmt.Sprintf("%s, %02d %s %s %s",
+		weekdayNames[weekDay(t)], d, monthNames[m], yearStr(int(yearFromTime(t))), timeString(t))
+}
+
+// dateToISO formats t as an ISO 8601 / UTC string with millisecond precision.
+// Years in [0, 9999] use four digits; others use a signed six-digit form.
+func dateToISO(t float64) string {
+	y := int(yearFromTime(t))
+	var ys string
+	if y >= 0 && y <= 9999 {
+		ys = fmt.Sprintf("%04d", y)
+	} else {
+		sign := "+"
+		ay := y
+		if y < 0 {
+			sign = "-"
+			ay = -y
+		}
+		ys = fmt.Sprintf("%s%06d", sign, ay)
+	}
+	m, d := monthAndDate(t)
+	return fmt.Sprintf("%s-%02d-%02dT%02d:%02d:%02d.%03dZ",
+		ys, m+1, d, hourFromTime(t), minFromTime(t), secFromTime(t), msFromTime(t))
+}
+
+// ---------------------------------------------------------------------------
+// Date parsing (ECMA-262 §21.4.3.2 / §21.4.1.15)
+// ---------------------------------------------------------------------------
+
+func allDigits(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func atoiField(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// parseDate parses a string as a date, returning a time value or NaN.
+func parseDate(s string) float64 {
+	if ms, ok := parseISO(s); ok {
+		return ms
+	}
+	if ms, ok := parseLegacy(s); ok {
+		return ms
+	}
+	return math.NaN()
+}
+
+// parseISO parses the Date Time String Format of §21.4.1.15, including the
+// expanded (signed six-digit) year form.
+func parseISO(s string) (float64, bool) {
+	i, n := 0, len(s)
+
+	neg, extended := false, false
+	if i < n && (s[i] == '+' || s[i] == '-') {
+		extended = true
+		neg = s[i] == '-'
+		i++
+	}
+	yDigits := 4
+	if extended {
+		yDigits = 6
+	}
+	if i+yDigits > n || !allDigits(s[i:i+yDigits]) {
+		return 0, false
+	}
+	year := atoiField(s[i : i+yDigits])
+	if neg {
+		if year == 0 {
+			return 0, false // "-000000" is an invalid extended year
+		}
+		year = -year
+	}
+	i += yDigits
+
+	month, day := 1, 1
+	if i < n && s[i] == '-' {
+		i++
+		if i+2 > n || !allDigits(s[i:i+2]) {
+			return 0, false
+		}
+		month = atoiField(s[i : i+2])
+		i += 2
+		if month < 1 || month > 12 {
+			return 0, false
+		}
+		if i < n && s[i] == '-' {
+			i++
+			if i+2 > n || !allDigits(s[i:i+2]) {
+				return 0, false
+			}
+			day = atoiField(s[i : i+2])
+			i += 2
+			if day < 1 || day > 31 {
+				return 0, false
+			}
+		}
+	}
+
+	hasTime := false
+	hour, minute, sec, ms := 0, 0, 0, 0
+	tzKnown := false
+	offset := 0
+	if i < n && s[i] == 'T' {
+		hasTime = true
+		i++
+		if i+2 > n || !allDigits(s[i:i+2]) {
+			return 0, false
+		}
+		hour = atoiField(s[i : i+2])
+		i += 2
+		if i >= n || s[i] != ':' {
+			return 0, false
+		}
+		i++
+		if i+2 > n || !allDigits(s[i:i+2]) {
+			return 0, false
+		}
+		minute = atoiField(s[i : i+2])
+		i += 2
+		if i < n && s[i] == ':' {
+			i++
+			if i+2 > n || !allDigits(s[i:i+2]) {
+				return 0, false
+			}
+			sec = atoiField(s[i : i+2])
+			i += 2
+			if i < n && s[i] == '.' {
+				i++
+				if i+3 > n || !allDigits(s[i:i+3]) {
+					return 0, false
+				}
+				ms = atoiField(s[i : i+3])
+				i += 3
+			}
+		}
+		if i < n {
+			switch s[i] {
+			case 'Z':
+				tzKnown = true
+				offset = 0
+				i++
+			case '+', '-':
+				sign := 1
+				if s[i] == '-' {
+					sign = -1
+				}
+				i++
+				if i+2 > n || !allDigits(s[i:i+2]) {
+					return 0, false
+				}
+				oh := atoiField(s[i : i+2])
+				i += 2
+				if i >= n || s[i] != ':' {
+					return 0, false
+				}
+				i++
+				if i+2 > n || !allDigits(s[i:i+2]) {
+					return 0, false
+				}
+				om := atoiField(s[i : i+2])
+				i += 2
+				if oh > 23 || om > 59 {
+					return 0, false
+				}
+				tzKnown = true
+				offset = sign * (oh*60 + om)
+			}
+		}
+	}
+	if i != n {
+		return 0, false
+	}
+
+	// Field range validation.
+	if hour == 24 {
+		if minute != 0 || sec != 0 || ms != 0 {
+			return 0, false
+		}
+	} else if hour > 23 {
+		return 0, false
+	}
+	if minute > 59 || sec > 59 {
+		return 0, false
+	}
+
+	dv := makeDate(
+		makeDay(float64(year), float64(month-1), float64(day)),
+		makeTime(float64(hour), float64(minute), float64(sec), float64(ms)),
+	)
+	// Date-time forms with an explicit offset are shifted to UTC. Offsetless
+	// forms are UTC for date-only strings and local (== UTC here) otherwise.
+	if hasTime && tzKnown {
+		dv -= float64(offset) * msPerMinute
+	}
+	return timeClip(dv), true
+}
+
+func monthIndex(name string) int {
+	for i, m := range monthNames {
+		if m == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// parseLegacy recognises the output of Date.prototype.toString and
+// Date.prototype.toUTCString so those round-trip through Date.parse.
+func parseLegacy(s string) (float64, bool) {
+	f := strings.Fields(s)
+	if len(f) < 6 {
+		return 0, false
+	}
+	var monthStr, dayStr, yearStr, timeStr string
+	offset := 0
+	if strings.HasSuffix(f[0], ",") {
+		// "Www, dd Mmm yyyy HH:MM:SS GMT"
+		dayStr, monthStr, yearStr, timeStr = f[1], f[2], f[3], f[4]
+		if f[5] != "GMT" {
+			return 0, false
+		}
+	} else {
+		// "Www Mmm dd yyyy HH:MM:SS GMT+0000 (...)"
+		monthStr, dayStr, yearStr, timeStr = f[1], f[2], f[3], f[4]
+		tz := f[5]
+		if !strings.HasPrefix(tz, "GMT") {
+			return 0, false
+		}
+		rest := tz[3:]
+		if rest != "" {
+			if len(rest) != 5 || (rest[0] != '+' && rest[0] != '-') ||
+				!allDigits(rest[1:3]) || !allDigits(rest[3:5]) {
+				return 0, false
+			}
+			sign := 1
+			if rest[0] == '-' {
+				sign = -1
+			}
+			offset = sign * (atoiField(rest[1:3])*60 + atoiField(rest[3:5]))
+		}
+	}
+
+	mo := monthIndex(monthStr)
+	if mo < 0 || !allDigits(dayStr) {
+		return 0, false
+	}
+	year, err := strconv.Atoi(yearStr)
+	if err != nil {
+		return 0, false
+	}
+	tp := strings.Split(timeStr, ":")
+	if len(tp) != 3 || !allDigits(tp[0]) || !allDigits(tp[1]) || !allDigits(tp[2]) {
+		return 0, false
+	}
+	dv := makeDate(
+		makeDay(float64(year), float64(mo), float64(atoiField(dayStr))),
+		makeTime(float64(atoiField(tp[0])), float64(atoiField(tp[1])), float64(atoiField(tp[2])), 0),
+	)
+	dv -= float64(offset) * msPerMinute
+	return timeClip(dv), true
+}
+
+// ---------------------------------------------------------------------------
+// dateNow — clock-gated "current time in milliseconds" (ECMA-262 §21.4.4.1)
+// ---------------------------------------------------------------------------
+
 func (i *Interpreter) dateNow(ctx context.Context) float64 {
 	if i.clock != nil {
 		return float64(i.clock.Now(ctx).UnixMilli())
 	}
 	return 0
-}
-
-// ---------------------------------------------------------------------------
-// utcTime — milliseconds → UTC time.Time
-// ---------------------------------------------------------------------------
-
-// utcTime converts a [[DateValue]] millisecond timestamp to a UTC time.Time
-// for field extraction. NaN and ±Inf produce the zero value of time.Time;
-// callers must guard against NaN before calling this.
-func utcTime(ms float64) time.Time {
-	if math.IsNaN(ms) || math.IsInf(ms, 0) {
-		return time.Time{}
-	}
-	return time.UnixMilli(int64(ms)).UTC()
-}
-
-// ---------------------------------------------------------------------------
-// setDateMs — mutate a Date object's [[DateValue]]
-// ---------------------------------------------------------------------------
-
-// setDateMs stores ms into the Date object's primitive slot and returns ms as
-// a Number, matching the return-value convention of all set* methods.
-func setDateMs(obj *Object, ms float64) Value {
-	obj.primitive = Number(ms)
-	return Number(ms)
-}
-
-// ---------------------------------------------------------------------------
-// dateParseStr — string → milliseconds (ECMA-262 §20.4.1.15)
-// ---------------------------------------------------------------------------
-
-// dateParseStr parses s as an ISO 8601 / RFC 3339 date string, returning the
-// corresponding millisecond timestamp or NaN on failure.
-//
-// Layouts tried in order:
-//  1. RFC 3339 with sub-second precision — "2006-01-02T15:04:05.999999999Z07:00"
-//  2. RFC 3339                           — "2006-01-02T15:04:05Z07:00"
-//  3. Date-only UTC                      — "2006-01-02"
-func dateParseStr(s string) float64 {
-	layouts := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02",
-	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return float64(t.UnixMilli())
-		}
-	}
-	return math.NaN()
-}
-
-// ---------------------------------------------------------------------------
-// dateConstruct — multi-arg construction (ECMA-262 §20.4.1.15 MakeDate)
-// ---------------------------------------------------------------------------
-
-// dateConstruct builds a [[DateValue]] from two or more arguments in the form
-// Date(year, month[, day[, hours[, minutes[, seconds[, ms]]]]]).  month is
-// 0-based (0 = January). If year is an integer in [0, 99] it is promoted to
-// 1900+year per §20.4.1.15. All fields default to 0/1 when omitted.
-func dateConstruct(year, month float64, rest ...float64) float64 {
-	yr := int(year)
-	// Promote two-digit years (§20.4.1.15): if ToInteger(y) ∈ [0, 99], use 1900+y.
-	if !math.IsNaN(year) && float64(yr) == year && yr >= 0 && yr <= 99 {
-		yr += 1900
-	}
-
-	// month is 0-based; Go's time.Month is 1-based.
-	mo := int(month) + 1
-	day := 1
-	hours, minutes, seconds, millis := 0, 0, 0, 0
-
-	if len(rest) > 0 {
-		day = int(rest[0])
-	}
-	if len(rest) > 1 {
-		hours = int(rest[1])
-	}
-	if len(rest) > 2 {
-		minutes = int(rest[2])
-	}
-	if len(rest) > 3 {
-		seconds = int(rest[3])
-	}
-	if len(rest) > 4 {
-		millis = int(rest[4])
-	}
-
-	t := time.Date(yr, time.Month(mo), day, hours, minutes, seconds,
-		millis*int(time.Millisecond), time.UTC)
-	return float64(t.UnixMilli())
-}
-
-// ---------------------------------------------------------------------------
-// dateToISO — toISOString implementation (ECMA-262 §20.4.4.36)
-// ---------------------------------------------------------------------------
-
-// dateToISO formats ms as an ISO 8601 / UTC string with millisecond
-// precision, e.g. "2009-11-10T23:00:00.000Z". Years outside [0000, 9999] are
-// not zero-padded to six digits in this implementation.
-func dateToISO(ms float64) string {
-	t := utcTime(ms)
-	return fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
-		t.Year(), int(t.Month()), t.Day(),
-		t.Hour(), t.Minute(), t.Second(),
-		t.Nanosecond()/1_000_000,
-	)
 }
 
 // ---------------------------------------------------------------------------
@@ -154,17 +511,14 @@ func dateToISO(ms float64) string {
 // initDate installs the Date constructor and Date.prototype on the global
 // object. It is called once from bootstrap.
 //
-// ECMA-262 §20.4
+// ECMA-262 §21.4
 func (i *Interpreter) initDate() {
 	proto := i.dateProto
-	proto.class = "Date"
-	// Date.prototype itself has [[DateValue]] = NaN (§20.4.4).
-	proto.primitive = Number(math.NaN())
+	// Date.prototype is an ordinary object: it is NOT a Date instance and has
+	// no [[DateValue]] slot (§21.4.4).
 
-	// requireDate asserts that this is a Date object and returns its
-	// [[DateValue]] and the object. Returns a TypeError when this is not a
-	// Date. When the [[DateValue]] is absent (which should not happen for
-	// normally constructed dates) NaN is returned.
+	// requireDate implements thisTimeValue: it returns the [[DateValue]] of a
+	// genuine Date instance, or a TypeError for any other receiver.
 	requireDate := func(ctx context.Context, this Value, method string) (float64, *Object, error) {
 		obj, ok := this.(*Object)
 		if !ok || obj.class != "Date" {
@@ -178,10 +532,29 @@ func (i *Interpreter) initDate() {
 		return float64(n), obj, nil
 	}
 
-	// -------------------------------------------------------------------------
-	// Date.prototype — getTime / valueOf (§20.4.4.4 / §20.4.4.38)
-	// -------------------------------------------------------------------------
+	// setDV stores ms into the Date object's slot and returns it as a Number.
+	setDV := func(obj *Object, ms float64) Value {
+		obj.primitive = Number(ms)
+		return Number(ms)
+	}
 
+	// getter builds a field-extraction method that returns NaN for invalid dates.
+	getter := func(name string, extract func(t float64) float64) {
+		i.defineMethod(proto, name, 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+			ms, _, err := requireDate(ctx, this, name)
+			if err != nil {
+				return nil, err
+			}
+			if math.IsNaN(ms) {
+				return Number(math.NaN()), nil
+			}
+			return Number(extract(ms)), nil
+		})
+	}
+
+	// -------------------------------------------------------------------------
+	// getTime / valueOf (§21.4.4.10 / §21.4.4.44)
+	// -------------------------------------------------------------------------
 	getTimeFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		ms, _, err := requireDate(ctx, this, "getTime")
 		if err != nil {
@@ -193,249 +566,51 @@ func (i *Interpreter) initDate() {
 	i.defineMethod(proto, "valueOf", 0, getTimeFn)
 
 	// -------------------------------------------------------------------------
-	// Date.prototype — year getters (§20.4.4.4 / §20.4.4.14)
-	// Note: getFullYear is implemented as UTC (see file-level timezone note).
+	// Field getters (local == UTC in this runtime)
 	// -------------------------------------------------------------------------
+	yearOf := func(t float64) float64 { return yearFromTime(t) }
+	monthOf := func(t float64) float64 { return float64(monthFromTime(t)) }
+	dateOf := func(t float64) float64 { return float64(dateFromTime(t)) }
+	dayOf := func(t float64) float64 { return float64(weekDay(t)) }
+	hourOf := func(t float64) float64 { return float64(hourFromTime(t)) }
+	minOf := func(t float64) float64 { return float64(minFromTime(t)) }
+	secOf := func(t float64) float64 { return float64(secFromTime(t)) }
+	msOf := func(t float64) float64 { return float64(msFromTime(t)) }
 
-	// getFullYear — §20.4.4.4
-	i.defineMethod(proto, "getFullYear", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getFullYear")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Year())), nil
-	})
+	getter("getFullYear", yearOf)
+	getter("getUTCFullYear", yearOf)
+	getter("getMonth", monthOf)
+	getter("getUTCMonth", monthOf)
+	getter("getDate", dateOf)
+	getter("getUTCDate", dateOf)
+	getter("getDay", dayOf)
+	getter("getUTCDay", dayOf)
+	getter("getHours", hourOf)
+	getter("getUTCHours", hourOf)
+	getter("getMinutes", minOf)
+	getter("getUTCMinutes", minOf)
+	getter("getSeconds", secOf)
+	getter("getUTCSeconds", secOf)
+	getter("getMilliseconds", msOf)
+	getter("getUTCMilliseconds", msOf)
 
-	// getUTCFullYear — §20.4.4.14
-	i.defineMethod(proto, "getUTCFullYear", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCFullYear")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Year())), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — month getters (§20.4.4.8 / §20.4.4.18, 0-based)
-	// -------------------------------------------------------------------------
-
-	// getMonth — §20.4.4.8
-	i.defineMethod(proto, "getMonth", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getMonth")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Month() - 1)), nil
-	})
-
-	// getUTCMonth — §20.4.4.18
-	i.defineMethod(proto, "getUTCMonth", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCMonth")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Month() - 1)), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — day-of-month getters (§20.4.4.2 / §20.4.4.12, 1-based)
-	// -------------------------------------------------------------------------
-
-	// getDate — §20.4.4.2
-	i.defineMethod(proto, "getDate", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getDate")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Day())), nil
-	})
-
-	// getUTCDate — §20.4.4.12
-	i.defineMethod(proto, "getUTCDate", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCDate")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Day())), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — day-of-week getters (§20.4.4.3 / §20.4.4.13, 0=Sunday)
-	// -------------------------------------------------------------------------
-
-	// getDay — §20.4.4.3
-	i.defineMethod(proto, "getDay", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getDay")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Weekday())), nil
-	})
-
-	// getUTCDay — §20.4.4.13
-	i.defineMethod(proto, "getUTCDay", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCDay")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Weekday())), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — hours getters (§20.4.4.5 / §20.4.4.15)
-	// -------------------------------------------------------------------------
-
-	// getHours — §20.4.4.5
-	i.defineMethod(proto, "getHours", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getHours")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Hour())), nil
-	})
-
-	// getUTCHours — §20.4.4.15
-	i.defineMethod(proto, "getUTCHours", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCHours")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Hour())), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — minutes getters (§20.4.4.9 / §20.4.4.19)
-	// -------------------------------------------------------------------------
-
-	// getMinutes — §20.4.4.9
-	i.defineMethod(proto, "getMinutes", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getMinutes")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Minute())), nil
-	})
-
-	// getUTCMinutes — §20.4.4.19
-	i.defineMethod(proto, "getUTCMinutes", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCMinutes")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Minute())), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — seconds getters (§20.4.4.10 / §20.4.4.20)
-	// -------------------------------------------------------------------------
-
-	// getSeconds — §20.4.4.10
-	i.defineMethod(proto, "getSeconds", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getSeconds")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Second())), nil
-	})
-
-	// getUTCSeconds — §20.4.4.20
-	i.defineMethod(proto, "getUTCSeconds", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCSeconds")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Second())), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — milliseconds getters (§20.4.4.6 / §20.4.4.16)
-	// -------------------------------------------------------------------------
-
-	// getMilliseconds — §20.4.4.6
-	i.defineMethod(proto, "getMilliseconds", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getMilliseconds")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Nanosecond() / 1_000_000)), nil
-	})
-
-	// getUTCMilliseconds — §20.4.4.16
-	i.defineMethod(proto, "getUTCMilliseconds", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "getUTCMilliseconds")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return Number(math.NaN()), nil
-		}
-		return Number(float64(utcTime(ms).Nanosecond() / 1_000_000)), nil
-	})
-
-	// -------------------------------------------------------------------------
-	// Date.prototype — timezone (§20.4.4.11)
-	// -------------------------------------------------------------------------
-
-	// getTimezoneOffset — §20.4.4.11. Always returns 0: this runtime operates
-	// in UTC (see file-level timezone note).
+	// getTimezoneOffset — §21.4.4.11. 0 for valid dates, NaN for invalid ones.
 	i.defineMethod(proto, "getTimezoneOffset", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		_, _, err := requireDate(ctx, this, "getTimezoneOffset")
+		ms, _, err := requireDate(ctx, this, "getTimezoneOffset")
 		if err != nil {
 			return nil, err
+		}
+		if math.IsNaN(ms) {
+			return Number(math.NaN()), nil
 		}
 		return Number(0), nil
 	})
 
 	// -------------------------------------------------------------------------
-	// Date.prototype — setter methods
+	// Setters
 	// -------------------------------------------------------------------------
 
-	// setTime — §20.4.4.27
+	// setTime — §21.4.4.27
 	i.defineMethod(proto, "setTime", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		_, obj, err := requireDate(ctx, this, "setTime")
 		if err != nil {
@@ -445,43 +620,88 @@ func (i *Interpreter) initDate() {
 		if err != nil {
 			return nil, err
 		}
-		return setDateMs(obj, v), nil
+		return setDV(obj, timeClip(v)), nil
 	})
 
-	// setFullYear — §20.4.4.22  (year[, month[, date]])
-	// Note: does NOT apply the 0-99 promotion; sets the exact Gregorian year.
-	i.defineMethod(proto, "setFullYear", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setFullYear")
-		if err != nil {
-			return nil, err
-		}
-		yr, err := i.argNum(ctx, args, 0)
-		if err != nil {
-			return nil, err
-		}
-		t := utcTime(cur)
-		mo, day := t.Month(), t.Day()
-		if len(args) > 1 {
-			m, err := i.argNum(ctx, args, 1)
+	// setTimeOfDay backs setHours/setMinutes/setSeconds/setMilliseconds. field
+	// is the index (0=hour…3=ms) of the first (mandatory) argument. All present
+	// arguments are coerced before the invalid-date check per §21.4.4.
+	setTimeOfDay := func(name string, field, length int) {
+		fn := func(ctx context.Context, this Value, args []Value) (Value, error) {
+			t, obj, err := requireDate(ctx, this, name)
 			if err != nil {
 				return nil, err
 			}
-			mo = time.Month(int(m) + 1)
-		}
-		if len(args) > 2 {
-			d, err := i.argNum(ctx, args, 2)
-			if err != nil {
-				return nil, err
+			// vals[0..3] correspond to hour, min, sec, ms. present[k] records
+			// whether an argument was supplied for that slot.
+			var vals [4]float64
+			var present [4]bool
+			for k := field; k < 4; k++ {
+				argIdx := k - field
+				// The first (mandatory) argument is always coerced — even when
+				// absent, yielding ToNumber(undefined) = NaN.
+				if k == field || argIdx < len(args) {
+					v, err := i.argNum(ctx, args, argIdx)
+					if err != nil {
+						return nil, err
+					}
+					vals[k] = v
+					present[k] = true
+				}
 			}
-			day = int(d)
+			// If the stored time is NaN, return NaN without mutating the slot:
+			// argument coercion above may have replaced it via a side effect.
+			if math.IsNaN(t) {
+				return Number(math.NaN()), nil
+			}
+			if !present[0] {
+				vals[0] = float64(hourFromTime(t))
+			}
+			if !present[1] {
+				vals[1] = float64(minFromTime(t))
+			}
+			if !present[2] {
+				vals[2] = float64(secFromTime(t))
+			}
+			if !present[3] {
+				vals[3] = float64(msFromTime(t))
+			}
+			date := makeDate(dayNumber(t), makeTime(vals[0], vals[1], vals[2], vals[3]))
+			return setDV(obj, timeClip(date)), nil
 		}
-		nt := time.Date(int(yr), mo, day, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
+		i.defineMethod(proto, name, length, fn)
+	}
+	setTimeOfDay("setHours", 0, 4)
+	setTimeOfDay("setUTCHours", 0, 4)
+	setTimeOfDay("setMinutes", 1, 3)
+	setTimeOfDay("setUTCMinutes", 1, 3)
+	setTimeOfDay("setSeconds", 2, 2)
+	setTimeOfDay("setUTCSeconds", 2, 2)
+	setTimeOfDay("setMilliseconds", 3, 1)
+	setTimeOfDay("setUTCMilliseconds", 3, 1)
 
-	// setMonth — §20.4.4.26  (month[, date])
-	i.defineMethod(proto, "setMonth", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setMonth")
+	// setDate — §21.4.4.20
+	setDateFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		t, obj, err := requireDate(ctx, this, "setDate")
+		if err != nil {
+			return nil, err
+		}
+		dt, err := i.argNum(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		if math.IsNaN(t) {
+			return Number(math.NaN()), nil
+		}
+		date := makeDate(makeDay(yearFromTime(t), float64(monthFromTime(t)), dt), timeWithinDay(t))
+		return setDV(obj, timeClip(date)), nil
+	}
+	i.defineMethod(proto, "setDate", 1, setDateFn)
+	i.defineMethod(proto, "setUTCDate", 1, setDateFn)
+
+	// setMonth — §21.4.4.25  (month[, date])
+	setMonthFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		t, obj, err := requireDate(ctx, this, "setMonth")
 		if err != nil {
 			return nil, err
 		}
@@ -489,231 +709,184 @@ func (i *Interpreter) initDate() {
 		if err != nil {
 			return nil, err
 		}
-		t := utcTime(cur)
-		day := t.Day()
-		if len(args) > 1 {
-			d, err := i.argNum(ctx, args, 1)
+		hasDt := len(args) > 1
+		var dt float64
+		if hasDt {
+			dt, err = i.argNum(ctx, args, 1)
 			if err != nil {
 				return nil, err
 			}
-			day = int(d)
 		}
-		nt := time.Date(t.Year(), time.Month(int(m)+1), day,
-			t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
+		if math.IsNaN(t) {
+			return Number(math.NaN()), nil
+		}
+		if !hasDt {
+			dt = float64(dateFromTime(t))
+		}
+		date := makeDate(makeDay(yearFromTime(t), m, dt), timeWithinDay(t))
+		return setDV(obj, timeClip(date)), nil
+	}
+	i.defineMethod(proto, "setMonth", 2, setMonthFn)
+	i.defineMethod(proto, "setUTCMonth", 2, setMonthFn)
 
-	// setDate — §20.4.4.21  (day-of-month)
-	i.defineMethod(proto, "setDate", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setDate")
+	// setFullYear — §21.4.4.21  (year[, month[, date]]). Rescues an invalid
+	// date by treating its time as +0.
+	setFullYearFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		t, obj, err := requireDate(ctx, this, "setFullYear")
 		if err != nil {
 			return nil, err
 		}
-		d, err := i.argNum(ctx, args, 0)
+		y, err := i.argNum(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		t := utcTime(cur)
-		nt := time.Date(t.Year(), t.Month(), int(d),
-			t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
+		hasM := len(args) > 1
+		hasDt := len(args) > 2
+		var m, dt float64
+		if hasM {
+			if m, err = i.argNum(ctx, args, 1); err != nil {
+				return nil, err
+			}
+		}
+		if hasDt {
+			if dt, err = i.argNum(ctx, args, 2); err != nil {
+				return nil, err
+			}
+		}
+		if math.IsNaN(t) {
+			t = 0
+		}
+		if !hasM {
+			m = float64(monthFromTime(t))
+		}
+		if !hasDt {
+			dt = float64(dateFromTime(t))
+		}
+		date := makeDate(makeDay(y, m, dt), timeWithinDay(t))
+		return setDV(obj, timeClip(date)), nil
+	}
+	i.defineMethod(proto, "setFullYear", 3, setFullYearFn)
+	i.defineMethod(proto, "setUTCFullYear", 3, setFullYearFn)
 
-	// setHours — §20.4.4.23  (hours[, min[, sec[, ms]]])
-	i.defineMethod(proto, "setHours", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setHours")
-		if err != nil {
-			return nil, err
-		}
-		h, err := i.argNum(ctx, args, 0)
-		if err != nil {
-			return nil, err
-		}
-		t := utcTime(cur)
-		min, sec, nsec := t.Minute(), t.Second(), t.Nanosecond()
-		if len(args) > 1 {
-			mn, err := i.argNum(ctx, args, 1)
-			if err != nil {
-				return nil, err
-			}
-			min = int(mn)
-		}
-		if len(args) > 2 {
-			s, err := i.argNum(ctx, args, 2)
-			if err != nil {
-				return nil, err
-			}
-			sec = int(s)
-		}
-		if len(args) > 3 {
-			millis, err := i.argNum(ctx, args, 3)
-			if err != nil {
-				return nil, err
-			}
-			nsec = int(millis) * int(time.Millisecond)
-		}
-		nt := time.Date(t.Year(), t.Month(), t.Day(), int(h), min, sec, nsec, time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
+	// -------------------------------------------------------------------------
+	// String conversion methods
+	// -------------------------------------------------------------------------
 
-	// setMinutes — §20.4.4.24  (min[, sec[, ms]])
-	i.defineMethod(proto, "setMinutes", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setMinutes")
-		if err != nil {
-			return nil, err
-		}
-		mn, err := i.argNum(ctx, args, 0)
-		if err != nil {
-			return nil, err
-		}
-		t := utcTime(cur)
-		sec, nsec := t.Second(), t.Nanosecond()
-		if len(args) > 1 {
-			s, err := i.argNum(ctx, args, 1)
+	stringMethod := func(name string, length int, invalid string, fmtFn func(t float64) string) *Object {
+		return i.defineMethod(proto, name, length, func(ctx context.Context, this Value, args []Value) (Value, error) {
+			ms, _, err := requireDate(ctx, this, name)
 			if err != nil {
 				return nil, err
 			}
-			sec = int(s)
-		}
-		if len(args) > 2 {
-			millis, err := i.argNum(ctx, args, 2)
-			if err != nil {
-				return nil, err
+			if math.IsNaN(ms) {
+				return String(invalid), nil
 			}
-			nsec = int(millis) * int(time.Millisecond)
-		}
-		nt := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), int(mn), sec, nsec, time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
-
-	// setSeconds — §20.4.4.28  (sec[, ms])
-	i.defineMethod(proto, "setSeconds", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setSeconds")
-		if err != nil {
-			return nil, err
-		}
-		s, err := i.argNum(ctx, args, 0)
-		if err != nil {
-			return nil, err
-		}
-		t := utcTime(cur)
-		nsec := t.Nanosecond()
-		if len(args) > 1 {
-			millis, err := i.argNum(ctx, args, 1)
-			if err != nil {
-				return nil, err
-			}
-			nsec = int(millis) * int(time.Millisecond)
-		}
-		nt := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), int(s), nsec, time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
-
-	// setMilliseconds — §20.4.4.25
-	i.defineMethod(proto, "setMilliseconds", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cur, obj, err := requireDate(ctx, this, "setMilliseconds")
-		if err != nil {
-			return nil, err
-		}
-		millis, err := i.argNum(ctx, args, 0)
-		if err != nil {
-			return nil, err
-		}
-		t := utcTime(cur)
-		nt := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(),
-			int(millis)*int(time.Millisecond), time.UTC)
-		return setDateMs(obj, float64(nt.UnixMilli())), nil
-	})
-
-	// The setUTC* setters alias their local counterparts: gojs Date operates
-	// entirely in UTC, so the local and UTC mutators are identical.
-	for local, utc := range map[string]string{
-		"setFullYear":     "setUTCFullYear",
-		"setMonth":        "setUTCMonth",
-		"setDate":         "setUTCDate",
-		"setHours":        "setUTCHours",
-		"setMinutes":      "setUTCMinutes",
-		"setSeconds":      "setUTCSeconds",
-		"setMilliseconds": "setUTCMilliseconds",
-	} {
-		if fn, ok := proto.props[StrKey(local)]; ok && fn.Value != nil {
-			proto.SetHidden(utc, fn.Value)
-		}
+			return String(fmtFn(ms)), nil
+		})
 	}
 
-	// -------------------------------------------------------------------------
-	// Date.prototype — string conversion methods
-	// -------------------------------------------------------------------------
+	stringMethod("toString", 0, "Invalid Date", dateToString)
+	stringMethod("toDateString", 0, "Invalid Date", dateString)
+	stringMethod("toTimeString", 0, "Invalid Date", func(t float64) string {
+		return timeString(t) + timeZoneString()
+	})
+	utcFn := stringMethod("toUTCString", 0, "Invalid Date", dateToUTCString)
+	// Annex B: Date.prototype.toGMTString is the same function object.
+	proto.SetHidden("toGMTString", utcFn)
 
-	// toISOString — §20.4.4.36
-	// Throws RangeError when the [[DateValue]] is NaN.
+	// toLocale* have no Intl support here: they mirror the plain conversions.
+	stringMethod("toLocaleString", 0, "Invalid Date", dateToString)
+	stringMethod("toLocaleDateString", 0, "Invalid Date", dateString)
+	stringMethod("toLocaleTimeString", 0, "Invalid Date", func(t float64) string {
+		return timeString(t) + timeZoneString()
+	})
+
+	// toISOString — §21.4.4.36. Throws RangeError when the time value is not
+	// finite.
 	i.defineMethod(proto, "toISOString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		ms, _, err := requireDate(ctx, this, "toISOString")
 		if err != nil {
 			return nil, err
 		}
-		if math.IsNaN(ms) {
+		if !dtFinite(ms) {
 			return nil, i.throwError(ctx, "RangeError", "Invalid time value")
 		}
 		return String(dateToISO(ms)), nil
 	})
 
-	// toString — §20.4.4.35
-	i.defineMethod(proto, "toString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "toString")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return String("Invalid Date"), nil
-		}
-		t := utcTime(ms)
-		return String(t.Format("Mon Jan 02 2006 15:04:05 GMT+0000 (Coordinated Universal Time)")), nil
-	})
-
-	// toDateString — §20.4.4.31
-	i.defineMethod(proto, "toDateString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "toDateString")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return String("Invalid Date"), nil
-		}
-		t := utcTime(ms)
-		return String(t.Format("Mon Jan 02 2006")), nil
-	})
-
-	// toTimeString — §20.4.4.34
-	i.defineMethod(proto, "toTimeString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "toTimeString")
-		if err != nil {
-			return nil, err
-		}
-		if math.IsNaN(ms) {
-			return String("Invalid Date"), nil
-		}
-		t := utcTime(ms)
-		return String(t.Format("15:04:05 GMT+0000 (Coordinated Universal Time)")), nil
-	})
-
-	// toJSON — §20.4.4.37  (used by JSON.stringify; returns null for invalid dates)
+	// toJSON — §21.4.4.37. ToObject → ToPrimitive(number); null for non-finite;
+	// otherwise Invoke(O, "toISOString").
 	i.defineMethod(proto, "toJSON", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms, _, err := requireDate(ctx, this, "toJSON")
+		o, err := i.ToObject(ctx, this)
 		if err != nil {
 			return nil, err
 		}
-		if math.IsNaN(ms) {
+		tv, err := i.ToPrimitive(ctx, o, "number")
+		if err != nil {
+			return nil, err
+		}
+		if num, ok := tv.(Number); ok && !dtFinite(float64(num)) {
 			return Nul, nil
 		}
-		return String(dateToISO(ms)), nil
+		iso, err := o.GetStr(ctx, "toISOString")
+		if err != nil {
+			return nil, err
+		}
+		fn, ok := iso.(*Object)
+		if !ok || !fn.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "toISOString is not callable")
+		}
+		return fn.fn.call(ctx, o, nil)
 	})
 
+	// ordinaryToPrimitive implements §7.1.1.1 for @@toPrimitive.
+	ordinaryToPrimitive := func(ctx context.Context, o *Object, hint string) (Value, error) {
+		names := []string{"valueOf", "toString"}
+		if hint == "string" {
+			names = []string{"toString", "valueOf"}
+		}
+		for _, n := range names {
+			m, err := o.GetStr(ctx, n)
+			if err != nil {
+				return nil, err
+			}
+			if fn, ok := m.(*Object); ok && fn.IsCallable() {
+				res, err := fn.fn.call(ctx, o, nil)
+				if err != nil {
+					return nil, err
+				}
+				if isPrimitive(res) {
+					return res, nil
+				}
+			}
+		}
+		return nil, i.throwError(ctx, "TypeError", "Cannot convert object to primitive value")
+	}
+
+	// Date.prototype[Symbol.toPrimitive] — §21.4.4.45
+	toPrimFn := i.newNativeFunc("[Symbol.toPrimitive]", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		obj, ok := this.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Date.prototype[Symbol.toPrimitive] called on non-object")
+		}
+		hint, _ := arg(args, 0).(String)
+		var tryFirst string
+		switch string(hint) {
+		case "string", "default":
+			tryFirst = "string"
+		case "number":
+			tryFirst = "number"
+		default:
+			return nil, i.throwError(ctx, "TypeError", "invalid hint")
+		}
+		return ordinaryToPrimitive(ctx, obj, tryFirst)
+	})
+	proto.defineOwn(SymKey(i.symToPrimitive), &Property{Value: toPrimFn, Writable: false, Enumerable: false, Configurable: true})
+
 	// -------------------------------------------------------------------------
-	// Date constructor (§20.4.2)
+	// Date constructor (§21.4.2)
 	// -------------------------------------------------------------------------
 
-	// newDateObj allocates a fresh Date instance with the given [[DateValue]].
 	newDateObj := func(ms float64) *Object {
 		o := NewObject(i.dateProto)
 		o.class = "Date"
@@ -721,58 +894,49 @@ func (i *Interpreter) initDate() {
 		return o
 	}
 
-	// callFn — Date() called without new (§20.4.2.1): returns the current time
-	// as a human-readable string, regardless of any arguments.
+	// callFn — Date() called without new (§21.4.2.1): the current time as a
+	// human-readable string, regardless of arguments.
 	callFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		ms := i.dateNow(ctx)
-		t := utcTime(ms)
-		return String(t.Format("Mon Jan 02 2006 15:04:05 GMT+0000 (Coordinated Universal Time)")), nil
+		return String(dateToString(timeClip(i.dateNow(ctx)))), nil
 	}
 
-	// constructFn — new Date(...) (§20.4.2.2)
-	//
-	//   new Date()                → current time
-	//   new Date(value)           → from number (ms) or string (parsed)
-	//   new Date(year,month,...)  → components in UTC; month is 0-based
 	constructFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		var ms float64
 		switch len(args) {
 		case 0:
-			// new Date() — current time via the clock provider.
-			ms = i.dateNow(ctx)
+			ms = timeClip(i.dateNow(ctx))
 
 		case 1:
-			// new Date(value) — number or string.
 			v := arg(args, 0)
-			if s, ok := v.(String); ok {
-				ms = dateParseStr(string(s))
+			if o, ok := v.(*Object); ok && o.class == "Date" {
+				// Copy the [[DateValue]] directly without user coercion.
+				if n, ok := o.primitive.(Number); ok {
+					ms = timeClip(float64(n))
+				} else {
+					ms = math.NaN()
+				}
+				break
+			}
+			prim, err := i.ToPrimitive(ctx, v, "default")
+			if err != nil {
+				return nil, err
+			}
+			if s, ok := prim.(String); ok {
+				ms = timeClip(parseDate(string(s)))
 			} else {
-				f, err := i.ToNumberV(ctx, v)
+				f, err := i.ToNumberV(ctx, prim)
 				if err != nil {
 					return nil, err
 				}
-				ms = f
+				ms = timeClip(f)
 			}
 
 		default:
-			// new Date(year, month[, day[, hours[, minutes[, seconds[, ms]]]]]).
-			yr, err := i.argNum(ctx, args, 0)
+			comps, err := i.dateComponents(ctx, args)
 			if err != nil {
 				return nil, err
 			}
-			mo, err := i.argNum(ctx, args, 1)
-			if err != nil {
-				return nil, err
-			}
-			var rest []float64
-			for n := 2; n < len(args); n++ {
-				f, err := i.argNum(ctx, args, n)
-				if err != nil {
-					return nil, err
-				}
-				rest = append(rest, f)
-			}
-			ms = dateConstruct(yr, mo, rest...)
+			ms = timeClip(comps)
 		}
 		return newDateObj(ms), nil
 	}
@@ -781,47 +945,80 @@ func (i *Interpreter) initDate() {
 	linkCtor(ctor, proto)
 
 	// -------------------------------------------------------------------------
-	// Date static methods
+	// Static methods
 	// -------------------------------------------------------------------------
 
-	// Date.now — §20.4.3.1
+	// Date.now — §21.4.3.1
 	i.defineMethod(ctor, "now", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return Number(i.dateNow(ctx)), nil
+		return Number(timeClip(i.dateNow(ctx))), nil
 	})
 
-	// Date.parse — §20.4.3.2
+	// Date.parse — §21.4.3.1
 	i.defineMethod(ctor, "parse", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return Number(dateParseStr(s)), nil
+		return Number(parseDate(s)), nil
 	})
 
-	// Date.UTC — §20.4.3.4  (year, month[, day[, hours[, minutes[, seconds[, ms]]]]])
-	// Returns the UTC millisecond timestamp for the given components.
-	i.defineMethod(ctor, "UTC", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if len(args) < 2 {
-			return Number(math.NaN()), nil
-		}
-		yr, err := i.argNum(ctx, args, 0)
+	// Date.UTC — §21.4.3.4
+	i.defineMethod(ctor, "UTC", 7, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		comps, err := i.dateComponents(ctx, args)
 		if err != nil {
 			return nil, err
 		}
-		mo, err := i.argNum(ctx, args, 1)
-		if err != nil {
-			return nil, err
-		}
-		var rest []float64
-		for n := 2; n < len(args); n++ {
-			f, err := i.argNum(ctx, args, n)
-			if err != nil {
-				return nil, err
-			}
-			rest = append(rest, f)
-		}
-		return Number(dateConstruct(yr, mo, rest...)), nil
+		return Number(timeClip(comps)), nil
 	})
 
 	i.setGlobalHidden("Date", ctor)
+}
+
+// dateComponents coerces the (year, month, …) argument list shared by the
+// multi-argument Date constructor and Date.UTC, applies the two-digit year
+// offset, and returns MakeDate(MakeDay, MakeTime) before TimeClip. All present
+// arguments are coerced in order regardless of intermediate NaNs.
+func (i *Interpreter) dateComponents(ctx context.Context, args []Value) (float64, error) {
+	y, err := i.argNum(ctx, args, 0)
+	if err != nil {
+		return 0, err
+	}
+	m := float64(0)
+	if len(args) > 1 {
+		if m, err = i.argNum(ctx, args, 1); err != nil {
+			return 0, err
+		}
+	}
+	dt := float64(1)
+	if len(args) > 2 {
+		if dt, err = i.argNum(ctx, args, 2); err != nil {
+			return 0, err
+		}
+	}
+	h := float64(0)
+	if len(args) > 3 {
+		if h, err = i.argNum(ctx, args, 3); err != nil {
+			return 0, err
+		}
+	}
+	mi := float64(0)
+	if len(args) > 4 {
+		if mi, err = i.argNum(ctx, args, 4); err != nil {
+			return 0, err
+		}
+	}
+	s := float64(0)
+	if len(args) > 5 {
+		if s, err = i.argNum(ctx, args, 5); err != nil {
+			return 0, err
+		}
+	}
+	milli := float64(0)
+	if len(args) > 6 {
+		if milli, err = i.argNum(ctx, args, 6); err != nil {
+			return 0, err
+		}
+	}
+	yr := yearPromote(y)
+	return makeDate(makeDay(yr, m, dt), makeTime(h, mi, s, milli)), nil
 }
