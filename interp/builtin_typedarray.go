@@ -597,8 +597,16 @@ func (i *Interpreter) typedArrayCreateFromCtor(ctx context.Context, ctor *Object
 	if !ok || o.typedArray == nil {
 		return nil, i.throwError(ctx, "TypeError", "TypedArray constructor did not return a TypedArray")
 	}
-	if oob, _ := o.typedArray.outOfBounds(); oob {
+	oob, length := o.typedArray.outOfBounds()
+	if oob {
 		return nil, i.throwError(ctx, "TypeError", "TypedArray constructor returned an out-of-bounds array")
+	}
+	// TypedArrayCreate (§23.2.4.1): when the argument list is a single Number,
+	// the result must be at least that long.
+	if len(args) == 1 {
+		if n, ok := args[0].(Number); ok && float64(length) < float64(n) {
+			return nil, i.throwError(ctx, "TypeError", "TypedArray species constructor produced an array that is too small")
+		}
 	}
 	return o, nil
 }

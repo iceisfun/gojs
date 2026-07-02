@@ -75,7 +75,13 @@ func (i *Interpreter) initObject() {
 		return String("[object " + tag + "]"), nil
 	})
 	i.defineMethod(proto, "toLocaleString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return i.call(ctx, mustGet(ctx, this, "toString"), this, nil)
+		// Invoke(this, "toString"): getProperty boxes a primitive receiver so
+		// e.g. (42).toLocaleString() reaches Number.prototype.toString.
+		m, err := i.getProperty(ctx, this, StrKey("toString"))
+		if err != nil {
+			return nil, err
+		}
+		return i.call(ctx, m, this, nil)
 	})
 	i.defineMethod(proto, "valueOf", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return i.ToObject(ctx, this)

@@ -316,9 +316,14 @@ func (i *Interpreter) taCopyWithin(ctx context.Context, this Value, args []Value
 	if count <= 0 {
 		return o, nil
 	}
-	// Re-clamp against a possibly-shrunk view.
-	if l := td.length(); l < length {
-		length = l
+	// The argument coercions above may have detached or resized the buffer; the
+	// spec re-checks the witness record and re-reads the length here.
+	oob, curLen := td.outOfBounds()
+	if oob {
+		return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.copyWithin called on an out-of-bounds TypedArray")
+	}
+	if curLen < length {
+		length = curLen
 	}
 	// Copy the raw bytes to preserve overlap semantics.
 	ab, _ := arrayBufferOf(td.buffer)
@@ -380,8 +385,11 @@ func (i *Interpreter) taIndexOf(ctx context.Context, this Value, args []Value) (
 		return nil, err
 	}
 	for k := from; k < length; k++ {
-		v := taGetIdx(td, k)
-		if strictEquals(v, target) {
+		idx, ok := td.validIndex(float64(k))
+		if !ok {
+			continue // HasProperty is false for an out-of-bounds index
+		}
+		if strictEquals(td.getElement(idx), target) {
 			return Number(float64(k)), nil
 		}
 	}
@@ -408,7 +416,7 @@ func (i *Interpreter) taLastIndexOf(ctx context.Context, this Value, args []Valu
 			return Number(-1), nil
 		}
 		if fromN >= 0 {
-			if int(fromN) < from {
+			if fromN < float64(from) { // avoids int(+Inf)
 				from = int(fromN)
 			}
 		} else {
@@ -416,8 +424,11 @@ func (i *Interpreter) taLastIndexOf(ctx context.Context, this Value, args []Valu
 		}
 	}
 	for k := from; k >= 0; k-- {
-		v := taGetIdx(td, k)
-		if strictEquals(v, target) {
+		idx, ok := td.validIndex(float64(k))
+		if !ok {
+			continue // HasProperty is false for an out-of-bounds index
+		}
+		if strictEquals(td.getElement(idx), target) {
 			return Number(float64(k)), nil
 		}
 	}
@@ -530,17 +541,19 @@ func (i *Interpreter) taFindImpl(ctx context.Context, this Value, args []Value, 
 		return nil, err
 	}
 	thisArg := arg(args, 1)
-	step := func(k int) (bool, error) {
+	// step returns the value read before invoking the predicate (find/findLast
+	// return that captured kValue, not a re-read after the callback).
+	step := func(k int) (Value, bool, error) {
 		v := taGetIdx(td, k)
 		r, err := cb.fn.call(ctx, thisArg, []Value{v, Number(float64(k)), o})
 		if err != nil {
-			return false, err
+			return nil, false, err
 		}
-		return ToBoolean(r), nil
+		return v, ToBoolean(r), nil
 	}
 	if fromEnd {
 		for k := length - 1; k >= 0; k-- {
-			match, err := step(k)
+			v, match, err := step(k)
 			if err != nil {
 				return nil, err
 			}
@@ -548,12 +561,12 @@ func (i *Interpreter) taFindImpl(ctx context.Context, this Value, args []Value, 
 				if wantIndex {
 					return Number(float64(k)), nil
 				}
-				return taGetIdx(td, k), nil
+				return v, nil
 			}
 		}
 	} else {
 		for k := 0; k < length; k++ {
-			match, err := step(k)
+			v, match, err := step(k)
 			if err != nil {
 				return nil, err
 			}
@@ -561,7 +574,7 @@ func (i *Interpreter) taFindImpl(ctx context.Context, this Value, args []Value, 
 				if wantIndex {
 					return Number(float64(k)), nil
 				}
-				return taGetIdx(td, k), nil
+				return v, nil
 			}
 		}
 	}
@@ -718,6 +731,20 @@ func (i *Interpreter) taSlice(ctx context.Context, this Value, args []Value) (Va
 	if err != nil {
 		return nil, err
 	}
+	if count > 0 {
+		// Creating the destination ran user code (the species lookup), which may
+		// have detached or shrunk the source; re-check and re-clamp (§23.2.3.27).
+		oob, curLen := td.outOfBounds()
+		if oob {
+			return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.slice called on an out-of-bounds TypedArray")
+		}
+		if curLen < start+count {
+			count = curLen - start
+			if count < 0 {
+				count = 0
+			}
+		}
+	}
 	for n := 0; n < count; n++ {
 		v := taGetIdx(td, start+n)
 		if _, err := i.typedArraySetElement(ctx, target.typedArray, float64(n), v); err != nil {
@@ -732,27 +759,30 @@ func (i *Interpreter) taSubarray(ctx context.Context, this Value, args []Value) 
 	if err != nil {
 		return nil, err
 	}
-	_, srcLength := td.outOfBounds()
+	oob, srcLength := td.outOfBounds()
+	if oob {
+		srcLength = 0
+	}
 	begin, err := i.taRelativeIndex(ctx, arg(args, 0), srcLength, 0)
 	if err != nil {
 		return nil, err
 	}
-	var end int
-	if IsUndefined(arg(args, 1)) {
-		end = srcLength
-	} else {
-		end, err = i.taRelativeIndex(ctx, arg(args, 1), srcLength, srcLength)
-		if err != nil {
-			return nil, err
-		}
+	elementSize := taKinds[td.kind].size
+	beginByteOffset := td.byteOffset + begin*elementSize
+	// A length-tracking view with no explicit end yields a length-tracking
+	// subarray: only the buffer and offset are passed to the constructor.
+	if td.autoLength && IsUndefined(arg(args, 1)) {
+		return i.taSpeciesCreate(ctx, o, []Value{td.buffer, Number(float64(beginByteOffset))})
+	}
+	end, err := i.taRelativeIndex(ctx, arg(args, 1), srcLength, srcLength)
+	if err != nil {
+		return nil, err
 	}
 	newLength := end - begin
 	if newLength < 0 {
 		newLength = 0
 	}
-	elementSize := taKinds[td.kind].size
-	newByteOffset := td.byteOffset + begin*elementSize
-	return i.taSpeciesCreate(ctx, o, []Value{td.buffer, Number(float64(newByteOffset)), Number(float64(newLength))})
+	return i.taSpeciesCreate(ctx, o, []Value{td.buffer, Number(float64(beginByteOffset)), Number(float64(newLength))})
 }
 
 func (i *Interpreter) taJoin(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -1021,6 +1051,7 @@ func (i *Interpreter) taSet(ctx context.Context, this Value, args []Value) (Valu
 	if oob {
 		return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.set called on an out-of-bounds TypedArray")
 	}
+	_ = o
 	source := arg(args, 0)
 	if src, ok := source.(*Object); ok && src.typedArray != nil {
 		// Source is a TypedArray.
@@ -1028,7 +1059,7 @@ func (i *Interpreter) taSet(ctx context.Context, this Value, args []Value) (Valu
 		if soob {
 			return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.set: source is out of bounds")
 		}
-		if int(targetOffset)+srcLength > targetLength {
+		if targetOffset+float64(srcLength) > float64(targetLength) {
 			return nil, i.throwError(ctx, "RangeError", "TypedArray.prototype.set: source is too large")
 		}
 		if taKinds[src.typedArray.kind].bigInt != taKinds[td.kind].bigInt {
@@ -1042,18 +1073,19 @@ func (i *Interpreter) taSet(ctx context.Context, this Value, args []Value) (Valu
 		for k := 0; k < srcLength; k++ {
 			i.writeElem(td, int(targetOffset)+k, vals[k])
 		}
-		return o, nil
+		return Undef, nil
 	}
-	// Source is array-like.
-	so, ok := source.(*Object)
-	if !ok {
-		return nil, i.throwError(ctx, "TypeError", "TypedArray.prototype.set: source is not an object")
+	// Source is array-like: ToObject coerces a primitive (throwing for
+	// null/undefined) and yields a length-0 view for e.g. a number.
+	so, err := i.ToObject(ctx, source)
+	if err != nil {
+		return nil, err
 	}
 	srcLength, err := i.lengthOfArrayLike(ctx, so)
 	if err != nil {
 		return nil, err
 	}
-	if int(targetOffset)+srcLength > targetLength {
+	if targetOffset+float64(srcLength) > float64(targetLength) {
 		return nil, i.throwError(ctx, "RangeError", "TypedArray.prototype.set: source is too large")
 	}
 	for k := 0; k < srcLength; k++ {
@@ -1065,7 +1097,7 @@ func (i *Interpreter) taSet(ctx context.Context, this Value, args []Value) (Valu
 			return nil, err
 		}
 	}
-	return o, nil
+	return Undef, nil
 }
 
 // ---------------------------------------------------------------------------
