@@ -200,11 +200,7 @@ func (i *Interpreter) lengthOfArrayLike(ctx context.Context, o *Object) (int, er
 	if err != nil {
 		return 0, err
 	}
-	n := ToInteger(ToNumber(v))
-	if n < 0 {
-		n = 0
-	}
-	return int(n), nil
+	return i.toLength(ctx, v)
 }
 
 func (i *Interpreter) lastIndexInt(ctx context.Context, o *Object) (int, error) {
@@ -212,7 +208,7 @@ func (i *Interpreter) lastIndexInt(ctx context.Context, o *Object) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	return int(ToInteger(ToNumber(v))), nil
+	return i.toLength(ctx, v)
 }
 
 func (i *Interpreter) regexpSymbolSearch(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -228,8 +224,11 @@ func (i *Interpreter) regexpSymbolSearch(ctx context.Context, this Value, args [
 	if err != nil {
 		return nil, err
 	}
-	if ToNumber(prev) != 0 {
-		rx.SetData("lastIndex", Number(0))
+	// SameValue against +0𝔽 (not numeric ==), so a stored -0 is reset to +0.
+	if !sameValue(prev, Number(0)) {
+		if err := i.setThrow(ctx, rx, "lastIndex", Number(0)); err != nil {
+			return nil, err
+		}
 	}
 	res, err := i.regExpExec(ctx, rx, s)
 	if err != nil {
@@ -239,8 +238,10 @@ func (i *Interpreter) regexpSymbolSearch(ctx context.Context, this Value, args [
 	if err != nil {
 		return nil, err
 	}
-	if ToNumber(cur) != ToNumber(prev) {
-		rx.SetData("lastIndex", prev)
+	if !sameValue(cur, prev) {
+		if err := i.setThrow(ctx, rx, "lastIndex", prev); err != nil {
+			return nil, err
+		}
 	}
 	if IsNull(res) {
 		return Number(-1), nil
@@ -265,7 +266,9 @@ func (i *Interpreter) regexpSymbolMatch(ctx context.Context, this Value, args []
 		return i.regExpExec(ctx, rx, s)
 	}
 	fullUnicode := strings.ContainsAny(flags, "uv")
-	rx.SetData("lastIndex", Number(0))
+	if err := i.setThrow(ctx, rx, "lastIndex", Number(0)); err != nil {
+		return nil, err
+	}
 	units := i.toUnits(s)
 	var results []Value
 	for {
@@ -285,8 +288,13 @@ func (i *Interpreter) regexpSymbolMatch(ctx context.Context, this Value, args []
 		}
 		results = append(results, String(matchStr))
 		if matchStr == "" {
-			li, _ := i.lastIndexInt(ctx, rx)
-			rx.SetData("lastIndex", Number(float64(advanceStringIndex(units, li, fullUnicode))))
+			li, err := i.lastIndexInt(ctx, rx)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.setThrow(ctx, rx, "lastIndex", Number(float64(advanceStringIndex(units, li, fullUnicode)))); err != nil {
+				return nil, err
+			}
 		}
 	}
 }
@@ -328,7 +336,9 @@ func (i *Interpreter) regexpSymbolMatchAll(ctx context.Context, this Value, args
 	if li < 0 {
 		li = 0
 	}
-	matcher.SetData("lastIndex", Number(li))
+	if err := i.setThrow(ctx, matcher, "lastIndex", Number(li)); err != nil {
+		return nil, err
+	}
 	global := strings.Contains(flags, "g")
 	fullUnicode := strings.ContainsAny(flags, "uv")
 	return i.newRegExpStringIterator(matcher, s, global, fullUnicode), nil
@@ -420,7 +430,9 @@ func (i *Interpreter) regexpStringIteratorNext(ctx context.Context, this Value, 
 		}
 		thisIndex := int(ToInteger(liN))
 		units := i.toUnits(s)
-		matcher.SetData("lastIndex", Number(float64(advanceStringIndex(units, thisIndex, fullUnicode))))
+		if err := i.setThrow(ctx, matcher, "lastIndex", Number(float64(advanceStringIndex(units, thisIndex, fullUnicode)))); err != nil {
+			return nil, err
+		}
 	}
 	return i.newIterResult(match, false), nil
 }
@@ -452,7 +464,9 @@ func (i *Interpreter) regexpSymbolReplace(ctx context.Context, this Value, args 
 	global := strings.Contains(flags, "g")
 	fullUnicode := strings.ContainsAny(flags, "uv")
 	if global {
-		rx.SetData("lastIndex", Number(0))
+		if err := i.setThrow(ctx, rx, "lastIndex", Number(0)); err != nil {
+			return nil, err
+		}
 	}
 	var results []*Object
 	for {
@@ -473,8 +487,13 @@ func (i *Interpreter) regexpSymbolReplace(ctx context.Context, this Value, args 
 			return nil, err
 		}
 		if matchStr == "" {
-			li, _ := i.lastIndexInt(ctx, rx)
-			rx.SetData("lastIndex", Number(float64(advanceStringIndex(units, li, fullUnicode))))
+			li, err := i.lastIndexInt(ctx, rx)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.setThrow(ctx, rx, "lastIndex", Number(float64(advanceStringIndex(units, li, fullUnicode)))); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -498,7 +517,11 @@ func (i *Interpreter) regexpSymbolReplace(ctx context.Context, this Value, args 
 		if err != nil {
 			return nil, err
 		}
-		position := int(ToInteger(ToNumber(posV)))
+		posN, err := i.ToNumberV(ctx, posV)
+		if err != nil {
+			return nil, err
+		}
+		position := int(ToInteger(posN))
 		if position < 0 {
 			position = 0
 		}
@@ -543,7 +566,19 @@ func (i *Interpreter) regexpSymbolReplace(ctx context.Context, this Value, args 
 				return nil, err
 			}
 		} else {
-			replacement, err = i.getSubstitution(ctx, matchedUnits, units, position, captures, namedCaptures, replTemplate)
+			// For string replacement the spec coerces a non-undefined groups
+			// value with ToObject before substitution, so a null groups raises
+			// a TypeError and a primitive (e.g. a string) exposes its wrapper's
+			// properties to $<name>.
+			nc := namedCaptures
+			if !IsUndefined(nc) {
+				obj, err := i.ToObject(ctx, nc)
+				if err != nil {
+					return nil, err
+				}
+				nc = obj
+			}
+			replacement, err = i.getSubstitution(ctx, matchedUnits, units, position, captures, nc, replTemplate)
 			if err != nil {
 				return nil, err
 			}
@@ -747,7 +782,7 @@ func (i *Interpreter) regexpSymbolSplit(ctx context.Context, this Value, args []
 	p := 0
 	q := p
 	for q < size {
-		if err := splitter.SetStr(ctx, "lastIndex", Number(float64(q))); err != nil {
+		if err := i.setThrow(ctx, splitter, "lastIndex", Number(float64(q))); err != nil {
 			return nil, err
 		}
 		z, err := i.regExpExec(ctx, splitter, s)

@@ -344,12 +344,24 @@ func (i *Interpreter) toUnits(s string) []uint16 {
 func (i *Interpreter) regexExec(ctx context.Context, reObj *Object, re reEngine, units []uint16) ([]int, error) {
 	f := re.Flags()
 	useLast := f.Global || f.Sticky
+	// RegExpBuiltinExec reads and coerces lastIndex unconditionally (step 4),
+	// before consulting the global/sticky flags — so the getter and any valueOf
+	// fire exactly once even for a plain regex.
+	liV, err := reObj.GetStr(ctx, "lastIndex")
+	if err != nil {
+		return nil, err
+	}
+	lastIndex, err := i.toLength(ctx, liV)
+	if err != nil {
+		return nil, err
+	}
 	start := 0
 	if useLast {
-		liV, _ := reObj.GetStr(ctx, "lastIndex")
-		start = int(ToInteger(ToNumber(liV)))
-		if start < 0 || start > len(units) {
-			reObj.SetData("lastIndex", Number(0))
+		start = lastIndex
+		if start > len(units) {
+			if err := i.setThrow(ctx, reObj, "lastIndex", Number(0)); err != nil {
+				return nil, err
+			}
 			return nil, nil
 		}
 	}
@@ -359,14 +371,54 @@ func (i *Interpreter) regexExec(ctx context.Context, reObj *Object, re reEngine,
 	}
 	if m == nil {
 		if useLast {
-			reObj.SetData("lastIndex", Number(0))
+			if err := i.setThrow(ctx, reObj, "lastIndex", Number(0)); err != nil {
+				return nil, err
+			}
 		}
 		return nil, nil
 	}
 	if useLast {
-		reObj.SetData("lastIndex", Number(float64(m[1])))
+		if err := i.setThrow(ctx, reObj, "lastIndex", Number(float64(m[1]))); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
+}
+
+// setThrow implements the abstract operation Set(O, P, V, true): it performs an
+// ordinary [[Set]] and raises a TypeError if the write cannot take effect
+// (non-writable data property, setter-less accessor, or non-extensible object).
+// The RegExp exec path and Symbol methods use it because the spec sets
+// lastIndex with the Throw flag regardless of the surrounding strictness.
+// toLength implements ToLength (§7.1.20): ToIntegerOrInfinity clamped to
+// [0, 2^53-1]. The initial ToNumber may throw (e.g. an object with a throwing
+// valueOf), which is why it takes a context and returns an error.
+func (i *Interpreter) toLength(ctx context.Context, v Value) (int, error) {
+	f, err := i.ToNumberV(ctx, v)
+	if err != nil {
+		return 0, err
+	}
+	n := ToInteger(f)
+	if n <= 0 {
+		return 0, nil
+	}
+	const maxSafe = 1<<53 - 1
+	if n > maxSafe {
+		n = maxSafe
+	}
+	return int(n), nil
+}
+
+func (i *Interpreter) setThrow(ctx context.Context, o *Object, name string, v Value) error {
+	ok, err := o.setStatus(ctx, StrKey(name), v)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return i.throwError(ctx, "TypeError",
+			"Cannot assign to read only property '"+name+"' of object")
+	}
+	return nil
 }
 
 // advanceStringIndex returns the next index after i, stepping over a surrogate

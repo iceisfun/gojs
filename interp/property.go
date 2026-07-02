@@ -54,6 +54,18 @@ func (o *Object) HasOwn(key PropertyKey) bool {
 // properties. In this (non-strict-by-default) implementation, writes that the
 // spec would silently ignore are silently ignored.
 func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
+	_, err := o.setStatus(ctx, key, v)
+	return err
+}
+
+// setStatus performs the ordinary [[Set]] and reports whether the write took
+// effect. It returns ok=false (with a nil error) when the assignment is
+// silently dropped by sloppy semantics — a non-writable own or inherited data
+// property, an accessor with no setter, or a non-extensible object. That is
+// exactly the condition under which the spec's Set(O, P, V, true) — a write
+// with the Throw flag set, e.g. RegExpBuiltinExec assigning lastIndex — must
+// raise a TypeError; see (*Interpreter).setThrow.
+func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool, error) {
 	// Search the prototype chain for an accessor or a non-writable data
 	// property that governs the assignment.
 	for cur := o; cur != nil; cur = cur.proto {
@@ -63,29 +75,29 @@ func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
 		}
 		if p.Accessor {
 			if p.Set == nil {
-				return nil // no setter: ignore (would throw in strict mode)
+				return false, nil // no setter: drop (would throw in strict mode)
 			}
 			_, err := p.Set.fn.call(ctx, o, []Value{v})
-			return err
+			return err == nil, err
 		}
 		if cur == o {
 			// Own data property: update in place if writable.
 			if !p.Writable {
-				return nil
+				return false, nil
 			}
 			o.writeData(key, v)
-			return nil
+			return true, nil
 		}
 		if !p.Writable {
-			return nil // inherited read-only data property blocks the write
+			return false, nil // inherited read-only data property blocks the write
 		}
 		break // inherited writable data property: create an own property
 	}
 	if !o.extensible {
-		return nil
+		return false, nil
 	}
 	o.writeData(key, v)
-	return nil
+	return true, nil
 }
 
 // SetStr is Set for a string key.
