@@ -1,6 +1,9 @@
 package interp
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // This file exposes the host-facing event-loop API. It is the sanctioned way
 // for a concurrent host provider (HTTP, filesystem, DB, DNS, subprocess, …) to
@@ -39,6 +42,22 @@ func (i *Interpreter) Enqueue(fn func() error) {
 		i.loop.removeTimer()
 		return fn()
 	})
+}
+
+// Pin registers a unit of outstanding host work so the event loop keeps running
+// even when both task queues are momentarily empty — the same mechanism a
+// pending timer uses. It returns a release function that removes the
+// registration; call it exactly once when the work completes (extra calls are
+// no-ops). Use it to hold the loop open for the lifetime of a long-lived host
+// resource such as an open socket or event stream, so RunString/RunLoop does not
+// return while the resource can still deliver events. Safe to call from any
+// goroutine.
+func (i *Interpreter) Pin() (release func()) {
+	i.loop.addTimer()
+	var once sync.Once
+	return func() {
+		once.Do(i.loop.removeTimer)
+	}
 }
 
 // QueueMicrotask schedules fn to run as a microtask: after the current task and
