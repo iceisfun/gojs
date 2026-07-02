@@ -26,6 +26,17 @@ func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver 
 		if cur.proxy != nil {
 			return cur.proxy.get(ctx, key, receiver)
 		}
+		// A TypedArray serves a canonical numeric index directly and never
+		// consults the prototype chain for it (§10.4.5.4, TypedArrayGetElement
+		// returns undefined for an invalid index).
+		if cur.typedArray != nil && !key.IsSymbol() {
+			if n, ok := canonicalNumericIndex(key.Str); ok {
+				if idx, ok := cur.typedArray.validIndex(n); ok {
+					return cur.typedArray.getElement(idx), nil
+				}
+				return Undef, nil
+			}
+		}
 		if p, ok := cur.getOwn(key); ok {
 			if p.Accessor {
 				if p.Get == nil {
@@ -41,6 +52,14 @@ func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver 
 
 // Has reports whether key exists anywhere on the prototype chain.
 func (o *Object) Has(key PropertyKey) bool {
+	// A TypedArray's canonical numeric index [[HasProperty]] (§10.4.5.2) reports
+	// IsValidIntegerIndex without consulting the prototype chain.
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			_, valid := o.typedArray.validIndex(n)
+			return valid
+		}
+	}
 	for cur := o; cur != nil; cur = cur.proto {
 		if _, ok := cur.getOwn(key); ok {
 			return true
@@ -71,6 +90,14 @@ func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
 // with the Throw flag set, e.g. RegExpBuiltinExec assigning lastIndex — must
 // raise a TypeError; see (*Interpreter).setThrow.
 func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool, error) {
+	// A TypedArray's canonical numeric index [[Set]] (§10.4.5.5) writes through
+	// TypedArraySetElement: the value is coerced (which may run user code) and
+	// stored only when the index is in bounds; the write always "succeeds".
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			return o.typedArray.i.typedArraySetElement(ctx, o.typedArray, n, v)
+		}
+	}
 	// Search the prototype chain for an accessor or a non-writable data
 	// property that governs the assignment.
 	for cur := o; cur != nil; cur = cur.proto {
@@ -138,6 +165,15 @@ func (o *Object) writeData(key PropertyKey, v Value) {
 
 // Delete removes an own property, returning whether the object no longer has it.
 func (o *Object) Delete(key PropertyKey) bool {
+	// A TypedArray's canonical numeric index [[Delete]] (§10.4.5.5): a valid
+	// (in-bounds) index cannot be deleted; any other canonical numeric index
+	// "deletes" successfully as a no-op.
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			_, valid := o.typedArray.validIndex(n)
+			return !valid
+		}
+	}
 	if p, ok := o.props[key]; ok && !p.Configurable {
 		return false
 	}

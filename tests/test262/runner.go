@@ -55,7 +55,7 @@ type Result struct {
 // are language areas gojs does not implement yet; running them only produces
 // noise.
 var unsupportedFeatures = map[string]bool{
-	"Proxy": false, "Reflect": false, "TypedArray": true, "ArrayBuffer": true,
+	"Proxy": false, "Reflect": false, "TypedArray": false, "ArrayBuffer": false,
 	"SharedArrayBuffer": true, "Atomics": true, "WeakRef": true,
 	"FinalizationRegistry": true, "Temporal": true, "Intl": true,
 	"tail-call-optimization": true, "import-assertions": true,
@@ -236,6 +236,7 @@ func runMode(path, src string, m Meta, mode string) Result {
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
 	)
 	defer vm.Close()
+	installT262Host(vm)
 
 	full := prelude + harness + "\n" + src
 	done := make(chan error, 1)
@@ -288,4 +289,21 @@ func runMode(path, src string, m Meta, mode string) Result {
 	}
 	res.Outcome = Pass
 	return res
+}
+
+// installT262Host installs the $262 host object that some Test262 tests use.
+// Only the members our corpus needs are provided: detachArrayBuffer (backing
+// the many detached-buffer tests) and global (the global object). Unsupported
+// members are left absent so tests that require them fail visibly rather than
+// silently misbehaving.
+func installT262Host(vm *interp.Interpreter) {
+	host := vm.NewPlainObject()
+	host.SetData("global", vm.GetGlobal("globalThis"))
+	host.SetData("detachArrayBuffer", vm.NewFunction("detachArrayBuffer", func(args []interp.Value) (interp.Value, error) {
+		if len(args) > 0 {
+			vm.DetachArrayBuffer(args[0])
+		}
+		return interp.Undef, nil
+	}))
+	vm.SetGlobal("$262", host)
 }

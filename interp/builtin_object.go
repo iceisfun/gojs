@@ -527,6 +527,21 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 // value/writable, or a non-callable getter/setter) — a ToPropertyDescriptor
 // failure that throws even for Reflect.defineProperty — yields a non-nil error.
 func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
+	// A TypedArray's canonical numeric index [[DefineOwnProperty]] (§10.4.5.3):
+	// only a {writable, enumerable, configurable} data descriptor for a valid
+	// index is accepted, and its value is written through TypedArraySetElement.
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			if _, valid := o.typedArray.validIndex(n); !valid {
+				return false, nil
+			}
+			ok, err := i.taValidateElementDescriptor(ctx, o, n, desc)
+			if err != nil || !ok {
+				return ok, err
+			}
+			return true, nil
+		}
+	}
 	// Which attributes does the descriptor specify? Presence — not truthiness —
 	// determines what gets applied; absent fields are inherited from the
 	// current property (or take spec defaults for a brand-new one).

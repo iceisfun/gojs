@@ -306,6 +306,27 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 }
 
 func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Value) (Value, error) {
+	// Array.prototype.toString (§23.1.3.36) is generic: it calls the object's own
+	// "join" method, falling back to %Object.prototype.toString%. This is also
+	// %TypedArray.prototype.toString%, so it must not assume dense array storage.
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	joinV, err := o.GetStr(ctx, "join")
+	if err != nil {
+		return nil, err
+	}
+	if jo, ok := joinV.(*Object); ok && jo.IsCallable() {
+		return jo.fn.call(ctx, o, nil)
+	}
+	toStr, err := i.objectProto.GetStr(ctx, "toString")
+	if err != nil {
+		return nil, err
+	}
+	if to, ok := toStr.(*Object); ok && to.IsCallable() {
+		return to.fn.call(ctx, o, nil)
+	}
 	return i.arrayJoin(ctx, this, nil)
 }
 

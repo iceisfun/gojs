@@ -540,6 +540,21 @@ func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCt
 	if !ok || self == nil || parentObj == self {
 		return nil
 	}
+	// If the parent is an integer-indexed exotic (class X extends Uint8Array),
+	// adopt its TypedArray backing so element access routes through the shared
+	// buffer. The numeric-index "own properties" are not ordinary storage, so
+	// they must not be folded on (that is handled by the exotic slot).
+	if parentObj.typedArray != nil {
+		self.typedArray = parentObj.typedArray
+		self.class = parentObj.class
+		for key, p := range parentObj.props {
+			self.defineOwn(key, p)
+		}
+		for pn, p := range parentObj.private {
+			self.definePrivate(pn, p)
+		}
+		return nil
+	}
 	// If the parent is an exotic Array (class X extends Array), the instance
 	// must itself be array-backed so length/indexing/push work on it.
 	if parentObj.isArray {
