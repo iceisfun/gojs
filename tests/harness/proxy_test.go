@@ -197,3 +197,25 @@ func TestProxyRevokedInvariant(t *testing.T) {
 		assert.sameValue(count, 4, "all ops throw TypeError after revoke");
 	`)
 }
+
+// A handler trap that revokes its own proxy mid-operation must not crash the
+// host: the internal method binds target before invoking the trap, so the
+// post-trap invariant checks still see a valid target. Constructing through a
+// revoked-proxy new.target throws a TypeError (GetFunctionRealm on a revoked
+// proxy). Regression for a nil-target panic.
+func TestProxyRevokeDuringTrap(t *testing.T) {
+	ExpectError(t, `
+		var handle = Proxy.revocable(function () {}, {
+			get: function () { handle.revoke(); }
+		});
+		new handle.proxy();
+	`, "TypeError")
+	// A get that revokes mid-read must not panic; it returns the trap result.
+	Expect(t, `
+		var handle = Proxy.revocable({}, { get: function () { handle.revoke(); return 42; } });
+		assert.sameValue(handle.proxy.x, 42);
+		var threw = false;
+		try { handle.proxy.y; } catch (e) { threw = (e instanceof TypeError); }
+		assert(threw, "operating on a revoked proxy throws TypeError");
+	`)
+}

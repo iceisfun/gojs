@@ -14,10 +14,15 @@ type proxyState struct {
 	i       *Interpreter
 	target  *Object
 	handler *Object
+	isRevkd bool
 }
 
-// revoked reports whether the proxy has been revoked.
-func (p *proxyState) revoked() bool { return p.handler == nil }
+// revoked reports whether the proxy has been revoked. Revocation is tracked with
+// a flag rather than by nil-ing target/handler, so a handler trap that revokes
+// the proxy mid-operation (e.g. a "get" trap calling revoke) leaves target valid
+// for the subsequent invariant checks — matching the spec, where each internal
+// method binds target to a local before invoking the trap.
+func (p *proxyState) revoked() bool { return p.isRevkd }
 
 // checkRevoked throws a TypeError when the proxy has been revoked.
 func (p *proxyState) checkRevoked(ctx context.Context) error {
@@ -651,8 +656,7 @@ func (i *Interpreter) initProxy() {
 		}
 		st := pobj.proxy
 		revoke := i.newNativeFunc("", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
-			st.target = nil
-			st.handler = nil
+			st.isRevkd = true
 			return Undef, nil
 		})
 		result := NewObject(i.objectProto)

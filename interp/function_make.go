@@ -188,9 +188,18 @@ func (i *Interpreter) makeConstruct(fnObj *Object, call CallFn) CallFn {
 		if nt, ok := newTarget.(*Object); ok {
 			protoSource = nt
 		}
-		protoV, _ := protoSource.GetStr(ctx, "prototype")
+		protoV, err := protoSource.GetStr(ctx, "prototype")
+		if err != nil {
+			return nil, err
+		}
 		proto, ok := protoV.(*Object)
 		if !ok {
+			// GetPrototypeFromConstructor falls back to new.target's realm's
+			// %Object.prototype%; GetFunctionRealm throws for a revoked proxy
+			// (which a "get" trap may have revoked while reading "prototype").
+			if protoSource.proxy != nil && protoSource.proxy.revoked() {
+				return nil, i.throwError(ctx, "TypeError", "Cannot construct with a revoked proxy as new.target")
+			}
 			proto = i.objectProto
 		}
 		self := NewObject(proto)
