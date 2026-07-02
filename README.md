@@ -166,18 +166,18 @@ promise microtasks run) before returning.
 ## CLI
 
 ```bash
-gojs script.js            # run a file
-gojs -e "console.log(1)"  # evaluate a snippet
-gojs < script.js          # read from stdin
+go install github.com/iceisfun/gojs/cmd/gojs@latest
 
-gojs --sandbox script.js  # run with the closed sandbox (no providers)
-gojs --no-timers ...       # disable setTimeout/setInterval
-gojs --timeout 500 ...     # cancel after 500ms
+gojs run app.js          # run a JavaScript file
+gojs run app.ts          # TypeScript, transpiled in-process
 ```
 
-By default the CLI installs the `Default*` providers (the standalone-runner
-trust level). `--sandbox` runs with no providers at all. `--ast` prints the
-parsed syntax tree instead of executing.
+The runner resolves `require()`/imports against the entry file's directory
+(TypeScript modules are transpiled on load) and installs the standalone-runner
+capabilities: `console`, timers, and a Node-like **`process`** (`argv`, `env`,
+`stdout.write`, `exit`, `hrtime`, `nextTick`). These are ordinary host
+capabilities — `process` is the [`host/process`](host/process) package, which an
+embedder installs (and sandboxes) explicitly per VM.
 
 ## Go interop
 

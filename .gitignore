@@ -1,6 +1,6 @@
 reference/
 .gocache/
-gojs
+/gojs
 cmd/gojs/gojs
 NOTES-divergences.md
 reference
