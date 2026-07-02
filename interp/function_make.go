@@ -76,7 +76,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
 		if def.Generator && kind == kindNormal {
-			return i.makeGenerator(def, closure, homeObj, i.bindThisValue(this, strict), args)
+			return i.makeGenerator(fnObj, def, closure, homeObj, i.bindThisValue(this, strict), args)
 		}
 		// An async function returns a promise driven through the microtask
 		// queue (see asyncRun).

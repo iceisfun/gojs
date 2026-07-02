@@ -72,6 +72,7 @@ func (i *Interpreter) bootstrap() {
 	i.initPromise()
 	i.initAsyncGenerator()
 	i.initGenAsyncFunctions()
+	i.initGenerator()
 	i.initReflect()
 	i.initProxy()
 	i.initConsole()

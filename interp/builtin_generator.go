@@ -24,6 +24,10 @@ type generatorState struct {
 	resume chan resumeMsg // consumer → body: value/behavior for the pending yield
 	out    chan yieldMsg  // body → consumer: a yielded/returned/thrown result
 	done   bool
+	// executing is true while the body is running between a resume and the next
+	// suspension/completion. A re-entrant resume observed during this window is
+	// the "executing" state of GeneratorValidate (ECMA-262 §27.5.3.2 step 5).
+	executing bool
 	// asyncGen is true when this coroutine drives an async generator, so a
 	// `yield` first awaits its operand before delivering it to the consumer.
 	asyncGen bool
@@ -147,19 +151,23 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 			}
 			start()
 		}
+		gs.executing = true
 		select {
 		case gs.resume <- msg:
 		case <-gs.ctx.Done():
+			gs.executing = false
 			gs.done = true
 			return yieldMsg{done: true, err: gs.ctx.Err()}
 		}
 		select {
 		case res := <-gs.out:
+			gs.executing = false
 			if res.done {
 				gs.done = true
 			}
 			return res
 		case <-gs.ctx.Done():
+			gs.executing = false
 			gs.done = true
 			return yieldMsg{done: true, err: gs.ctx.Err()}
 		}
@@ -167,54 +175,106 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 	return gs, advance, nil
 }
 
+// generatorInstance carries the coroutine state backing a generator object. It
+// is stored in the object's internal "Generator" slot (the [[GeneratorState]]/
+// [[GeneratorContext]] pair of ECMA-262 §27.5) so that the shared
+// %GeneratorPrototype% methods can locate it from their `this` receiver.
+type generatorInstance struct {
+	gs      *generatorState
+	advance func(resumeMsg) yieldMsg
+}
+
+// generatorInstanceOf returns the generator backing receiver this, or nil when
+// this is not a generator object (GeneratorValidate §27.5.3.2 steps 1–2).
+func generatorInstanceOf(this Value) *generatorInstance {
+	o, ok := this.(*Object)
+	if !ok || o.internal == nil {
+		return nil
+	}
+	g, _ := o.internal["Generator"].(*generatorInstance)
+	return g
+}
+
 // makeGenerator builds the generator-object factory: calling a generator
 // function returns a fresh generator (iterator) object without running the body.
-func (i *Interpreter) makeGenerator(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
+// The next/return/throw methods live on %GeneratorPrototype% (see initGenerator);
+// the object only carries the coroutine state in its internal slot.
+func (i *Interpreter) makeGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
 	gs, advance, err := i.startCoroutine(def, closure, homeObj, this, args, false)
 	if err != nil {
 		return nil, err
 	}
 
-	genObj := NewObject(i.generatorProto)
-	genObj.class = "Generator"
-
-	result := func(value Value, done bool) *Object {
-		o := NewObject(i.objectProto)
-		o.SetData("value", value)
-		o.SetData("done", Bool(done))
-		return o
+	// OrdinaryCreateFromConstructor(fnObj, "%GeneratorPrototype%"): the instance's
+	// [[Prototype]] is the generator function's own .prototype object (which itself
+	// inherits from %GeneratorPrototype%), falling back to the intrinsic when that
+	// property is not an object.
+	instProto := i.generatorProto
+	if fnObj != nil {
+		if p, ok := fnObj.getOwn(StrKey("prototype")); ok && !p.Accessor {
+			if po, isObj := p.Value.(*Object); isObj {
+				instProto = po
+			}
+		}
 	}
-	step := func(msg resumeMsg) (Value, error) {
-		res := advance(msg)
+	genObj := NewObject(instProto)
+	genObj.class = "Generator"
+	genObj.internal = map[string]any{"Generator": &generatorInstance{gs: gs, advance: advance}}
+	return genObj, nil
+}
+
+// initGenerator installs the own properties of %GeneratorPrototype% (ECMA-262
+// §27.5.1): the shared next/return/throw methods, the constructor back-reference
+// to %Generator% (%GeneratorFunction.prototype%), and the @@toStringTag. The
+// [ @@iterator ] () method is inherited from %IteratorPrototype%.
+func (i *Interpreter) initGenerator() {
+	proto := i.generatorProto
+
+	// resume performs GeneratorValidate + GeneratorResume/GeneratorResumeAbrupt
+	// (§27.5.3.2–27.5.3.4) for the given mode.
+	resume := func(ctx context.Context, name string, this Value, val Value, mode resumeMode) (Value, error) {
+		inst := generatorInstanceOf(this)
+		if inst == nil {
+			return nil, i.throwError(ctx, "TypeError", "Generator.prototype."+name+" called on a non-generator object")
+		}
+		gs := inst.gs
+		// GeneratorValidate step 5: resuming while "executing" is a TypeError and
+		// leaves the generator completed.
+		if gs.executing {
+			gs.done = true
+			return nil, i.throwError(ctx, "TypeError", "generator is already running")
+		}
+		if gs.done {
+			switch mode {
+			case resumeReturn:
+				return i.createIterResult(val, true), nil
+			case resumeThrow:
+				return nil, NewThrow(val)
+			default: // resumeNext
+				return i.createIterResult(Undef, true), nil
+			}
+		}
+		res := inst.advance(resumeMsg{value: val, mode: mode})
 		if res.err != nil {
 			return nil, res.err
 		}
-		return result(res.value, res.done), nil
+		return i.createIterResult(res.value, res.done), nil
 	}
 
-	i.defineMethod(genObj, "next", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
-		return step(resumeMsg{value: arg(a, 0), mode: resumeNext})
+	i.defineMethod(proto, "next", 1, func(ctx context.Context, this Value, a []Value) (Value, error) {
+		return resume(ctx, "next", this, arg(a, 0), resumeNext)
 	})
-	i.defineMethod(genObj, "return", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
-		if gs.done {
-			return result(arg(a, 0), true), nil
-		}
-		return step(resumeMsg{value: arg(a, 0), mode: resumeReturn})
+	i.defineMethod(proto, "return", 1, func(ctx context.Context, this Value, a []Value) (Value, error) {
+		return resume(ctx, "return", this, arg(a, 0), resumeReturn)
 	})
-	i.defineMethod(genObj, "throw", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
-		if gs.done {
-			return nil, NewThrow(arg(a, 0))
-		}
-		return step(resumeMsg{value: arg(a, 0), mode: resumeThrow})
-	})
-	// A generator is its own iterator.
-	genObj.defineOwn(SymKey(i.symIterator), &Property{
-		Value:        i.newNativeFunc("[Symbol.iterator]", 0, func(ctx context.Context, this Value, a []Value) (Value, error) { return this, nil }),
-		Writable:     true,
-		Configurable: true,
+	i.defineMethod(proto, "throw", 1, func(ctx context.Context, this Value, a []Value) (Value, error) {
+		return resume(ctx, "throw", this, arg(a, 0), resumeThrow)
 	})
 
-	return genObj, nil
+	// %GeneratorPrototype%.constructor is %Generator% (i.e. %GeneratorFunction%'s
+	// prototype), non-writable/non-enumerable/configurable.
+	proto.defineOwn(StrKey("constructor"), &Property{Value: i.genFuncProto, Writable: false, Enumerable: false, Configurable: true})
+	proto.defineOwn(SymKey(i.symToStringTag), &Property{Value: String("Generator"), Writable: false, Enumerable: false, Configurable: true})
 }
 
 // runGeneratorBody executes a generator body, hoisting declarations first. It is
