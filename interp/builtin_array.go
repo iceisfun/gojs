@@ -23,6 +23,7 @@ func (i *Interpreter) initArray() {
 
 	ctor := i.newNativeCtor("Array", 1, i.arrayConstruct, i.arrayConstruct)
 	linkCtor(ctor, proto)
+	i.defineSpeciesGetter(ctor)
 	i.defineMethod(ctor, "isArray", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, ok := arg(args, 0).(*Object)
 		return Bool(ok && o.isArray), nil

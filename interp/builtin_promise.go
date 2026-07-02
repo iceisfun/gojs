@@ -189,6 +189,7 @@ func (i *Interpreter) initPromise() {
 	}
 	ctor := i.newNativeCtor("Promise", 1, callFn, constructFn)
 	linkCtor(ctor, proto)
+	i.defineSpeciesGetter(ctor)
 
 	// -----------------------------------------------------------------------
 	// Promise.resolve(value)
