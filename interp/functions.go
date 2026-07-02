@@ -52,6 +52,15 @@ func (i *Interpreter) defineMethod(target *Object, name string, length int, fn C
 	return m
 }
 
+// defineGetter installs a non-enumerable, configurable accessor property named
+// name whose get accessor is a native function named "get <name>" (matching the
+// spec's naming for built-in getters) and whose set accessor is undefined.
+func (i *Interpreter) defineGetter(target *Object, name string, fn CallFn) *Object {
+	get := i.newNativeFunc("get "+name, 0, fn)
+	target.DefineAccessor(name, get, nil, false)
+	return get
+}
+
 // defineSymbolMethod installs a hidden native method under a symbol key.
 func (i *Interpreter) defineSymbolMethod(target *Object, sym *Symbol, name string, length int, fn CallFn) *Object {
 	m := i.newNativeFunc(name, length, fn)

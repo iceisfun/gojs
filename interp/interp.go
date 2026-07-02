@@ -135,14 +135,18 @@ type intrinsics struct {
 	iteratorCtor              *Object // %Iterator%
 	generatorProto            *Object
 	dateProto                 *Object
+	arrayBufferProto          *Object // %ArrayBuffer.prototype%
+	dataViewProto             *Object // %DataView.prototype%
 
 	// legacyNullGetter backs the Annex B "caller"/"arguments" own accessors on
 	// sloppy plain functions: it always returns null (never a strict function).
 	legacyNullGetter *Object
 
-	objectCtor   *Object
-	functionCtor *Object
-	arrayCtor    *Object
+	objectCtor      *Object
+	functionCtor    *Object
+	arrayCtor       *Object
+	arrayBufferCtor *Object // %ArrayBuffer%
+	dataViewCtor    *Object // %DataView%
 
 	// nativeErrorProtos maps an error name (TypeError, RangeError, ...) to its
 	// prototype, so runtime code can raise the right error kind.
