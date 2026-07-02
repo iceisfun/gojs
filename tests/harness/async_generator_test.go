@@ -88,6 +88,40 @@ func TestAsyncGeneratorPrototypeShape(t *testing.T) {
 	`)
 }
 
+func TestForAwaitOfAsyncGenerator(t *testing.T) {
+	Expect(t, asyncCase(`
+		async function* ag() { yield 1; yield 2; yield 3; }
+		var out = [];
+		for await (var x of ag()) { out.push(x); }
+		assert.sameValue(out.join(","), "1,2,3");
+	`))
+}
+
+func TestForAwaitOfSyncIterableOfPromises(t *testing.T) {
+	// A sync iterable is wrapped like AsyncFromSyncIterator: each value is awaited.
+	Expect(t, asyncCase(`
+		var out = [];
+		for await (var v of [Promise.resolve("a"), Promise.resolve("b"), "c"]) { out.push(v); }
+		assert.sameValue(out.join(","), "a,b,c");
+	`))
+}
+
+func TestForAwaitOfBreakClosesIterator(t *testing.T) {
+	Expect(t, asyncCase(`
+		var closed = false;
+		var iter = {
+			[Symbol.asyncIterator]() { return this; },
+			i: 0,
+			next() { return Promise.resolve({ value: this.i++, done: false }); },
+			return(v) { closed = true; return Promise.resolve({ value: v, done: true }); }
+		};
+		var seen = [];
+		for await (var x of iter) { seen.push(x); if (x === 2) break; }
+		assert.sameValue(seen.join(","), "0,1,2");
+		assert.sameValue(closed, true, "break awaits the iterator's return()");
+	`))
+}
+
 func TestAsyncGeneratorBrandCheck(t *testing.T) {
 	// Called on a non-async-generator receiver, next rejects (never throws).
 	Expect(t, asyncCase(`

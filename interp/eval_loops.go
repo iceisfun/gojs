@@ -207,6 +207,10 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		return classifyLoopSignal(err, label), err
 	}
 
+	if s.Await {
+		return i.runForAwait(ctx, env, rhs, runBody, &completion)
+	}
+
 	if s.Of {
 		// for-of drives the iteration protocol directly so that it can close the
 		// iterator (call its return method) on any abrupt completion — break, a
@@ -277,6 +281,123 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		}
 	}
 	return completion, nil
+}
+
+// runForAwait evaluates a `for await (... of ...)` loop (§14.7.5.7 with the
+// async iteration hint). It obtains the async iterator (@@asyncIterator, or the
+// sync iterator with each value awaited, per AsyncFromSyncIterator) and awaits
+// every iterator step by suspending the enclosing async coroutine.
+func (i *Interpreter) runForAwait(ctx context.Context, env *Environment, rhs Value, runBody func(Value) (loopControl, error), completion *Value) (Value, error) {
+	gs := env.generator()
+	if gs == nil {
+		return nil, i.throwError(ctx, "SyntaxError", "for await is only valid inside an async function or async generator")
+	}
+
+	// Prefer the async-iteration protocol: result = await iterator.next().
+	asyncMethod, err := i.getMethod(ctx, rhs, i.symAsyncIterator)
+	if err != nil {
+		return nil, err
+	}
+	if asyncMethod != nil {
+		iterV, err := i.call(ctx, asyncMethod, rhs, nil)
+		if err != nil {
+			return nil, err
+		}
+		iter, ok := iterV.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "[Symbol.asyncIterator]() returned a non-object")
+		}
+		nextMethod, err := i.getMethodStr(ctx, iter, "next")
+		if err != nil {
+			return nil, err
+		}
+		if nextMethod == nil {
+			return nil, i.throwError(ctx, "TypeError", "async iterator has no next method")
+		}
+		for {
+			nres, err := i.call(ctx, nextMethod, iter, nil)
+			if err != nil {
+				return *completion, err
+			}
+			settled, err := i.doAwait(gs, nres)
+			if err != nil {
+				return *completion, err
+			}
+			res, ok := settled.(*Object)
+			if !ok {
+				return *completion, i.throwError(ctx, "TypeError", "iterator result is not an object")
+			}
+			doneV, err := res.GetStr(ctx, "done")
+			if err != nil {
+				return *completion, err
+			}
+			if ToBoolean(doneV) {
+				return *completion, nil
+			}
+			val, err := res.GetStr(ctx, "value")
+			if err != nil {
+				return *completion, err
+			}
+			sig, bodyErr := runBody(val)
+			switch sig {
+			case loopContinue, loopNormal:
+				continue
+			case loopBreak:
+				i.asyncIteratorClose(ctx, gs, iter)
+				return *completion, nil
+			default:
+				i.asyncIteratorClose(ctx, gs, iter)
+				return *completion, bodyErr
+			}
+		}
+	}
+
+	// AsyncFromSyncIterator fallback: iterate synchronously and await each value.
+	step, closeIter, err := i.patternIterator(ctx, rhs)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		v, done, err := step()
+		if err != nil {
+			return *completion, err
+		}
+		if done {
+			return *completion, nil
+		}
+		awaited, err := i.doAwait(gs, v)
+		if err != nil {
+			_ = closeIter()
+			return *completion, err
+		}
+		sig, bodyErr := runBody(awaited)
+		switch sig {
+		case loopContinue, loopNormal:
+			continue
+		case loopBreak:
+			if e := closeIter(); e != nil {
+				return *completion, e
+			}
+			return *completion, nil
+		default:
+			_ = closeIter()
+			return *completion, bodyErr
+		}
+	}
+}
+
+// asyncIteratorClose calls an async iterator's return() (if any) on abrupt
+// completion and awaits it, discarding the outcome (best-effort AsyncIteratorClose).
+func (i *Interpreter) asyncIteratorClose(ctx context.Context, gs *generatorState, iter *Object) {
+	ret, err := i.getMethodStr(ctx, iter, "return")
+	if err != nil || ret == nil {
+		return
+	}
+	res, err := i.call(ctx, ret, iter, nil)
+	if err != nil {
+		return
+	}
+	_, _ = i.doAwait(gs, res)
 }
 
 // stillEnumerable reports whether name is still an enumerable property somewhere
