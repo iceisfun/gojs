@@ -112,6 +112,17 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		fnObj.fn.construct = i.makeConstruct(fnObj, call)
 		fnObj.fn.ctor = true
 	}
+
+	// Annex B legacy "caller"/"arguments": only sloppy plain function
+	// declarations/expressions get own accessors (returning null). Strict
+	// functions, generators, async functions, methods (homeObj != nil), arrows,
+	// and bound functions instead inherit the poison pills from
+	// %Function.prototype%.
+	if kind == kindNormal && !strict && !def.Generator && !def.Async && homeObj == nil && i.legacyNullGetter != nil {
+		g := i.legacyNullGetter
+		fnObj.defineOwn(StrKey("caller"), &Property{Get: g, Accessor: true, Enumerable: false, Configurable: true})
+		fnObj.defineOwn(StrKey("arguments"), &Property{Get: g, Accessor: true, Enumerable: false, Configurable: true})
+	}
 	return fnObj
 }
 

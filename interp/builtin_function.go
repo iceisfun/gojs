@@ -123,6 +123,13 @@ func (i *Interpreter) initFunction() {
 	proto.defineOwn(StrKey("caller"), &Property{Get: thrower, Set: thrower, Accessor: true, Enumerable: false, Configurable: true})
 	proto.defineOwn(StrKey("arguments"), &Property{Get: thrower, Set: thrower, Accessor: true, Enumerable: false, Configurable: true})
 
+	// Annex B legacy getter shared by the sloppy-function own "caller"/
+	// "arguments" accessors: it always returns null (never a strict function),
+	// which is all the forbidden-extension tests require.
+	i.legacyNullGetter = i.newNativeFunc("", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
+		return Nul, nil
+	})
+
 	// The Function constructor builds a function from source strings
 	// (CreateDynamicFunction). Both `Function(...)` and `new Function(...)`
 	// route here; it can be gated off via Security.DisableFunctionCtor.

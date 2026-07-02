@@ -127,6 +127,10 @@ type intrinsics struct {
 	generatorProto            *Object
 	dateProto                 *Object
 
+	// legacyNullGetter backs the Annex B "caller"/"arguments" own accessors on
+	// sloppy plain functions: it always returns null (never a strict function).
+	legacyNullGetter *Object
+
 	objectCtor   *Object
 	functionCtor *Object
 	arrayCtor    *Object
