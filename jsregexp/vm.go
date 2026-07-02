@@ -149,7 +149,7 @@ func (re *Regexp) FindSubmatchIndex(ctx context.Context, input []uint16, start i
 		ctx:     ctx,
 		limit:   re.stepLimit,
 	}
-	for at := start; at <= len(input); at++ {
+	for at := start; at <= len(input); at = m.nextStart(at) {
 		// Charge one step per starting position so advancing the anchor is itself
 		// bounded and periodically polls the context.
 		if !m.step() {
@@ -175,4 +175,18 @@ func (re *Regexp) FindSubmatchIndex(ctx context.Context, input []uint16, start i
 		}
 	}
 	return nil, nil
+}
+
+// nextStart advances the unanchored search anchor by one position. In Unicode
+// mode the anchor moves by a whole code point — two units across a surrogate
+// pair — so a match can never begin between the halves of an astral character
+// (§22.2.7.2 RegExpBuiltinExec uses AdvanceStringIndex for each retry). In
+// non-Unicode mode every code unit is its own position.
+func (m *machine) nextStart(at int) int {
+	if m.unicode && at < len(m.input) &&
+		m.input[at] >= 0xD800 && m.input[at] <= 0xDBFF &&
+		at+1 < len(m.input) && m.input[at+1] >= 0xDC00 && m.input[at+1] <= 0xDFFF {
+		return at + 2
+	}
+	return at + 1
 }

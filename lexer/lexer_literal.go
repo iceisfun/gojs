@@ -252,7 +252,7 @@ func (l *Lexer) scanEscape(b *strings.Builder) {
 		b.WriteRune(rune(hi*16 + lo))
 	case 'u':
 		l.readRune()
-		l.scanUnicodeEscape(b)
+		l.scanUnicodeEscapeCombining(b)
 	case '\r':
 		// Line continuation: \<CR><LF>? produces nothing.
 		l.readRune()
@@ -284,34 +284,65 @@ func (l *Lexer) scanOctalEscape(b *strings.Builder) {
 	b.WriteRune(rune(val))
 }
 
-// scanUnicodeEscape decodes \uXXXX or \u{XXXXXX} (the "\u" is already consumed).
-func (l *Lexer) scanUnicodeEscape(b *strings.Builder) {
+// scanUnicodeEscape decodes \uXXXX or \u{XXXXXX} (the "\u" is already consumed)
+// and returns the decoded code point, whether the braced \u{} form was used, and
+// whether decoding succeeded.
+func (l *Lexer) scanUnicodeEscape() (val rune, braced, ok bool) {
 	if l.ch == '{' {
 		l.readRune()
-		val := 0
+		v := 0
 		for isHexDigit(l.ch) {
-			val = val*16 + hexVal(l.ch)
+			v = v*16 + hexVal(l.ch)
 			l.readRune()
 		}
 		if l.ch != '}' {
 			l.errorf("invalid Unicode escape sequence")
-			return
+			return 0, true, false
 		}
 		l.readRune()
-		b.WriteRune(rune(val))
-		return
+		return rune(v), true, true
 	}
-	val := 0
+	v := 0
 	for i := 0; i < 4; i++ {
 		d := hexVal(l.ch)
 		if d < 0 {
 			l.errorf("invalid Unicode escape sequence")
-			return
+			return 0, false, false
 		}
-		val = val*16 + d
+		v = v*16 + d
 		l.readRune()
 	}
-	b.WriteRune(rune(val))
+	return rune(v), false, true
+}
+
+// scanUnicodeEscapeCombining decodes a \u escape and writes it to b, combining a
+// leading-surrogate \uHHHH escape with an immediately following trailing-surrogate
+// \uHHHH escape into the single astral code point they denote (ECMAScript string
+// literal SV). This preserves astral characters written as surrogate-pair escapes,
+// which Go's strings.Builder would otherwise turn into two U+FFFD replacements.
+// Only the non-braced 4-hex form pairs; a \u{...} code-point escape does not.
+func (l *Lexer) scanUnicodeEscapeCombining(b *strings.Builder) {
+	hi, braced, ok := l.scanUnicodeEscape()
+	if !ok {
+		return
+	}
+	if !braced && hi >= 0xD800 && hi <= 0xDBFF && l.ch == '\\' && l.peek() == 'u' {
+		l.readRune() // consume '\'
+		l.readRune() // consume 'u'
+		lo, loBraced, ok := l.scanUnicodeEscape()
+		if !ok {
+			b.WriteRune(hi)
+			return
+		}
+		if !loBraced && lo >= 0xDC00 && lo <= 0xDFFF {
+			b.WriteRune((hi-0xD800)<<10 + (lo - 0xDC00) + 0x10000)
+			return
+		}
+		b.WriteRune(hi)
+		b.WriteRune(lo)
+		return
+	}
+	b.WriteRune(hi)
 }
 
 // scanTemplate scans a template literal segment. When head is true the current
