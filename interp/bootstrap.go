@@ -59,6 +59,7 @@ func (i *Interpreter) bootstrap() {
 	i.initJSON()
 	i.initRegExp()
 	i.initCollections()
+	i.initIterator()
 	i.initDate()
 	i.initPromise()
 	i.initConsole()
