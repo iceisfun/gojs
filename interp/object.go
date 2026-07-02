@@ -140,6 +140,12 @@ type Object struct {
 	// internal method through the handler's traps (see builtin_proxy.go).
 	proxy *proxyState
 
+	// typedArray is non-nil for an integer-indexed (TypedArray) exotic object.
+	// When set, canonical numeric index property keys are served from the
+	// viewed ArrayBuffer's bytes rather than ordinary storage; see
+	// builtin_typedarray.go.
+	typedArray *typedArrayData
+
 	// private holds ECMAScript private class elements (#fields, #methods, and
 	// private accessors), keyed by PrivateName identity. These are not ordinary
 	// properties: they are invisible to property enumeration, [[Get]]/[[Set]],
@@ -274,6 +280,17 @@ func (o *Object) denseCopy() []Value {
 // getOwn returns the own-property descriptor for key, synthesizing descriptors
 // for array elements and array length on demand.
 func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
+	// A TypedArray serves canonical numeric index keys from its backing buffer
+	// (IntegerIndexed [[GetOwnProperty]], §10.4.5.1). An out-of-bounds index is
+	// absent; other keys fall through to ordinary storage.
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			if idx, ok := o.typedArray.validIndex(n); ok {
+				return &Property{Value: o.typedArray.getElement(idx), Writable: true, Enumerable: true, Configurable: true}, true
+			}
+			return nil, false
+		}
+	}
 	if o.isArray && !key.IsSymbol() {
 		if key.Str == "length" {
 			return &Property{Value: Number(float64(len(o.elems))), Writable: true}, true
@@ -351,6 +368,23 @@ func (o *Object) deleteOwn(key PropertyKey) bool {
 // order mandated by the spec: integer indices ascending, then other string keys
 // in insertion order. Symbol keys are excluded.
 func (o *Object) OwnKeys() []string {
+	// A TypedArray enumerates its in-bounds integer indices (0..length-1)
+	// ascending, then its ordinary non-index string keys in insertion order
+	// (§10.4.5.6). A canonical numeric index is never stored ordinarily.
+	if o.typedArray != nil {
+		var out []string
+		if oob, length := o.typedArray.outOfBounds(); !oob {
+			for j := 0; j < length; j++ {
+				out = append(out, intToStr(j))
+			}
+		}
+		for _, k := range o.keys {
+			if !k.IsSymbol() {
+				out = append(out, k.Str)
+			}
+		}
+		return out
+	}
 	var indices []int
 	var strs []string
 	if o.isArray {

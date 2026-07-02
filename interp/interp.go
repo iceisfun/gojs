@@ -137,6 +137,12 @@ type intrinsics struct {
 	dateProto                 *Object
 	arrayBufferProto          *Object // %ArrayBuffer.prototype%
 	dataViewProto             *Object // %DataView.prototype%
+	typedArrayProto           *Object // %TypedArray.prototype%
+	typedArrayCtor            *Object // %TypedArray% (the abstract intrinsic)
+	// typedArrayKindProtos / typedArrayKindCtors map each concrete kind to its
+	// per-kind %TypedArray.prototype% subclass and constructor.
+	typedArrayKindProtos map[taKind]*Object
+	typedArrayKindCtors  map[taKind]*Object
 
 	// legacyNullGetter backs the Annex B "caller"/"arguments" own accessors on
 	// sloppy plain functions: it always returns null (never a strict function).

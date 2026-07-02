@@ -35,6 +35,12 @@ func (i *Interpreter) setV(ctx context.Context, o *Object, key PropertyKey, v, r
 // hasV performs [[HasProperty]], walking the prototype chain so a Proxy at any
 // depth intercepts the lookup.
 func (i *Interpreter) hasV(ctx context.Context, o *Object, key PropertyKey) (bool, error) {
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			_, valid := o.typedArray.validIndex(n)
+			return valid, nil
+		}
+	}
 	for cur := o; cur != nil; cur = cur.proto {
 		if cur.proxy != nil {
 			return cur.proxy.has(ctx, key)
@@ -122,6 +128,20 @@ func (i *Interpreter) preventExtensionsV(ctx context.Context, o *Object) (bool, 
 // ordinarySet implements OrdinarySet / OrdinarySetWithOwnDescriptor (§10.1.9)
 // with an explicit receiver, returning whether the assignment took effect.
 func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKey, v, receiver Value) (bool, error) {
+	// A TypedArray's canonical numeric index [[Set]] (§10.4.5.5): when the
+	// receiver is the typed array itself, write the element; otherwise an
+	// out-of-bounds index is a silent success and an in-bounds index falls
+	// through to OrdinarySet with the alternate receiver.
+	if o.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			if receiver == Value(o) {
+				return i.typedArraySetElement(ctx, o.typedArray, n, v)
+			}
+			if _, valid := o.typedArray.validIndex(n); !valid {
+				return true, nil
+			}
+		}
+	}
 	ownDesc, ok := o.getOwn(key)
 	if !ok {
 		if o.proto != nil {

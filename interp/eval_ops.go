@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"math/big"
+	"strings"
 
 	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/token"
@@ -334,42 +335,116 @@ func (i *Interpreter) evalRelational(ctx context.Context, op token.Type, left, r
 	if err != nil {
 		return nil, err
 	}
-	ls, lok := lp.(String)
-	rs, rok := rp.(String)
-	if lok && rok {
-		switch op {
-		case token.LT:
-			return Bool(ls < rs), nil
-		case token.GT:
-			return Bool(ls > rs), nil
-		case token.LE:
-			return Bool(ls <= rs), nil
-		case token.GE:
-			return Bool(ls >= rs), nil
-		}
-	}
-	ln, err := i.ToNumberV(ctx, lp)
-	if err != nil {
-		return nil, err
-	}
-	rn, err := i.ToNumberV(ctx, rp)
-	if err != nil {
-		return nil, err
-	}
-	if math.IsNaN(ln) || math.IsNaN(rn) {
-		return False, nil
-	}
+	// IsLessThan (§7.2.13). For x < y evaluate lessThan(lp, rp); for x > y swap
+	// the operands; <= and >= are the negations of the reversed comparison. An
+	// undefined result (a NaN operand) makes every operator false.
 	switch op {
 	case token.LT:
-		return Bool(ln < rn), nil
+		res, undef, err := i.abstractLessThan(ctx, lp, rp)
+		return Bool(!undef && res), err
 	case token.GT:
-		return Bool(ln > rn), nil
+		res, undef, err := i.abstractLessThan(ctx, rp, lp)
+		return Bool(!undef && res), err
 	case token.LE:
-		return Bool(ln <= rn), nil
+		res, undef, err := i.abstractLessThan(ctx, rp, lp)
+		return Bool(!undef && !res), err
 	case token.GE:
-		return Bool(ln >= rn), nil
+		res, undef, err := i.abstractLessThan(ctx, lp, rp)
+		return Bool(!undef && !res), err
 	}
 	return False, nil
+}
+
+// abstractLessThan implements IsLessThan (§7.2.13) on two already-primitive
+// values, returning the comparison result and whether it is "undefined" (a NaN
+// operand). It supports String/String, Number/Number, BigInt/BigInt, and mixed
+// BigInt–Number / BigInt–String comparisons.
+func (i *Interpreter) abstractLessThan(ctx context.Context, px, py Value) (bool, bool, error) {
+	ls, lok := px.(String)
+	rs, rok := py.(String)
+	if lok && rok {
+		return string(ls) < string(rs), false, nil
+	}
+	lb, lbok := px.(*BigInt)
+	rb, rbok := py.(*BigInt)
+	switch {
+	case lbok && rbok:
+		return lb.Int.Cmp(rb.Int) < 0, false, nil
+	case lbok && rok:
+		bi, ok := parseStringToBigInt(string(rs))
+		if !ok {
+			return false, true, nil
+		}
+		return lb.Int.Cmp(bi) < 0, false, nil
+	case rbok && lok:
+		bi, ok := parseStringToBigInt(string(ls))
+		if !ok {
+			return false, true, nil
+		}
+		return bi.Cmp(rb.Int) < 0, false, nil
+	case lbok:
+		rn, err := i.ToNumberV(ctx, py)
+		if err != nil {
+			return false, false, err
+		}
+		if math.IsNaN(rn) {
+			return false, true, nil
+		}
+		return bigIntCmpFloat(lb.Int, rn) < 0, false, nil
+	case rbok:
+		ln, err := i.ToNumberV(ctx, px)
+		if err != nil {
+			return false, false, err
+		}
+		if math.IsNaN(ln) {
+			return false, true, nil
+		}
+		return bigIntCmpFloat(rb.Int, ln) > 0, false, nil
+	default:
+		ln, err := i.ToNumberV(ctx, px)
+		if err != nil {
+			return false, false, err
+		}
+		rn, err := i.ToNumberV(ctx, py)
+		if err != nil {
+			return false, false, err
+		}
+		if math.IsNaN(ln) || math.IsNaN(rn) {
+			return false, true, nil
+		}
+		return ln < rn, false, nil
+	}
+}
+
+// bigIntCmpFloat compares a BigInt with a finite-or-infinite Number, returning
+// -1, 0, or +1 for (bigint <, =, > number).
+func bigIntCmpFloat(b *big.Int, f float64) int {
+	if math.IsInf(f, 1) {
+		return -1
+	}
+	if math.IsInf(f, -1) {
+		return 1
+	}
+	return new(big.Float).SetInt(b).Cmp(big.NewFloat(f))
+}
+
+// parseStringToBigInt implements StringToBigInt (§7.1.14): whitespace is
+// trimmed, "" is 0, and a well-formed integer literal (decimal or 0x/0o/0b) is
+// parsed. It returns ok=false for a value that cannot be converted (yielding an
+// "undefined" comparison result), never a syntax error.
+func parseStringToBigInt(s string) (*big.Int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return big.NewInt(0), true
+	}
+	n := new(big.Int)
+	if _, ok := n.SetString(s, 0); ok {
+		return n, true
+	}
+	if _, ok := n.SetString(s, 10); ok {
+		return n, true
+	}
+	return nil, false
 }
 
 // evalBitwise implements the bitwise and shift operators over 32-bit integers.

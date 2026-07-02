@@ -232,7 +232,48 @@ func NumberToString(f float64) string {
 	if f == math.Trunc(f) && math.Abs(f) < 1e21 {
 		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
-	return normalizeExponent(strconv.FormatFloat(f, 'g', -1, 64))
+	return esNumberToString(f)
+}
+
+// esNumberToString formats a finite, non-zero, non-integer-in-range Number per
+// the fixed/exponential boundary of Number::toString (§6.1.6.1.20). Go's %g
+// switches to exponent notation too early (below 1e-4), whereas ECMAScript uses
+// fixed notation down to 1e-6; this routine follows the spec's k/n digit rules
+// on the shortest round-trippable digit string.
+func esNumberToString(f float64) string {
+	sign := ""
+	if f < 0 {
+		sign = "-"
+		f = -f
+	}
+	// Shortest "d.ddde±XX" form gives the significant digits and the decimal
+	// exponent of the leading digit.
+	e := strconv.FormatFloat(f, 'e', -1, 64)
+	mantissa, expStr, _ := strings.Cut(e, "e")
+	exp, _ := strconv.Atoi(expStr)
+	digits := strings.Replace(mantissa, ".", "", 1)
+	k := len(digits) // number of significant digits
+	n := exp + 1     // 10^(n-1) <= f < 10^n
+
+	switch {
+	case n >= k && n <= 21:
+		return sign + digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return sign + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return sign + "0." + strings.Repeat("0", -n) + digits
+	}
+	// Exponential form: one digit before the point, exponent n-1.
+	expPart := n - 1
+	expSign := "+"
+	if expPart < 0 {
+		expSign = "-"
+		expPart = -expPart
+	}
+	if k == 1 {
+		return sign + digits + "e" + expSign + strconv.Itoa(expPart)
+	}
+	return sign + digits[:1] + "." + digits[1:] + "e" + expSign + strconv.Itoa(expPart)
 }
 
 // normalizeExponent rewrites a Go-formatted exponent to JavaScript's spelling:

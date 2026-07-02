@@ -171,8 +171,11 @@ func (i *Interpreter) initArrayBuffer() {
 		if !ok {
 			return Boolean(false), nil
 		}
-		// A view has a [[ViewedArrayBuffer]] internal slot: DataView (and, in
-		// the future, TypedArrays).
+		// A view has a [[ViewedArrayBuffer]] internal slot: a TypedArray or a
+		// DataView.
+		if o.typedArray != nil {
+			return Boolean(true), nil
+		}
 		if o.internal != nil {
 			if _, ok := o.internal["DataView"].(*dataViewData); ok {
 				return Boolean(true), nil

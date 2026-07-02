@@ -3,6 +3,7 @@ package interp
 import (
 	"context"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -149,6 +150,21 @@ func thisSymbol(this Value) (*Symbol, bool) {
 // Number
 // ---------------------------------------------------------------------------
 
+// numberValueOf implements the numeric coercion the Number constructor uses
+// (§21.1.1.1): ToNumeric, then map a BigInt to the Number nearest its value
+// (BigInt is the one input the ordinary ToNumber rejects with a TypeError).
+func (i *Interpreter) numberValueOf(ctx context.Context, v Value) (float64, error) {
+	prim, err := i.ToPrimitive(ctx, v, "number")
+	if err != nil {
+		return 0, err
+	}
+	if b, ok := prim.(*BigInt); ok {
+		f, _ := new(big.Float).SetInt(b.Int).Float64()
+		return f, nil
+	}
+	return i.ToNumberV(ctx, prim)
+}
+
 func (i *Interpreter) initNumber() {
 	proto := i.numberProto
 	// Number.prototype is itself a Number wrapper with [[NumberData]] 0, so
@@ -235,7 +251,7 @@ func (i *Interpreter) initNumber() {
 		if len(args) == 0 {
 			return Number(0), nil
 		}
-		f, err := i.argNum(ctx, args, 0)
+		f, err := i.numberValueOf(ctx, arg(args, 0))
 		if err != nil {
 			return nil, err
 		}
@@ -244,7 +260,7 @@ func (i *Interpreter) initNumber() {
 		f := 0.0
 		if len(args) > 0 {
 			var err error
-			f, err = i.argNum(ctx, args, 0)
+			f, err = i.numberValueOf(ctx, arg(args, 0))
 			if err != nil {
 				return nil, err
 			}
