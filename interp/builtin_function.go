@@ -107,10 +107,11 @@ func (i *Interpreter) initFunction() {
 		return Bool(i.ordinaryHasInstance(ctx, fn, arg(args, 0))), nil
 	})
 
-	// The Function constructor (dynamic code) is intentionally not supported;
-	// expose a stub that throws, matching a locked-down sandbox.
+	// The Function constructor builds a function from source strings
+	// (CreateDynamicFunction). Both `Function(...)` and `new Function(...)`
+	// route here; it can be gated off via Security.DisableFunctionCtor.
 	ctor := i.newNativeCtor("Function", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return nil, i.throwError(ctx, "EvalError", "Function constructor is disabled in this sandbox")
+		return i.createDynamicFunction(ctx, args)
 	}, nil)
 	linkCtor(ctor, proto)
 	i.functionCtor = ctor

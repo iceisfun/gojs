@@ -560,8 +560,8 @@ func TestEvalAndFunctionCtorGating(t *testing.T) {
 		eval("var evalGlobal = 41;");
 		assert.sameValue(evalGlobal, 41, "indirect eval writes global");
 	`)
-	// The dynamic Function constructor is disabled in this sandbox.
-	ExpectError(t, `Function("return 1")();`, "")
+	// The dynamic Function constructor builds a callable from source.
+	Expect(t, `assert.sameValue(Function("return 1")(), 1, "Function ctor runs");`)
 }
 
 // ---------------------------------------------------------------------------
