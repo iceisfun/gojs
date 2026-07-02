@@ -26,8 +26,8 @@ import (
 // selects TSX parsing for a .tsx name.
 func Transpile(fileName, src string) (js string, err error) {
 	// The transpiler runs upstream typescript-go transforms; guard against a
-	// panic in a transform (e.g. the not-yet-supported enum/namespace lowering)
-	// so it surfaces as an error rather than crashing the host process.
+	// panic in a transform so it surfaces as an error rather than crashing the
+	// host process (transforms lean on unimplemented type-checker corners).
 	defer func() {
 		if r := recover(); r != nil {
 			js, err = "", fmt.Errorf("transpile %s: %v", fileName, r)

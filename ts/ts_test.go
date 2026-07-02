@@ -20,6 +20,21 @@ func TestRunString(t *testing.T) {
 	}
 }
 
+// TestEnum runs a TypeScript enum end to end, exercising both forward and
+// reverse (Level[n]) mappings after enum lowering.
+func TestEnum(t *testing.T) {
+	vm := interp.New()
+	v, err := RunString(vm, "e.ts",
+		"enum Level { Low, Medium, High }\nLevel.High + ':' + Level[Level.High];\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := vm.ToString(v)
+	if s != "2:High" {
+		t.Fatalf("got %q, want %q", s, "2:High")
+	}
+}
+
 // TestRequireTypeScript proves the Provider transpiles TypeScript modules on
 // load: a JS entry requires a .ts module whose ES export/typed API is lowered to
 // CommonJS and executed.

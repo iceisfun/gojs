@@ -41,6 +41,6 @@ Key points:
 - For a self-contained script (no imports), `ts.RunString(vm, name, src)`
   transpiles and runs in one call.
 
-> Not yet supported: `enum` / `namespace` lowering (needs an emit-resolver shim),
-> and error stack traces report transpiled-JavaScript positions rather than
-> original `.ts` lines (source-map support is planned).
+> `enum`, `const enum`, and `namespace` lower and run. Not yet wired: error
+> stack traces report transpiled-JavaScript positions rather than original `.ts`
+> lines (source-map support is planned).

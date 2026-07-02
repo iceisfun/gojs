@@ -295,10 +295,11 @@ gojs run app.ts        # transpile + run a TypeScript entry file
 ```
 
 Transpilation is **checker-free** (the `isolatedModules` model): type
-annotations, `interface`s, generics, and class visibility are erased/lowered,
-but the program is **not type-checked** — the goal is to *run* TypeScript. `enum`
-/ `namespace` lowering and `.ts`-origin line numbers in stack traces are not yet
-wired. See the [`typescript`](examples/typescript) example.
+annotations, `interface`s, generics, and class visibility are erased/lowered, and
+`enum`/`const enum`/`namespace` are lowered to runnable JavaScript — but the
+program is **not type-checked** (the goal is to *run* TypeScript). Not yet wired:
+`.ts`-origin line numbers in stack traces (source maps). See the
+[`typescript`](examples/typescript) example.
 
 ## Examples
 

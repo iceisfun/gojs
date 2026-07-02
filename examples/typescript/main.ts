@@ -6,6 +6,11 @@
 
 import { Vector, distance } from "./geometry";
 
+enum Axis {
+  X,
+  Y,
+}
+
 interface Named {
   name: string;
 }
@@ -41,3 +46,4 @@ for (const p of points) {
 }
 
 console.log("nearest to origin:", nearest(points, (p) => p.vector(), origin).name);
+console.log("axes:", Axis[Axis.X], Axis[Axis.Y]); // enum reverse mapping
