@@ -67,7 +67,10 @@ func (i *Interpreter) initObject() {
 			return nil, err
 		}
 		tag := o.class
-		if o.isArray {
+		// An Arguments object is backed by an Array in this engine, but its
+		// builtin tag is "Arguments" (§20.1.3.6 checks [[ParameterMap]] before
+		// falling back to the ordinary class), so it must not report "Array".
+		if o.isArray && o.class != "Arguments" {
 			tag = "Array"
 		} else if o.IsCallable() {
 			tag = "Function"
@@ -204,7 +207,11 @@ func (i *Interpreter) initObject() {
 			return nil, i.throwError(ctx, "TypeError", "Object prototype may only be an Object or null")
 		}
 		o := NewObject(proto)
-		if props, ok := arg(args, 1).(*Object); ok {
+		if !IsUndefined(arg(args, 1)) {
+			props, err := i.ToObject(ctx, arg(args, 1))
+			if err != nil {
+				return nil, err
+			}
 			if err := i.defineProperties(ctx, o, props); err != nil {
 				return nil, err
 			}
@@ -264,9 +271,9 @@ func (i *Interpreter) initObject() {
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Object.defineProperties called on non-object")
 		}
-		props, ok := arg(args, 1).(*Object)
-		if !ok {
-			return nil, i.throwError(ctx, "TypeError", "Properties must be an object")
+		props, err := i.ToObject(ctx, arg(args, 1))
+		if err != nil {
+			return nil, err
 		}
 		if err := i.defineProperties(ctx, o, props); err != nil {
 			return nil, err
@@ -563,22 +570,38 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 		if key.Str == "length" {
 			return i.arraySetLength(ctx, o, desc)
 		}
-		if idx, ok := arrayIndex(key.Str); ok {
-			if handled, res, err := i.arrayDefineIndex(ctx, o, idx, desc); handled {
-				return res, err
-			}
+		// Adding an index at or beyond the current length is refused when length
+		// is non-writable (Array [[DefineOwnProperty]] index case, §10.4.2.1).
+		if idx, ok := arrayIndex(key.Str); ok && o.lengthNonWritable && idx >= len(o.elems) {
+			return false, nil
 		}
 	}
+	// Array index keys are handled by the generic path: ordinaryDefineOwn
+	// validates the redefinition and installProperty stores the result, keeping
+	// a default-attribute data property dense and de-optimizing anything else
+	// (non-default attributes or an accessor) into the ordinary props map while
+	// extending the array's length to cover the index (§10.4.2.1).
+	return i.ordinaryDefineOwn(ctx, o, key, desc)
+}
+
+// ordinaryDefineOwn implements OrdinaryDefineOwnProperty /
+// ValidateAndApplyPropertyDescriptor (§10.1.6) for a plain property slot. It
+// merges only the fields the descriptor actually specifies onto any existing
+// property (leaving the rest untouched) and enforces the invariants for
+// non-configurable and non-writable properties.
+func (i *Interpreter) ordinaryDefineOwn(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
 
 	// Which attributes does the descriptor specify? Presence — not truthiness —
 	// determines what gets applied; absent fields are inherited from the
-	// current property (or take spec defaults for a brand-new one).
-	hasEnum := desc.HasOwn(StrKey("enumerable"))
-	hasConf := desc.HasOwn(StrKey("configurable"))
-	hasValue := desc.HasOwn(StrKey("value"))
-	hasWritable := desc.HasOwn(StrKey("writable"))
-	hasGet := desc.HasOwn(StrKey("get"))
-	hasSet := desc.HasOwn(StrKey("set"))
+	// current property (or take spec defaults for a brand-new one). ToProperty-
+	// Descriptor (§6.2.6.5) uses HasProperty, so an inherited descriptor field
+	// counts (desc.Has walks the prototype chain, as GetStr already does).
+	hasEnum := desc.Has(StrKey("enumerable"))
+	hasConf := desc.Has(StrKey("configurable"))
+	hasValue := desc.Has(StrKey("value"))
+	hasWritable := desc.Has(StrKey("writable"))
+	hasGet := desc.Has(StrKey("get"))
+	hasSet := desc.Has(StrKey("set"))
 
 	if (hasGet || hasSet) && (hasValue || hasWritable) {
 		return false, i.throwError(ctx, "TypeError",
@@ -655,7 +678,7 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 			p.Value = value
 			p.Writable = writable
 		}
-		o.defineOwn(key, p)
+		o.installProperty(key, p)
 		return true, nil
 	}
 
@@ -720,20 +743,21 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 	if hasConf {
 		np.Configurable = configurable
 	}
-	o.defineOwn(key, &np)
+	o.installProperty(key, &np)
 	return true, nil
 }
 
 // arraySetLength implements the "length" case of Array [[DefineOwnProperty]]
-// (§10.4.2.4 ArraySetLength). Array length in this engine is always a
-// non-configurable, non-enumerable, writable data property whose value is a
-// uint32; length writability is not separately tracked.
+// (§10.4.2.4 ArraySetLength). Array length is a non-configurable, non-enumerable
+// data property whose value is a uint32; its [[Writable]] attribute is tracked
+// via lengthNonWritable. Truncating length deletes elements from the highest
+// index down and is blocked by any non-configurable (de-optimized) element.
 func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Object) (bool, error) {
 	// Length can never become an accessor, configurable, or enumerable.
-	if desc.HasOwn(StrKey("get")) || desc.HasOwn(StrKey("set")) {
+	if desc.Has(StrKey("get")) || desc.Has(StrKey("set")) {
 		return false, nil
 	}
-	if desc.HasOwn(StrKey("configurable")) {
+	if desc.Has(StrKey("configurable")) {
 		v, err := desc.GetStr(ctx, "configurable")
 		if err != nil {
 			return false, err
@@ -742,7 +766,7 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 			return false, nil
 		}
 	}
-	if desc.HasOwn(StrKey("enumerable")) {
+	if desc.Has(StrKey("enumerable")) {
 		v, err := desc.GetStr(ctx, "enumerable")
 		if err != nil {
 			return false, err
@@ -751,10 +775,30 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 			return false, nil
 		}
 	}
-	if !desc.HasOwn(StrKey("value")) {
-		// Only attribute changes, all of which are compatible.
+	// Read the requested [[Writable]] attribute, if any. Once length is
+	// non-writable it can never be made writable again (unless configurable,
+	// which it never is here).
+	newWritable := true
+	hasWritable := desc.Has(StrKey("writable"))
+	if hasWritable {
+		v, err := desc.GetStr(ctx, "writable")
+		if err != nil {
+			return false, err
+		}
+		newWritable = ToBoolean(v)
+		if o.lengthNonWritable && newWritable {
+			return false, nil
+		}
+	}
+
+	if !desc.Has(StrKey("value")) {
+		// Attribute-only change: apply the writable transition (to false).
+		if hasWritable && !newWritable {
+			o.lengthNonWritable = true
+		}
 		return true, nil
 	}
+
 	v, err := desc.GetStr(ctx, "value")
 	if err != nil {
 		return false, err
@@ -767,13 +811,38 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 	if float64(newLen) != num {
 		return false, i.throwError(ctx, "RangeError", "Invalid array length")
 	}
+	oldLen := len(o.elems)
+	// A non-writable length rejects any change to its value.
+	if o.lengthNonWritable && int(newLen) != oldLen {
+		return false, nil
+	}
 	// The array's backing store is dense, so growing to a very large length
 	// would eagerly allocate that many holes. Refuse such lengths rather than
 	// exhaust memory (a limitation shared with ordinary "length" assignment).
-	if int(newLen) > len(o.elems) && newLen > maxDenseArrayLen {
+	if int(newLen) > oldLen && newLen > maxDenseArrayLen {
 		return false, i.throwError(ctx, "RangeError", "Array length exceeds the supported dense-array limit")
 	}
+	if int(newLen) < oldLen {
+		// Delete elements from oldLen-1 down to newLen. A de-optimized index
+		// that is non-configurable cannot be deleted: stop there, set length to
+		// that index + 1, apply the writable transition, and report failure.
+		for idx := oldLen - 1; idx >= int(newLen); idx-- {
+			if p, ok := o.props[StrKey(intToStr(idx))]; ok && !p.Configurable {
+				o.setArrayLength(Number(float64(idx + 1)))
+				if hasWritable && !newWritable {
+					o.lengthNonWritable = true
+				}
+				return false, nil
+			}
+		}
+		for idx := oldLen - 1; idx >= int(newLen); idx-- {
+			o.removeProp(StrKey(intToStr(idx)))
+		}
+	}
 	o.setArrayLength(Number(float64(newLen)))
+	if hasWritable && !newWritable {
+		o.lengthNonWritable = true
+	}
 	return true, nil
 }
 
@@ -781,55 +850,42 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 // single [[DefineOwnProperty]] to avoid pathological allocation.
 const maxDenseArrayLen = 1 << 24
 
-// arrayDefineIndex handles the value-only redefinition of an existing dense
-// array element (part of Array [[DefineOwnProperty]], §10.4.2.1). The dense
-// element backing can only represent the default array-element attributes
-// ({ writable, enumerable, configurable } all true), so this intentionally
-// handles just the case where those attributes are unchanged and only the value
-// is updated; anything else (a new/hole index, an accessor, or a request to set
-// a non-default attribute) returns handled=false so the caller uses ordinary
-// property storage — preserving the engine's existing behavior for those cases.
-func (i *Interpreter) arrayDefineIndex(ctx context.Context, o *Object, idx int, desc *Object) (handled bool, ok bool, err error) {
-	if idx >= len(o.elems) || isHole(o.elems[idx]) {
-		return false, false, nil
-	}
-	if desc.HasOwn(StrKey("get")) || desc.HasOwn(StrKey("set")) {
-		return false, false, nil
-	}
-	// A request to turn off any default attribute cannot be honored densely.
-	for _, field := range []string{"writable", "enumerable", "configurable"} {
-		if desc.HasOwn(StrKey(field)) {
-			v, e := desc.GetStr(ctx, field)
-			if e != nil {
-				return true, false, e
-			}
-			if !ToBoolean(v) {
-				return false, false, nil
-			}
-		}
-	}
-	if desc.HasOwn(StrKey("value")) {
-		v, e := desc.GetStr(ctx, "value")
-		if e != nil {
-			return true, false, e
-		}
-		o.elems[idx] = v
-	}
-	return true, true, nil
-}
-
-// defineProperties applies each own enumerable descriptor in props to o.
+// defineProperties implements the shared body of ObjectDefineProperties
+// (§20.1.2.3.1): it gathers every own enumerable property key of props (string
+// and symbol), reads and ToPropertyDescriptor-validates each — invoking any
+// getters — and only then applies them to o, matching the spec's read-all-then-
+// define-all ordering and error behavior.
 func (i *Interpreter) defineProperties(ctx context.Context, o, props *Object) error {
-	for _, name := range props.OwnKeys() {
-		if p, ok := props.getOwn(StrKey(name)); ok && p.Enumerable {
-			desc, _ := props.GetStr(ctx, name)
-			descObj, ok := desc.(*Object)
-			if !ok {
-				return i.throwError(ctx, "TypeError", "Property description must be an object")
-			}
-			if err := i.applyDescriptor(ctx, o, StrKey(name), descObj); err != nil {
-				return err
-			}
+	keys, err := i.ownKeysV(ctx, props)
+	if err != nil {
+		return err
+	}
+	type keyedDesc struct {
+		key  PropertyKey
+		desc *Object
+	}
+	var pending []keyedDesc
+	for _, k := range keys {
+		p, ok, err := i.getOwnPropertyV(ctx, props, k)
+		if err != nil {
+			return err
+		}
+		if !ok || !p.Enumerable {
+			continue
+		}
+		dv, err := i.getV(ctx, props, k, props)
+		if err != nil {
+			return err
+		}
+		descObj, ok := dv.(*Object)
+		if !ok {
+			return i.throwError(ctx, "TypeError", "Property description must be an object")
+		}
+		pending = append(pending, keyedDesc{k, descObj})
+	}
+	for _, e := range pending {
+		if err := i.applyDescriptor(ctx, o, e.key, e.desc); err != nil {
+			return err
 		}
 	}
 	return nil

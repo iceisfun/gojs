@@ -151,6 +151,12 @@ func (o *Object) writeData(key PropertyKey, v Value) {
 			return
 		}
 		if idx, ok := arrayIndex(key.Str); ok {
+			// A de-optimized index lives in the props map; update it there so the
+			// write is not lost behind the (shadowed) dense slot.
+			if p, ok := o.props[key]; ok && !p.Accessor {
+				p.Value = v
+				return
+			}
 			o.ensureLen(idx + 1)
 			o.elems[idx] = v
 			return

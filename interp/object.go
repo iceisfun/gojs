@@ -133,6 +133,10 @@ type Object struct {
 	fn        *functionData // non-nil for callable objects
 	elems     []Value       // dense element storage for arrays
 	isArray   bool
+	// lengthNonWritable records that an Array's "length" property has had its
+	// [[Writable]] attribute set to false (via defineProperty). Length is
+	// otherwise a writable, non-enumerable, non-configurable data property.
+	lengthNonWritable bool
 	primitive Value          // wrapped primitive (String/Number/Boolean/Date)
 	internal  map[string]any // misc internal slots (RegExp source, Map data, ...)
 
@@ -293,13 +297,21 @@ func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
 	}
 	if o.isArray && !key.IsSymbol() {
 		if key.Str == "length" {
-			return &Property{Value: Number(float64(len(o.elems))), Writable: true}, true
+			return &Property{Value: Number(float64(len(o.elems))), Writable: !o.lengthNonWritable}, true
 		}
-		if idx, ok := arrayIndex(key.Str); ok && idx < len(o.elems) {
-			if isHole(o.elems[idx]) {
-				return nil, false // hole: not an own property
+		if idx, ok := arrayIndex(key.Str); ok {
+			// A de-optimized index (redefined with non-default attributes or as an
+			// accessor) lives in the ordinary props map and shadows dense storage.
+			if p, ok := o.props[key]; ok {
+				return p, true
 			}
-			return &Property{Value: o.elems[idx], Writable: true, Enumerable: true, Configurable: true}, true
+			if idx < len(o.elems) {
+				if isHole(o.elems[idx]) {
+					return nil, false // hole: not an own property
+				}
+				return &Property{Value: o.elems[idx], Writable: true, Enumerable: true, Configurable: true}, true
+			}
+			return nil, false
 		}
 	}
 	p, ok := o.props[key]
@@ -309,10 +321,65 @@ func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
 // defineOwn installs or replaces an own-property descriptor, preserving
 // insertion order for new keys.
 func (o *Object) defineOwn(key PropertyKey, p *Property) {
+	// De-optimize an array index: once it carries a descriptor in the props map
+	// (because it was redefined with non-default attributes or as an accessor),
+	// dense storage must not shadow it, so its dense slot becomes a hole. getOwn
+	// consults props first for such indices.
+	if o.isArray && !key.IsSymbol() {
+		if idx, ok := arrayIndex(key.Str); ok && idx < len(o.elems) {
+			o.elems[idx] = theHole
+		}
+	}
 	if _, exists := o.props[key]; !exists {
 		o.keys = append(o.keys, key)
 	}
 	o.props[key] = p
+}
+
+// installProperty stores the finalized descriptor p for key, choosing dense
+// array-element storage when an array index can be represented with the default
+// element attributes ({writable, enumerable, configurable} all true, data
+// property) and de-optimizing into the ordinary props map otherwise. Either way
+// the array's length is extended to cover a de-optimized index (the Array
+// [[DefineOwnProperty]] length coupling, §10.4.2.1), except for a far-out index
+// whose dense backing would be pathologically large.
+func (o *Object) installProperty(key PropertyKey, p *Property) {
+	if o.isArray && !key.IsSymbol() {
+		if idx, ok := arrayIndex(key.Str); ok {
+			far := idx >= len(o.elems) && idx >= maxDenseArrayLen
+			if !p.Accessor && p.Writable && p.Enumerable && p.Configurable && !far {
+				// Dense-representable: drop any de-optimized shadow and store the
+				// value in the dense element backing.
+				o.removeProp(key)
+				o.ensureLen(idx + 1)
+				o.elems[idx] = p.Value
+				return
+			}
+			// De-optimize into the props map. Extend length to cover the index
+			// (unless far-out) so defineOwn holes the now-covered dense slot.
+			if !far && idx >= len(o.elems) {
+				o.ensureLen(idx + 1)
+			}
+			o.defineOwn(key, p)
+			return
+		}
+	}
+	o.defineOwn(key, p)
+}
+
+// removeProp deletes key from the ordinary props map and the insertion-order
+// list, leaving array dense storage untouched. It is a no-op when absent.
+func (o *Object) removeProp(key PropertyKey) {
+	if _, ok := o.props[key]; !ok {
+		return
+	}
+	delete(o.props, key)
+	for i, k := range o.keys {
+		if k == key {
+			o.keys = append(o.keys[:i], o.keys[i+1:]...)
+			break
+		}
+	}
 }
 
 // SetData defines (or overwrites) an enumerable, writable, configurable data
@@ -346,21 +413,18 @@ func (o *Object) SetHidden(name string, v Value) {
 // deleteOwn removes an own property, returning whether it existed.
 func (o *Object) deleteOwn(key PropertyKey) bool {
 	if o.isArray && !key.IsSymbol() {
-		if idx, ok := arrayIndex(key.Str); ok && idx < len(o.elems) {
-			o.elems[idx] = theHole // create a hole (length is unchanged)
-			return true
+		if idx, ok := arrayIndex(key.Str); ok {
+			// A de-optimized index lives in props; fall through to remove it there.
+			if _, deopt := o.props[key]; !deopt && idx < len(o.elems) {
+				o.elems[idx] = theHole // create a hole (length is unchanged)
+				return true
+			}
 		}
 	}
 	if _, ok := o.props[key]; !ok {
 		return false
 	}
-	delete(o.props, key)
-	for i, k := range o.keys {
-		if k == key {
-			o.keys = append(o.keys[:i], o.keys[i+1:]...)
-			break
-		}
-	}
+	o.removeProp(key)
 	return true
 }
 
@@ -434,9 +498,11 @@ func (o *Object) setArrayLength(v Value) {
 	}
 	if n < len(o.elems) {
 		o.elems = o.elems[:n]
-	} else {
+	} else if n <= maxDenseArrayLen {
 		o.ensureLen(n)
 	}
+	// Growing beyond the dense limit is refused rather than eagerly allocating
+	// billions of holes; such lengths are unsupported by the dense backing.
 }
 
 // ArrayLen returns the length of an array object.
