@@ -59,7 +59,7 @@ func (i *Interpreter) initJSON() {
 		}
 		p := &jsonParser{s: src, i: i}
 		p.skipWS()
-		v, err := p.parseValue(ctx)
+		node, err := p.parseValue(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -67,13 +67,66 @@ func (i *Interpreter) initJSON() {
 		if p.pos != len(p.s) {
 			return nil, i.throwError(ctx, "SyntaxError", "Unexpected non-whitespace character after JSON")
 		}
-		// Apply an optional reviver, walking bottom-up.
+		// Apply an optional reviver via InternalizeJSONProperty (§25.5.1).
 		if reviver, ok := arg(args, 1).(*Object); ok && reviver.IsCallable() {
-			holder := NewObject(i.objectProto)
-			holder.SetData("", v)
-			return i.jsonRevive(ctx, holder, "", reviver)
+			root := NewObject(i.objectProto)
+			root.SetData("", node.value)
+			return i.internalizeJSONProperty(ctx, root, "", reviver, node)
 		}
-		return v, nil
+		return node.value, nil
+	})
+
+	// JSON.isRawJSON(obj) → whether obj carries an [[IsRawJSON]] slot (§25.5.3).
+	i.defineMethod(j, "isRawJSON", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if o, ok := arg(args, 0).(*Object); ok && o.internal != nil {
+			if _, raw := o.internal["IsRawJSON"]; raw {
+				return True, nil
+			}
+		}
+		return False, nil
+	})
+
+	// JSON.rawJSON(text) → a frozen [[IsRawJSON]] object wrapping raw JSON text
+	// for a primitive value (§25.5.1).
+	i.defineMethod(j, "rawJSON", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		s, err := i.ToStringV(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		rs := []rune(s)
+		if len(rs) == 0 {
+			return nil, i.throwError(ctx, "SyntaxError", "JSON.rawJSON text must not be empty")
+		}
+		first, last := rs[0], rs[len(rs)-1]
+		okFirst := (first >= 'a' && first <= 'z') || (first >= '0' && first <= '9') || first == '"' || first == '-'
+		okLast := (last >= 'a' && last <= 'z') || (last >= '0' && last <= '9') || last == '"'
+		if !okFirst || !okLast {
+			return nil, i.throwError(ctx, "SyntaxError", "Invalid JSON.rawJSON text")
+		}
+		// Validate that the text is a single well-formed JSON primitive.
+		p := &jsonParser{s: s, i: i}
+		p.skipWS()
+		node, err := p.parseValue(ctx)
+		if err != nil {
+			return nil, err
+		}
+		p.skipWS()
+		if p.pos != len(p.s) {
+			return nil, i.throwError(ctx, "SyntaxError", "Invalid JSON.rawJSON text")
+		}
+		if _, isObj := node.value.(*Object); isObj {
+			return nil, i.throwError(ctx, "SyntaxError", "JSON.rawJSON text must be a primitive value")
+		}
+		obj := NewObject(nil)
+		obj.internal = map[string]any{"IsRawJSON": true}
+		obj.defineOwn(StrKey("rawJSON"), &Property{
+			Value:        String(s),
+			Writable:     false,
+			Enumerable:   true,
+			Configurable: false,
+		})
+		obj.extensible = false
+		return obj, nil
 	})
 
 	// JSON[Symbol.toStringTag] = "JSON" (§25.5.3).
@@ -204,6 +257,18 @@ func (st *jsonState) serializeProperty(ctx context.Context, b *strings.Builder, 
 		value, err = st.replacerFn.fn.call(ctx, holder, []Value{String(key), value})
 		if err != nil {
 			return false, err
+		}
+	}
+
+	// A rawJSON object is emitted verbatim (§25.5.2.1 step for [[IsRawJSON]]).
+	if o, ok := value.(*Object); ok && o.internal != nil {
+		if _, raw := o.internal["IsRawJSON"]; raw {
+			rj, err := o.GetStr(ctx, "rawJSON")
+			if err != nil {
+				return false, err
+			}
+			b.WriteString(string(rj.(String)))
+			return true, nil
 		}
 	}
 
@@ -426,11 +491,40 @@ func (p *jsonParser) errf(ctx context.Context, msg string) error {
 	return p.i.throwError(ctx, "SyntaxError", msg)
 }
 
-func (p *jsonParser) parseValue(ctx context.Context) (Value, error) {
+// jsonNode is a JSON Parse Record analog (§25.5.2, CreateJSONParseRecord): it
+// pairs a parsed value with the source text that produced it (for primitives)
+// and the child records of arrays/objects, so JSON.parse can expose the matched
+// `source` to a reviver (the parse-with-source proposal).
+type jsonNode struct {
+	value    Value
+	source   string      // matched source text (primitive values only)
+	elements []*jsonNode // array element records, in order
+	entries  []jsonEntry // object entry records; the last write per key wins
+}
+
+type jsonEntry struct {
+	key  string
+	node *jsonNode
+}
+
+// setEntry records child under key, preserving the first-seen position but
+// keeping the last value (mirroring duplicate-key handling in an ObjectLiteral).
+func (n *jsonNode) setEntry(key string, child *jsonNode) {
+	for idx := range n.entries {
+		if n.entries[idx].key == key {
+			n.entries[idx].node = child
+			return
+		}
+	}
+	n.entries = append(n.entries, jsonEntry{key: key, node: child})
+}
+
+func (p *jsonParser) parseValue(ctx context.Context) (*jsonNode, error) {
 	p.skipWS()
 	if p.pos >= len(p.s) {
 		return nil, p.errf(ctx, "Unexpected end of JSON input")
 	}
+	start := p.pos
 	switch c := p.s[p.pos]; {
 	case c == '{':
 		return p.parseObject(ctx)
@@ -441,13 +535,13 @@ func (p *jsonParser) parseValue(ctx context.Context) (Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return String(s), nil
+		return &jsonNode{value: String(s), source: p.s[start:p.pos]}, nil
 	case c == 't':
-		return p.parseLiteral(ctx, "true", True)
+		return p.parseLiteral(ctx, "true", True, start)
 	case c == 'f':
-		return p.parseLiteral(ctx, "false", False)
+		return p.parseLiteral(ctx, "false", False, start)
 	case c == 'n':
-		return p.parseLiteral(ctx, "null", Nul)
+		return p.parseLiteral(ctx, "null", Nul, start)
 	case c == '-' || (c >= '0' && c <= '9'):
 		return p.parseNumber(ctx)
 	default:
@@ -455,21 +549,22 @@ func (p *jsonParser) parseValue(ctx context.Context) (Value, error) {
 	}
 }
 
-func (p *jsonParser) parseLiteral(ctx context.Context, word string, v Value) (Value, error) {
+func (p *jsonParser) parseLiteral(ctx context.Context, word string, v Value, start int) (*jsonNode, error) {
 	if strings.HasPrefix(p.s[p.pos:], word) {
 		p.pos += len(word)
-		return v, nil
+		return &jsonNode{value: v, source: p.s[start:p.pos]}, nil
 	}
 	return nil, p.errf(ctx, "Unexpected token in JSON")
 }
 
-func (p *jsonParser) parseObject(ctx context.Context) (Value, error) {
+func (p *jsonParser) parseObject(ctx context.Context) (*jsonNode, error) {
 	o := NewObject(p.i.objectProto)
+	node := &jsonNode{value: o}
 	p.pos++ // {
 	p.skipWS()
 	if p.pos < len(p.s) && p.s[p.pos] == '}' {
 		p.pos++
-		return o, nil
+		return node, nil
 	}
 	for {
 		p.skipWS()
@@ -485,11 +580,12 @@ func (p *jsonParser) parseObject(ctx context.Context) (Value, error) {
 			return nil, p.errf(ctx, "Expected ':' after property name in JSON")
 		}
 		p.pos++
-		val, err := p.parseValue(ctx)
+		child, err := p.parseValue(ctx)
 		if err != nil {
 			return nil, err
 		}
-		o.SetData(key, val)
+		o.SetData(key, child.value)
+		node.setEntry(key, child)
 		p.skipWS()
 		if p.pos >= len(p.s) {
 			return nil, p.errf(ctx, "Unexpected end of JSON input")
@@ -500,26 +596,28 @@ func (p *jsonParser) parseObject(ctx context.Context) (Value, error) {
 		}
 		if p.s[p.pos] == '}' {
 			p.pos++
-			return o, nil
+			return node, nil
 		}
 		return nil, p.errf(ctx, "Expected ',' or '}' in JSON")
 	}
 }
 
-func (p *jsonParser) parseArray(ctx context.Context) (Value, error) {
+func (p *jsonParser) parseArray(ctx context.Context) (*jsonNode, error) {
+	arr := p.i.newArray(nil)
+	node := &jsonNode{value: arr}
 	p.pos++ // [
 	p.skipWS()
-	var elems []Value
 	if p.pos < len(p.s) && p.s[p.pos] == ']' {
 		p.pos++
-		return p.i.newArray(elems), nil
+		return node, nil
 	}
 	for {
-		val, err := p.parseValue(ctx)
+		child, err := p.parseValue(ctx)
 		if err != nil {
 			return nil, err
 		}
-		elems = append(elems, val)
+		arr.elems = append(arr.elems, child.value)
+		node.elements = append(node.elements, child)
 		p.skipWS()
 		if p.pos >= len(p.s) {
 			return nil, p.errf(ctx, "Unexpected end of JSON input")
@@ -530,7 +628,7 @@ func (p *jsonParser) parseArray(ctx context.Context) (Value, error) {
 		}
 		if p.s[p.pos] == ']' {
 			p.pos++
-			return p.i.newArray(elems), nil
+			return node, nil
 		}
 		return nil, p.errf(ctx, "Expected ',' or ']' in JSON")
 	}
@@ -591,7 +689,7 @@ func (p *jsonParser) parseString(ctx context.Context) (string, error) {
 	return "", p.errf(ctx, "Unterminated string in JSON")
 }
 
-func (p *jsonParser) parseNumber(ctx context.Context) (Value, error) {
+func (p *jsonParser) parseNumber(ctx context.Context) (*jsonNode, error) {
 	start := p.pos
 	for p.pos < len(p.s) {
 		c := p.s[p.pos]
@@ -605,39 +703,88 @@ func (p *jsonParser) parseNumber(ctx context.Context) (Value, error) {
 	if err != nil {
 		return nil, p.errf(ctx, "Invalid number in JSON")
 	}
-	return Number(f), nil
+	return &jsonNode{value: Number(f), source: p.s[start:p.pos]}, nil
 }
 
 // ---------------------------------------------------------------------------
-// Replacer (stringify) and reviver (parse)
+// Reviver (parse) — InternalizeJSONProperty
 // ---------------------------------------------------------------------------
-// jsonRevive applies a reviver function bottom-up: children are revived before
-// their parent, and a child revived to undefined is deleted.
-func (i *Interpreter) jsonRevive(ctx context.Context, holder *Object, key string, reviver *Object) (Value, error) {
-	val, _ := holder.GetStr(ctx, key)
-	if o, ok := val.(*Object); ok {
+
+// internalizeJSONProperty implements InternalizeJSONProperty (§25.5.1.1): it
+// recursively revives children before their parent and passes the reviver a
+// context object whose "source" property (present only for unmodified primitive
+// values) exposes the matched JSON source text (parse-with-source proposal).
+func (i *Interpreter) internalizeJSONProperty(ctx context.Context, holder *Object, name string, reviver *Object, rec *jsonNode) (Value, error) {
+	value, err := holder.GetStr(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	context := NewObject(i.objectProto)
+	var elemRecs []*jsonNode
+	var entryRecs []jsonEntry
+	// The parse record applies only while the value is untouched by the reviver.
+	if rec != nil && sameValue(rec.value, value) {
+		if _, isObj := value.(*Object); !isObj {
+			context.SetData("source", String(rec.source))
+		}
+		elemRecs = rec.elements
+		entryRecs = rec.entries
+	}
+
+	if o, ok := value.(*Object); ok {
 		if o.isArray {
-			for idx := range o.elems {
-				name := intToStr(idx)
-				revived, err := i.jsonRevive(ctx, o, name, reviver)
+			length := len(o.elems)
+			for idx := 0; idx < length; idx++ {
+				key := intToStr(idx)
+				var er *jsonNode
+				if idx < len(elemRecs) {
+					er = elemRecs[idx]
+				}
+				newEl, err := i.internalizeJSONProperty(ctx, o, key, reviver, er)
 				if err != nil {
 					return nil, err
 				}
-				o.elems[idx] = revived // undefined becomes a hole/undefined
+				if IsUndefined(newEl) {
+					if idx < len(o.elems) {
+						o.elems[idx] = theHole
+					}
+				} else if idx < len(o.elems) {
+					o.elems[idx] = newEl
+				}
 			}
 		} else {
-			for _, name := range o.OwnKeys() {
-				revived, err := i.jsonRevive(ctx, o, name, reviver)
+			for _, key := range i.jsonOwnEnumKeys(o) {
+				var er *jsonNode
+				for _, e := range entryRecs {
+					if e.key == key {
+						er = e.node
+						break
+					}
+				}
+				newEl, err := i.internalizeJSONProperty(ctx, o, key, reviver, er)
 				if err != nil {
 					return nil, err
 				}
-				if IsUndefined(revived) {
-					o.Delete(StrKey(name))
+				if IsUndefined(newEl) {
+					o.Delete(StrKey(key)) // ignore failure per spec note
 				} else {
-					o.SetData(name, revived)
+					o.createDataProperty(StrKey(key), newEl)
 				}
 			}
 		}
 	}
-	return reviver.fn.call(ctx, holder, []Value{String(key), val})
+
+	return reviver.fn.call(ctx, holder, []Value{String(name), value, context})
+}
+
+// jsonOwnEnumKeys snapshots o's own enumerable string-keyed property names.
+func (i *Interpreter) jsonOwnEnumKeys(o *Object) []string {
+	var keys []string
+	for _, name := range o.OwnKeys() {
+		if p, ok := o.getOwn(StrKey(name)); ok && p.Enumerable {
+			keys = append(keys, name)
+		}
+	}
+	return keys
 }

@@ -96,6 +96,18 @@ func (i *Interpreter) initObject() {
 		}
 		return i.newArray(i.enumerableKeys(o, func(k string, _ Value) Value { return String(k) })), nil
 	})
+	// Object.hasOwn(O, P) → HasOwnProperty(ToObject(O), ToPropertyKey(P)) (ES2022).
+	i.defineMethod(ctor, "hasOwn", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, err := i.ToObject(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		key, err := i.ToPropertyKey(ctx, arg(args, 1))
+		if err != nil {
+			return nil, err
+		}
+		return Bool(o.HasOwn(key)), nil
+	})
 	i.defineMethod(ctor, "values", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, err := i.ToObject(ctx, arg(args, 0))
 		if err != nil {

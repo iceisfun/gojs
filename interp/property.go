@@ -135,6 +135,25 @@ func (o *Object) Delete(key PropertyKey) bool {
 	return true
 }
 
+// createDataProperty implements CreateDataProperty (§7.3.5): it defines key as a
+// {writable, enumerable, configurable} data property. It fails (returning false)
+// without throwing when the object is not extensible or an existing property is
+// non-configurable and cannot accept the new value.
+func (o *Object) createDataProperty(key PropertyKey, v Value) bool {
+	if cur, ok := o.getOwn(key); ok {
+		// The full {W,E,C:true} descriptor conflicts with any non-configurable
+		// existing property (it would flip [[Configurable]] back to true), so
+		// ValidateAndApplyPropertyDescriptor rejects it.
+		if !cur.Configurable {
+			return false
+		}
+	} else if !o.extensible {
+		return false
+	}
+	o.defineOwn(key, &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
+	return true
+}
+
 // getPrivateMember reads a private class element (#name) off base, enforcing the
 // brand check: base must be an object that carries the private name, or a
 // TypeError is thrown. Private getters are invoked with base as the receiver.
