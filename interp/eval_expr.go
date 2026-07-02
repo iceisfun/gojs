@@ -324,6 +324,22 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 		if err != nil {
 			return nil, err
 		}
+		// A colon-form __proto__ member sets the object's prototype rather than
+		// creating an own property (ECMA-262 §13.2.5.5 / Annex B.3.1). This does
+		// not apply to shorthand, method, computed, or accessor forms.
+		if !prop.Computed && !prop.Shorthand && !prop.Method && key.Sym == nil && key.Str == "__proto__" {
+			v, err := i.evalExpr(ctx, prop.Value, env)
+			if err != nil {
+				return nil, err
+			}
+			switch pv := v.(type) {
+			case *Object:
+				obj.proto = pv
+			case Null:
+				obj.proto = nil
+			}
+			continue
+		}
 		var val Value
 		if prop.Method {
 			fnExpr := prop.Value.(*ast.FuncExpr)

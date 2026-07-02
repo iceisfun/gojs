@@ -124,6 +124,11 @@ type intrinsics struct {
 	setProto                  *Object
 	promiseProto              *Object
 	iteratorProto             *Object
+	arrayIteratorProto        *Object // %ArrayIteratorPrototype%
+	iteratorHelperProto       *Object // %IteratorHelperPrototype%
+	wrapForValidIterProto     *Object // %WrapForValidIteratorPrototype%
+	stringIteratorProto       *Object // %StringIteratorPrototype%
+	iteratorCtor              *Object // %Iterator%
 	generatorProto            *Object
 	dateProto                 *Object
 
