@@ -379,8 +379,14 @@ func (i *Interpreter) initObject() {
 	})
 	i.defineMethod(ctor, "preventExtensions", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if o, ok := arg(args, 0).(*Object); ok {
-			if _, err := i.preventExtensionsV(ctx, o); err != nil {
+			// §20.1.2.18: if O.[[PreventExtensions]]() returns false, throw a
+			// TypeError (a Proxy's preventExtensions trap may reject the request).
+			ok, err := i.preventExtensionsV(ctx, o)
+			if err != nil {
 				return nil, err
+			}
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "Object.preventExtensions called on object that could not be made non-extensible")
 			}
 		}
 		return arg(args, 0), nil
@@ -548,6 +554,22 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 			return true, nil
 		}
 	}
+	// An Array is an exotic object (§10.4.2): "length" and array-index keys are
+	// backed by the dense element store rather than ordinary property slots, so
+	// they need [[DefineOwnProperty]] specialization (ArraySetLength and the
+	// index/length coupling). Accessor or otherwise-unrepresentable index
+	// descriptors fall through to ordinary storage.
+	if o.isArray && !key.IsSymbol() {
+		if key.Str == "length" {
+			return i.arraySetLength(ctx, o, desc)
+		}
+		if idx, ok := arrayIndex(key.Str); ok {
+			if handled, res, err := i.arrayDefineIndex(ctx, o, idx, desc); handled {
+				return res, err
+			}
+		}
+	}
+
 	// Which attributes does the descriptor specify? Presence — not truthiness —
 	// determines what gets applied; absent fields are inherited from the
 	// current property (or take spec defaults for a brand-new one).
@@ -700,6 +722,100 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 	}
 	o.defineOwn(key, &np)
 	return true, nil
+}
+
+// arraySetLength implements the "length" case of Array [[DefineOwnProperty]]
+// (§10.4.2.4 ArraySetLength). Array length in this engine is always a
+// non-configurable, non-enumerable, writable data property whose value is a
+// uint32; length writability is not separately tracked.
+func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Object) (bool, error) {
+	// Length can never become an accessor, configurable, or enumerable.
+	if desc.HasOwn(StrKey("get")) || desc.HasOwn(StrKey("set")) {
+		return false, nil
+	}
+	if desc.HasOwn(StrKey("configurable")) {
+		v, err := desc.GetStr(ctx, "configurable")
+		if err != nil {
+			return false, err
+		}
+		if ToBoolean(v) {
+			return false, nil
+		}
+	}
+	if desc.HasOwn(StrKey("enumerable")) {
+		v, err := desc.GetStr(ctx, "enumerable")
+		if err != nil {
+			return false, err
+		}
+		if ToBoolean(v) {
+			return false, nil
+		}
+	}
+	if !desc.HasOwn(StrKey("value")) {
+		// Only attribute changes, all of which are compatible.
+		return true, nil
+	}
+	v, err := desc.GetStr(ctx, "value")
+	if err != nil {
+		return false, err
+	}
+	num, err := i.ToNumberV(ctx, v)
+	if err != nil {
+		return false, err
+	}
+	newLen := ToUint32(num)
+	if float64(newLen) != num {
+		return false, i.throwError(ctx, "RangeError", "Invalid array length")
+	}
+	// The array's backing store is dense, so growing to a very large length
+	// would eagerly allocate that many holes. Refuse such lengths rather than
+	// exhaust memory (a limitation shared with ordinary "length" assignment).
+	if int(newLen) > len(o.elems) && newLen > maxDenseArrayLen {
+		return false, i.throwError(ctx, "RangeError", "Array length exceeds the supported dense-array limit")
+	}
+	o.setArrayLength(Number(float64(newLen)))
+	return true, nil
+}
+
+// maxDenseArrayLen bounds how far the dense element backing may be grown in a
+// single [[DefineOwnProperty]] to avoid pathological allocation.
+const maxDenseArrayLen = 1 << 24
+
+// arrayDefineIndex handles the value-only redefinition of an existing dense
+// array element (part of Array [[DefineOwnProperty]], §10.4.2.1). The dense
+// element backing can only represent the default array-element attributes
+// ({ writable, enumerable, configurable } all true), so this intentionally
+// handles just the case where those attributes are unchanged and only the value
+// is updated; anything else (a new/hole index, an accessor, or a request to set
+// a non-default attribute) returns handled=false so the caller uses ordinary
+// property storage — preserving the engine's existing behavior for those cases.
+func (i *Interpreter) arrayDefineIndex(ctx context.Context, o *Object, idx int, desc *Object) (handled bool, ok bool, err error) {
+	if idx >= len(o.elems) || isHole(o.elems[idx]) {
+		return false, false, nil
+	}
+	if desc.HasOwn(StrKey("get")) || desc.HasOwn(StrKey("set")) {
+		return false, false, nil
+	}
+	// A request to turn off any default attribute cannot be honored densely.
+	for _, field := range []string{"writable", "enumerable", "configurable"} {
+		if desc.HasOwn(StrKey(field)) {
+			v, e := desc.GetStr(ctx, field)
+			if e != nil {
+				return true, false, e
+			}
+			if !ToBoolean(v) {
+				return false, false, nil
+			}
+		}
+	}
+	if desc.HasOwn(StrKey("value")) {
+		v, e := desc.GetStr(ctx, "value")
+		if e != nil {
+			return true, false, e
+		}
+		o.elems[idx] = v
+	}
+	return true, true, nil
 }
 
 // defineProperties applies each own enumerable descriptor in props to o.

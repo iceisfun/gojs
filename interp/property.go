@@ -174,7 +174,15 @@ func (o *Object) Delete(key PropertyKey) bool {
 			return !valid
 		}
 	}
-	if p, ok := o.props[key]; ok && !p.Configurable {
+	// OrdinaryDelete (§10.1.10): an absent property deletes vacuously, and a
+	// non-configurable own property cannot be deleted. getOwn is consulted
+	// (rather than o.props directly) so exotic own properties — an array's
+	// non-configurable "length" and its configurable indices — are handled.
+	p, ok := o.getOwn(key)
+	if !ok {
+		return true
+	}
+	if !p.Configurable {
 		return false
 	}
 	o.deleteOwn(key)

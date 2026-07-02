@@ -21,7 +21,7 @@ func (i *Interpreter) NewArray(elems ...Value) *Object { return i.newArray(elems
 func (i *Interpreter) initArray() {
 	proto := i.arrayProto
 
-	ctor := i.newNativeCtor("Array", 1, i.arrayConstruct, i.arrayConstruct)
+	ctor := i.newNativeCtor("Array", 1, i.arrayConstruct, i.arrayConstructNewTarget)
 	linkCtor(ctor, proto)
 	i.defineSpeciesGetter(ctor)
 	i.defineMethod(ctor, "isArray", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -158,6 +158,43 @@ func (i *Interpreter) arrayConstruct(ctx context.Context, this Value, args []Val
 	cp := make([]Value, len(args))
 	copy(cp, args)
 	return i.newArray(cp), nil
+}
+
+// arrayConstructNewTarget is the Array [[Construct]] entry point. It builds the
+// array like the plain constructor, then adopts the prototype derived from
+// new.target (§23.1.1.1 / GetPrototypeFromConstructor), so
+// Reflect.construct(Array, [], NewTarget) and `class X extends Array` produce an
+// instance with the subclass prototype.
+func (i *Interpreter) arrayConstructNewTarget(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+	arrV, err := i.arrayConstruct(ctx, newTarget, args)
+	if err != nil {
+		return nil, err
+	}
+	arr := arrV.(*Object)
+	proto, err := i.protoFromConstructor(ctx, newTarget, i.arrayProto)
+	if err != nil {
+		return nil, err
+	}
+	arr.SetProto(proto)
+	return arr, nil
+}
+
+// protoFromConstructor implements GetPrototypeFromConstructor (§10.1.13): it
+// reads new.target's "prototype" via [[Get]] (honoring a Proxy new.target),
+// falling back to the supplied intrinsic when it is not an object.
+func (i *Interpreter) protoFromConstructor(ctx context.Context, newTarget Value, fallback *Object) (*Object, error) {
+	nt, ok := newTarget.(*Object)
+	if !ok {
+		return fallback, nil
+	}
+	protoV, err := nt.GetStr(ctx, "prototype")
+	if err != nil {
+		return nil, err
+	}
+	if proto, ok := protoV.(*Object); ok {
+		return proto, nil
+	}
+	return fallback, nil
 }
 
 // thisArray coerces this to an array-like *Object, throwing otherwise.
@@ -631,54 +668,104 @@ func (i *Interpreter) arrayFlat(ctx context.Context, this Value, args []Value) (
 	return i.newArray(flatten(o.elems, depth)), nil
 }
 
-// arrayKeys/Values/Entries return array iterators.
+// arrayKeys/Values/Entries return array iterators (keys, values, entries).
+// arrayIterKind selects what an array iterator yields per step.
+type arrayIterKind int
+
+const (
+	arrayIterKeys arrayIterKind = iota
+	arrayIterValues
+	arrayIterEntries
+)
+
 func (i *Interpreter) arrayKeys(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
-	if err != nil {
-		return nil, err
-	}
-	idx := 0
-	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-		if idx >= len(o.elems) {
-			return Undef, false
-		}
-		k := Number(float64(idx))
-		idx++
-		return k, true
-	}), nil
+	return i.newArrayIterator(ctx, this, arrayIterKeys)
 }
 
 func (i *Interpreter) arrayValues(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
-	if err != nil {
-		return nil, err
-	}
-	idx := 0
-	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-		if idx >= len(o.elems) {
-			return Undef, false
-		}
-		// The array iterator reads 0..len via [[Get]], densifying holes.
-		v := elemAt(o, idx)
-		idx++
-		return v, true
-	}), nil
+	return i.newArrayIterator(ctx, this, arrayIterValues)
 }
 
 func (i *Interpreter) arrayEntries(ctx context.Context, this Value, args []Value) (Value, error) {
+	return i.newArrayIterator(ctx, this, arrayIterEntries)
+}
+
+// newArrayIterator builds a CreateArrayIterator (§23.1.5) result. A plain dense
+// array steps directly over its backing store; any other array-like receiver
+// (notably a Proxy over an array) reads its length and elements via [[Get]] so
+// the exotic behavior is honored.
+func (i *Interpreter) newArrayIterator(ctx context.Context, this Value, kind arrayIterKind) (Value, error) {
 	o, err := i.thisArray(ctx, this)
 	if err != nil {
 		return nil, err
 	}
+	if o.isArray && o.proxy == nil {
+		idx := 0
+		return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
+			if idx >= len(o.elems) {
+				return Undef, false
+			}
+			cur := idx
+			idx++
+			switch kind {
+			case arrayIterKeys:
+				return Number(float64(cur)), true
+			case arrayIterEntries:
+				return i.newArray([]Value{Number(float64(cur)), elemAt(o, cur)}), true
+			default:
+				return elemAt(o, cur), true
+			}
+		}), nil
+	}
+	// Generic array-like path: length and elements are obtained through [[Get]]
+	// (LengthOfArrayLike), and errors from an exotic receiver propagate.
+	it := NewObject(i.arrayIteratorProto)
+	it.class = "Array Iterator"
 	idx := 0
-	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-		if idx >= len(o.elems) {
-			return Undef, false
+	done := false
+	i.defineMethod(it, "next", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
+		res := NewObject(i.objectProto)
+		if !done {
+			length, err := i.lengthOfArrayLike(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			if idx < length {
+				cur := idx
+				idx++
+				var val Value
+				switch kind {
+				case arrayIterKeys:
+					val = Number(float64(cur))
+				case arrayIterEntries:
+					ev, err := i.getV(ctx, o, StrKey(intToStr(cur)), o)
+					if err != nil {
+						return nil, err
+					}
+					val = i.newArray([]Value{Number(float64(cur)), ev})
+				default:
+					v, err := i.getV(ctx, o, StrKey(intToStr(cur)), o)
+					if err != nil {
+						return nil, err
+					}
+					val = v
+				}
+				res.SetData("value", val)
+				res.SetData("done", False)
+				return res, nil
+			}
+			done = true
 		}
-		pair := i.newArray([]Value{Number(float64(idx)), elemAt(o, idx)})
-		idx++
-		return pair, true
-	}), nil
+		res.SetData("value", Undef)
+		res.SetData("done", True)
+		return res, nil
+	})
+	it.defineOwn(SymKey(i.symIterator), &Property{
+		Value:        i.newNativeFunc("[Symbol.iterator]", 0, func(ctx context.Context, this Value, args []Value) (Value, error) { return this, nil }),
+		Writable:     true,
+		Configurable: true,
+	})
+	return it, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -65,7 +65,22 @@ func (i *Interpreter) evalUnary(ctx context.Context, e *ast.UnaryExpr, env *Envi
 // unresolved identifier rather than throwing.
 func (i *Interpreter) evalTypeof(ctx context.Context, operand ast.Expr, env *Environment) (Value, error) {
 	if id, ok := operand.(*ast.Ident); ok {
-		if b := env.lookup(id.Name); b == nil && !i.global.Has(StrKey(id.Name)) && id.Name != "undefined" {
+		// A `with`-bound name resolves to a real value, so typeof must not report
+		// "undefined" for it; fall through to the general [[Get]] path.
+		bound := false
+		for e := env; e != nil && !bound; e = e.parent {
+			if e.withObj != nil {
+				if _, ok, err := i.withHasBinding(ctx, e.withObj, id.Name); err != nil {
+					return nil, err
+				} else if ok {
+					bound = true
+				}
+			}
+			if _, ok := e.vars[id.Name]; ok {
+				bound = true
+			}
+		}
+		if !bound && !i.global.Has(StrKey(id.Name)) && id.Name != "undefined" {
 			return String("undefined"), nil
 		}
 	}
@@ -111,6 +126,11 @@ func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Env
 	ok2, err := i.deleteV(ctx, o, key)
 	if err != nil {
 		return nil, err
+	}
+	// In strict mode, delete of a non-configurable property is a TypeError
+	// (§13.5.1.2).
+	if !ok2 && env.isStrict() {
+		return nil, i.throwError(ctx, "TypeError", "Cannot delete property "+keyName(key)+" of "+briefValue(obj))
 	}
 	return Bool(ok2), nil
 }

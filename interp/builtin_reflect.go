@@ -163,24 +163,45 @@ func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKe
 	if !ok {
 		return false, nil
 	}
+	// OrdinarySetWithOwnDescriptor (§10.1.9.2): the write is applied to the
+	// receiver's own property. For a Proxy receiver the descriptor must be read
+	// through its [[GetOwnProperty]] (which runs the trap / forwards), and an
+	// existing property must be redefined with a value-only descriptor so its
+	// other attributes (e.g. a non-configurable "length") are preserved.
+	if recv.proxy != nil {
+		existing, exists, err := i.getOwnPropertyV(ctx, recv, key)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			if existing.Accessor || !existing.Writable {
+				return false, nil
+			}
+			return recv.proxy.defineProperty(ctx, key, i.valueOnlyDescriptor(v))
+		}
+		return recv.proxy.defineDataValue(ctx, key, v)
+	}
 	if existing, exists := recv.getOwn(key); exists {
 		if existing.Accessor || !existing.Writable {
 			return false, nil
 		}
-		if recv.proxy != nil {
-			return recv.proxy.defineDataValue(ctx, key, v)
-		}
 		recv.writeData(key, v)
 		return true, nil
-	}
-	if recv.proxy != nil {
-		return recv.proxy.defineDataValue(ctx, key, v)
 	}
 	if !recv.extensible {
 		return false, nil
 	}
 	recv.writeData(key, v)
 	return true, nil
+}
+
+// valueOnlyDescriptor builds a descriptor object carrying just a [[Value]]
+// field, used by OrdinarySet to update an existing property without disturbing
+// its other attributes.
+func (i *Interpreter) valueOnlyDescriptor(v Value) *Object {
+	d := NewObject(i.objectProto)
+	d.SetData("value", v)
+	return d
 }
 
 // ordinarySetPrototypeOf implements OrdinarySetPrototypeOf (§10.1.2): the change

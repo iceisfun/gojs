@@ -159,7 +159,15 @@ func (i *Interpreter) newStringObject(s String) *Object {
 	o := NewObject(i.stringProto)
 	o.class = "String"
 	o.primitive = s
-	o.SetHidden("length", Number(float64(len([]rune(string(s))))))
+	// String exotic objects (§10.4.3) expose each character as an own data
+	// property { [[Writable]]: false, [[Enumerable]]: true, [[Configurable]]:
+	// false }, and "length" as { [[Writable]]: false, [[Enumerable]]: false,
+	// [[Configurable]]: false }.
+	runes := []rune(string(s))
+	for idx, r := range runes {
+		o.defineOwn(StrKey(intToStr(idx)), &Property{Value: String(string(r)), Writable: false, Enumerable: true, Configurable: false})
+	}
+	o.defineOwn(StrKey("length"), &Property{Value: Number(float64(len(runes))), Writable: false, Enumerable: false, Configurable: false})
 	return o
 }
 

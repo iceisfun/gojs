@@ -13,9 +13,11 @@ type Environment struct {
 	parent  *Environment
 	vars    map[string]*binding
 	fnScope bool            // true for function bodies and the global scope
+	strict  bool            // strict-mode code (set at function/module/global entry, inherited by nested block scopes)
 	thisVal Value           // `this` binding for this scope (nil = inherit from parent)
 	hasThis bool            // whether thisVal is set at this scope
 	newTgt  Value           // new.target for this scope
+	withObj *Object         // object environment record binding object for a `with` statement (nil otherwise)
 	homeObj *Object         // [[HomeObject]] for super resolution in methods
 	gen     *generatorState // active generator channels (set in generator bodies)
 
@@ -102,12 +104,22 @@ type binding struct {
 // NewEnvironment creates a child environment of parent. If fnScope is true, the
 // environment acts as a var/function hoisting target.
 func NewEnvironment(parent *Environment, fnScope bool) *Environment {
-	return &Environment{
+	e := &Environment{
 		parent:  parent,
 		vars:    make(map[string]*binding),
 		fnScope: fnScope,
 	}
+	// Strict-mode is a property of the containing function/module/global code and
+	// is inherited by every nested block scope. Function/module/global entry
+	// points override this after construction when their code is strict.
+	if parent != nil {
+		e.strict = parent.strict
+	}
+	return e
 }
+
+// isStrict reports whether this scope is strict-mode code.
+func (e *Environment) isStrict() bool { return e != nil && e.strict }
 
 // declare creates a lexical binding (let/const/class) in this environment,
 // initially in the TDZ. It overwrites any existing binding of the same name in

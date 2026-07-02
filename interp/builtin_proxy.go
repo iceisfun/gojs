@@ -245,9 +245,25 @@ func (p *proxyState) getOwnProperty(ctx context.Context, key PropertyKey) (*Prop
 	if err != nil {
 		return nil, false, err
 	}
+	// Step 16-17: the reported descriptor must be compatible with the target's
+	// current property (given the target's extensibility). In particular a
+	// non-extensible target cannot report a property it does not actually have.
+	valid, err := i.isCompatiblePropertyDescriptor(ctx, targetExt, key, descObj, targetDesc, hasTarget)
+	if err != nil {
+		return nil, false, err
+	}
+	if !valid {
+		return nil, false, i.throwError(ctx, "TypeError", "proxy getOwnPropertyDescriptor: reported descriptor is incompatible with the target")
+	}
+	// Step 18: a non-configurable report must correspond to a non-configurable
+	// target property, and a non-configurable non-writable report must not
+	// contradict a writable target property.
 	if !desc.Configurable {
 		if !hasTarget || targetDesc.Configurable {
 			return nil, false, i.throwError(ctx, "TypeError", "proxy getOwnPropertyDescriptor: cannot report a non-existent or configurable property as non-configurable")
+		}
+		if descObj.HasOwn(StrKey("writable")) && !desc.Writable && !targetDesc.Accessor && targetDesc.Writable {
+			return nil, false, i.throwError(ctx, "TypeError", "proxy getOwnPropertyDescriptor: cannot report a writable target property as non-configurable and non-writable")
 		}
 	}
 	return desc, true, nil
@@ -412,9 +428,19 @@ func (p *proxyState) defineProperty(ctx context.Context, key PropertyKey, descOb
 // ValidateAndApplyPropertyDescriptor against a throwaway object seeded with
 // current, reusing the ordinary [[DefineOwnProperty]] logic.
 func (i *Interpreter) isCompatibleDescriptor(ctx context.Context, extensible bool, key PropertyKey, descObj *Object, current *Property) (bool, error) {
+	return i.isCompatiblePropertyDescriptor(ctx, extensible, key, descObj, current, true)
+}
+
+// isCompatiblePropertyDescriptor implements IsCompatiblePropertyDescriptor
+// (§10.1.6.2), i.e. ValidateAndApplyPropertyDescriptor against a throwaway
+// object. When hasCurrent is false the property is treated as absent, so the
+// only way to be compatible is for the scratch object to be extensible.
+func (i *Interpreter) isCompatiblePropertyDescriptor(ctx context.Context, extensible bool, key PropertyKey, descObj *Object, current *Property, hasCurrent bool) (bool, error) {
 	scratch := &Object{props: map[PropertyKey]*Property{}, extensible: extensible, class: "Object"}
-	cp := *current
-	scratch.defineOwn(key, &cp)
+	if hasCurrent {
+		cp := *current
+		scratch.defineOwn(key, &cp)
+	}
 	return i.defineOwnFromDescriptor(ctx, scratch, key, descObj)
 }
 

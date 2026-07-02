@@ -388,13 +388,27 @@ func (i *Interpreter) assignTo(ctx context.Context, target ast.Expr, value Value
 		}
 		obj, ok := base.(*Object)
 		if !ok {
-			// Writes to primitive receivers are silently dropped (non-strict).
 			if IsNullish(base) {
 				return i.throwError(ctx, "TypeError", "Cannot set properties of "+briefValue(base))
 			}
+			// Writes to a primitive receiver never take effect; in strict mode
+			// that failed [[Set]] is a TypeError (§13.15.2 / PutValue).
+			if env.isStrict() {
+				return i.throwError(ctx, "TypeError", "Cannot create property "+keyName(key)+" on "+briefValue(base))
+			}
 			return nil
 		}
-		return obj.Set(ctx, key, value)
+		// A failed [[Set]] (non-writable data property, accessor without a setter,
+		// non-extensible object, or a rejecting Proxy trap) is silently ignored in
+		// sloppy mode but is a TypeError in strict mode (§13.15.2 / PutValue).
+		wrote, err := obj.setStatus(ctx, key, value)
+		if err != nil {
+			return err
+		}
+		if !wrote && env.isStrict() {
+			return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+keyName(key)+" of "+briefValue(base))
+		}
+		return nil
 	case *ast.ArrayLit, *ast.ObjectLit:
 		return i.destructureAssign(ctx, target, value, env)
 	default:
@@ -405,6 +419,29 @@ func (i *Interpreter) assignTo(ctx context.Context, target ast.Expr, value Value
 // assignIdent assigns to an existing binding, or creates a global on implicit
 // assignment (non-strict semantics).
 func (i *Interpreter) assignIdent(ctx context.Context, name string, value Value, env *Environment) error {
+	// Interleave `with` object environment records with declarative bindings so
+	// a write targets the innermost binder of name (§9.1.1.1 / §9.1.1.2).
+	for e := env; e != nil; e = e.parent {
+		if e.withObj != nil {
+			obj, ok, err := i.withHasBinding(ctx, e.withObj, name)
+			if err != nil {
+				return err
+			}
+			if ok {
+				wrote, err := obj.setStatus(ctx, StrKey(name), value)
+				if err != nil {
+					return err
+				}
+				if !wrote && env.isStrict() {
+					return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+keyName(StrKey(name)))
+				}
+				return nil
+			}
+		}
+		if _, ok := e.vars[name]; ok {
+			break
+		}
+	}
 	if b := env.lookup(name); b != nil {
 		// A write to a lexical binding still in its Temporal Dead Zone throws.
 		if !b.initialized {

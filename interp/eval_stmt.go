@@ -157,6 +157,8 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 		return i.evalIf(ctx, s, env)
 	case *ast.WhileStmt:
 		return i.evalWhile(ctx, s, env)
+	case *ast.WithStmt:
+		return i.evalWith(ctx, s, env)
 	case *ast.DoWhileStmt:
 		return i.evalDoWhile(ctx, s, env)
 	case *ast.ForStmt:
@@ -201,6 +203,58 @@ func (i *Interpreter) evalBlock(ctx context.Context, block *ast.BlockStmt, env *
 		return nil, err
 	}
 	return i.execStmts(ctx, block.Body, scope)
+}
+
+// evalWith evaluates a `with` statement (§14.11). Its object becomes an object
+// environment record whose binding object is consulted (via [[HasProperty]] and
+// @@unscopables) for identifier resolution inside the body.
+func (i *Interpreter) evalWith(ctx context.Context, s *ast.WithStmt, env *Environment) (Value, error) {
+	objV, err := i.evalExpr(ctx, s.Object, env)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := i.ToObject(ctx, objV)
+	if err != nil {
+		return nil, err
+	}
+	scope := NewEnvironment(env, false)
+	scope.withObj = obj
+	// A block body introduces its own inner declarative scope (child of the
+	// object environment record) so its lexical declarations shadow the
+	// with-object; a single-statement body runs directly in the object scope.
+	if block, ok := s.Body.(*ast.BlockStmt); ok {
+		return i.evalBlock(ctx, block, scope)
+	}
+	return i.evalStmt(ctx, s.Body, scope)
+}
+
+// withHasBinding implements the object environment record HasBinding
+// (§9.1.1.2): the binding object must have the property (via [[HasProperty]],
+// which runs a Proxy's has trap) and it must not be hidden by the object's
+// @@unscopables. It returns the binding object and true when name is bound.
+func (i *Interpreter) withHasBinding(ctx context.Context, obj *Object, name string) (*Object, bool, error) {
+	key := StrKey(name)
+	has, err := i.hasV(ctx, obj, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !has {
+		return nil, false, nil
+	}
+	unV, err := i.getV(ctx, obj, SymKey(i.symUnscopables), obj)
+	if err != nil {
+		return nil, false, err
+	}
+	if un, ok := unV.(*Object); ok {
+		blockedV, err := i.getV(ctx, un, key, un)
+		if err != nil {
+			return nil, false, err
+		}
+		if ToBoolean(blockedV) {
+			return nil, false, nil
+		}
+	}
+	return obj, true, nil
 }
 
 // evalVarDecl evaluates a var/let/const declaration, assigning initializers.
@@ -347,6 +401,8 @@ func collectVarNamesStmt(s ast.Stmt, into map[string]bool) {
 		}
 		collectVarNamesStmt(st.Body, into)
 	case *ast.WhileStmt:
+		collectVarNamesStmt(st.Body, into)
+	case *ast.WithStmt:
 		collectVarNamesStmt(st.Body, into)
 	case *ast.DoWhileStmt:
 		collectVarNamesStmt(st.Body, into)

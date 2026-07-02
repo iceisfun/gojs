@@ -43,10 +43,12 @@ func (i *Interpreter) RunProgram(prog *ast.Program) (Value, error) {
 // evalProgram runs the top-level statements of a program in the global scope.
 func (i *Interpreter) evalProgram(ctx context.Context, prog *ast.Program) (Value, error) {
 	env := i.globalEnv
-	if prog.Strict || i.forceStrict() {
-		// Strict mode currently affects only a few checks; recorded for future
-		// use. The global environment is shared across RunString calls.
-	}
+	// A top-level "use strict" (or a host that forces strict) makes the global
+	// scope strict for the duration of this program. The global environment is
+	// shared across RunString calls, so the previous value is restored.
+	savedStrict := env.strict
+	env.strict = prog.Strict || i.forceStrict()
+	defer func() { env.strict = savedStrict }()
 	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
 		return nil, err
 	}

@@ -88,6 +88,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			return i.asyncRun(def, closure, homeObj, t, args, kind == kindArrow)
 		}
 		env := NewEnvironment(closure, true)
+		env.strict = strict
 		if kind == kindNormal {
 			// OrdinaryCallBindThis: in strict mode `this` is passed through
 			// unchanged (undefined stays undefined); in sloppy mode a nullish

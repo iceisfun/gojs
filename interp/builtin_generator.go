@@ -82,6 +82,7 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 	}
 
 	env := NewEnvironment(closure, true)
+	env.strict = def.Strict || i.forceStrict()
 	// An async arrow inherits this/arguments lexically; a normal function/
 	// generator establishes its own.
 	if !arrow {

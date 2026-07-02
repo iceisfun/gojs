@@ -190,6 +190,16 @@ type WhileStmt struct {
 func (s *WhileStmt) Pos() token.Pos { return s.Keyword }
 func (s *WhileStmt) End() token.Pos { return s.Body.End() }
 
+// WithStmt is a `with (Object) Body` statement (legacy, sloppy-mode only).
+type WithStmt struct {
+	Keyword token.Pos
+	Object  Expr
+	Body    Stmt
+}
+
+func (s *WithStmt) Pos() token.Pos { return s.Keyword }
+func (s *WithStmt) End() token.Pos { return s.Body.End() }
+
 // DoWhileStmt is a do/while loop.
 type DoWhileStmt struct {
 	Keyword token.Pos
@@ -316,6 +326,7 @@ func (*IfStmt) stmtNode()       {}
 func (*ForStmt) stmtNode()      {}
 func (*ForInStmt) stmtNode()    {}
 func (*WhileStmt) stmtNode()    {}
+func (*WithStmt) stmtNode()     {}
 func (*DoWhileStmt) stmtNode()  {}
 func (*ReturnStmt) stmtNode()   {}
 func (*BreakStmt) stmtNode()    {}

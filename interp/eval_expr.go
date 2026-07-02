@@ -125,11 +125,25 @@ func (i *Interpreter) resolveIdent(ctx context.Context, name string, env *Enviro
 	if name == "new.target" {
 		return env.newTarget(), nil
 	}
-	if b := env.lookup(name); b != nil {
-		if !b.initialized {
-			return nil, i.throwError(ctx, "ReferenceError", "Cannot access '"+name+"' before initialization")
+	// Walk the scope chain, interleaving declarative bindings with any `with`
+	// object environment records so an inner binding shadows an outer with-object
+	// and vice versa (§9.1.1.2 / §9.1.1.1).
+	for e := env; e != nil; e = e.parent {
+		if e.withObj != nil {
+			obj, ok, err := i.withHasBinding(ctx, e.withObj, name)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return i.getV(ctx, obj, StrKey(name), obj)
+			}
 		}
-		return b.value, nil
+		if b, ok := e.vars[name]; ok {
+			if !b.initialized {
+				return nil, i.throwError(ctx, "ReferenceError", "Cannot access '"+name+"' before initialization")
+			}
+			return b.value, nil
+		}
 	}
 	// Fall back to a global-object property (globals like console, Math).
 	if i.global.HasOwn(StrKey(name)) || i.global.Has(StrKey(name)) {

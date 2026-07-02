@@ -44,6 +44,8 @@ func (p *parser) parseStmt() ast.Stmt {
 		return p.parseFor()
 	case token.WHILE:
 		return p.parseWhile()
+	case token.WITH:
+		return p.parseWith()
 	case token.DO:
 		return p.parseDoWhile()
 	case token.SWITCH:
@@ -300,6 +302,20 @@ func (p *parser) parseWhile() ast.Stmt {
 	p.expect(token.RPAREN)
 	body := p.parseLoopBody()
 	return &ast.WhileStmt{Keyword: kw.Pos, Test: test, Body: body}
+}
+
+// parseWith parses `with (Object) Statement`. It is a SyntaxError in strict mode
+// (§13.11.1).
+func (p *parser) parseWith() ast.Stmt {
+	kw := p.next()
+	if p.strict {
+		p.errorAt(kw.Pos, "'with' statements are not allowed in strict mode")
+	}
+	p.expect(token.LPAREN)
+	obj := p.parseExpression()
+	p.expect(token.RPAREN)
+	body := p.parseSubStatement(true)
+	return &ast.WithStmt{Keyword: kw.Pos, Object: obj, Body: body}
 }
 
 // parseDoWhile parses a do/while loop.
