@@ -335,6 +335,7 @@ func (p *parser) parseBindingTarget() ast.Expr {
 	case token.IDENT:
 		id := p.next()
 		p.checkReservedIdentifier(id.Literal, id.Pos)
+		p.checkEscapedReserved(id)
 		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 	default:
 		// Contextual keywords are valid binding names.
@@ -346,6 +347,42 @@ func (p *parser) parseBindingTarget() ast.Expr {
 		}
 		p.errorf("expected binding name but got %s", p.cur().Type)
 		return &ast.Ident{NamePos: p.cur().Pos}
+	}
+}
+
+// checkEscapedReserved reports the early error for an IdentifierName written
+// with a UnicodeEscapeSequence whose StringValue is a reserved word, used where
+// an Identifier — a BindingIdentifier, IdentifierReference, or LabelIdentifier —
+// is required. Such a token is a valid IdentifierName (so it remains legal as a
+// property name), but Identifier excludes ReservedWord, and a reserved word's
+// code points may not be expressed by an escape (ECMA-262 §12.7.2, §13.1.1).
+func (p *parser) checkEscapedReserved(tk token.Token) {
+	if !tk.Escaped {
+		return
+	}
+	name := tk.Literal
+	if token.IsReservedWord(name) {
+		p.errorAt(tk.Pos, "keyword '%s' must not contain escaped characters", name)
+		return
+	}
+	// Context-dependent reservations (ECMA-262 §12.7.2): the strict future
+	// reserved words, plus yield in a generator/strict context and await in an
+	// async context, are not valid Identifiers where they are reserved. We only
+	// apply these to an escaped form; the corresponding unescaped early errors
+	// are handled by the keyword-token paths and their own checks.
+	switch name {
+	case "implements", "interface", "package", "private", "protected", "public", "let", "static":
+		if p.strict {
+			p.errorAt(tk.Pos, "'%s' may not be used as an identifier in strict mode", name)
+		}
+	case "yield":
+		if p.strict || p.inGenerator {
+			p.errorAt(tk.Pos, "'yield' may not be used as an identifier in this context")
+		}
+	case "await":
+		if p.inAsync {
+			p.errorAt(tk.Pos, "'await' may not be used as an identifier in this context")
+		}
 	}
 }
 
@@ -380,6 +417,7 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	if p.at(token.IDENT) || (p.cur().Type.IsKeyword() && !p.at(token.LPAREN)) {
 		if p.at(token.IDENT) {
 			id := p.next()
+			p.checkEscapedReserved(id)
 			def.Name = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 		} else if requireName {
 			id := p.next()
@@ -501,12 +539,17 @@ func (p *parser) parseProperty() *ast.Property {
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: val, Kind: ast.PropInit, Computed: computed}
 	case p.at(token.ASSIGN):
 		// Shorthand with default, only valid in destructuring: { x = 1 }.
+		// The shorthand name is an IdentifierReference/BindingIdentifier, so an
+		// escaped reserved word (e.g. { break = 1 }) is an early error.
+		p.checkEscapedReserved(tk)
 		p.next()
 		def := p.parseAssignExpr()
 		val := &ast.AssignPattern{Target: key, Default: def}
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: val, Kind: ast.PropInit, Shorthand: true}
 	default:
-		// Shorthand: { x }.
+		// Shorthand: { x } — the name is both key and reference/binding, so an
+		// escaped reserved word ({ break }) is an early error.
+		p.checkEscapedReserved(tk)
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: key, Kind: ast.PropInit, Shorthand: true}
 	}
 }
@@ -601,6 +644,7 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 	def := &ast.ClassDef{}
 	if p.at(token.IDENT) {
 		id := p.next()
+		p.checkEscapedReserved(id)
 		def.Name = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 	}
 	if p.accept(token.EXTENDS) {

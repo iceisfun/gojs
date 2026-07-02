@@ -335,6 +335,24 @@ func (t Type) IsKeyword() bool {
 	return t > keywordBeg && t < keywordEnd
 }
 
+// IsReservedWord reports whether name is a ReservedWord (ECMA-262 §12.7.2): one
+// of the always-reserved keywords. The contextual keywords (let, static, yield,
+// async, await, of, get, set) are deliberately excluded — they are only reserved
+// in specific positions, which the parser decides. This is used to reject an
+// escaped IdentifierName whose StringValue is a reserved word where an Identifier
+// is required.
+func IsReservedWord(name string) bool {
+	t, ok := keywords[name]
+	if !ok {
+		return false
+	}
+	switch t {
+	case LET, STATIC, YIELD, ASYNC, AWAIT, OF, GET, SET:
+		return false
+	}
+	return true
+}
+
 // Category returns the coarse [Category] for t.
 func (t Type) Category() Category {
 	switch {
@@ -416,6 +434,14 @@ type Token struct {
 	// the strictness of the enclosing scope, so it records the condition here and
 	// the parser raises it when the surrounding code is strict.
 	StrictError string
+
+	// Escaped reports whether an IDENT or PRIVATE token's source contained a
+	// UnicodeEscapeSequence (\uXXXX or \u{...}) in its IdentifierName. Such a
+	// token is always an IdentifierName, never a keyword, but its StringValue
+	// (Literal) may spell a reserved word — which the parser must reject wherever
+	// an Identifier (binding/reference/label), rather than an IdentifierName, is
+	// required (ECMA-262 §12.7.2, §13.1.1).
+	Escaped bool
 }
 
 // Span is a half-open range of source positions [Start, End). It is the unit of

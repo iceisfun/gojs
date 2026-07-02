@@ -68,6 +68,7 @@ func (p *parser) parseStmt() ast.Stmt {
 	// Labeled statement: IDENT ':' Statement.
 	if tk.Type == token.IDENT && p.peek(1).Type == token.COLON {
 		label := p.next()
+		p.checkEscapedReserved(label)
 		p.next() // ':'
 		body := p.parseSubStatement(true)
 		return &ast.LabeledStmt{Label: &ast.Ident{NamePos: label.Pos, Name: label.Literal}, Body: body}
@@ -530,6 +531,7 @@ func (p *parser) parseBreakContinue(isBreak bool) ast.Stmt {
 	// A label must appear on the same line (no ASI newline before it).
 	if p.at(token.IDENT) && !p.cur().NewlineBefore {
 		id := p.next()
+		p.checkEscapedReserved(id)
 		label = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 		end = id.End
 	}

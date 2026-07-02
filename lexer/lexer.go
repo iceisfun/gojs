@@ -27,6 +27,7 @@ package lexer
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -230,8 +231,9 @@ func (l *Lexer) Next() token.Token {
 		return l.emit(token.Token{Type: token.EOF, Pos: start, NewlineBefore: nl})
 	}
 
-	// Identifiers and keywords.
-	if isIdentStart(l.ch) {
+	// Identifiers and keywords. An IdentifierName may also begin with a
+	// UnicodeEscapeSequence (\uXXXX or \u{...}), e.g. abc (ECMA-262 §12.7).
+	if isIdentStart(l.ch) || (l.ch == '\\' && l.peek() == 'u') {
 		return l.emit(l.scanIdent(start, nl))
 	}
 	// Private names (#foo).
@@ -267,29 +269,78 @@ func (l *Lexer) emit(t token.Token) token.Token {
 	return t
 }
 
-// scanIdent scans an identifier or keyword.
+// scanIdent scans an identifier or keyword. The cursor is at an IdentifierStart
+// character or at a '\' beginning a UnicodeEscapeSequence. When the name
+// contains any escape it is always an IdentifierName (never a keyword token):
+// its Literal is the decoded StringValue and Escaped is set, so the parser can
+// apply the "escaped reserved word" early errors (ECMA-262 §12.7.2, §13.1.1).
 func (l *Lexer) scanIdent(start token.Pos, nl bool) token.Token {
 	begin := l.offset
-	for isIdentPart(l.ch) {
-		l.readRune()
+	name, escaped, ok := l.scanIdentName(true)
+	if !ok {
+		return token.Token{Type: token.ILLEGAL, Pos: start, NewlineBefore: nl}
 	}
-	name := l.input[begin:l.offset]
-	typ := token.LookupIdent(name)
-	return token.Token{Type: typ, Literal: name, Raw: name, Pos: start, NewlineBefore: nl}
+	raw := l.input[begin:l.offset]
+	typ := token.IDENT
+	if !escaped {
+		typ = token.LookupIdent(name)
+	}
+	return token.Token{Type: typ, Literal: name, Raw: raw, Pos: start, NewlineBefore: nl, Escaped: escaped}
 }
 
-// scanPrivate scans a private name such as #count.
+// scanPrivate scans a private name such as #count or #\u{63}ount.
 func (l *Lexer) scanPrivate(start token.Pos, nl bool) token.Token {
 	begin := l.offset
 	l.readRune() // consume '#'
-	if !isIdentStart(l.ch) {
+	if !(isIdentStart(l.ch) || (l.ch == '\\' && l.peek() == 'u')) {
 		return l.errorf("unexpected character after '#'")
 	}
-	for isIdentPart(l.ch) {
-		l.readRune()
+	name, escaped, ok := l.scanIdentName(true)
+	if !ok {
+		return token.Token{Type: token.ILLEGAL, Pos: start, NewlineBefore: nl}
 	}
-	name := l.input[begin:l.offset]
-	return token.Token{Type: token.PRIVATE, Literal: name, Raw: name, Pos: start, NewlineBefore: nl}
+	raw := l.input[begin:l.offset]
+	return token.Token{Type: token.PRIVATE, Literal: "#" + name, Raw: raw, Pos: start, NewlineBefore: nl, Escaped: escaped}
+}
+
+// scanIdentName scans an IdentifierName from the current cursor, decoding any
+// \uXXXX / \u{...} UnicodeEscapeSequences to the code points they denote and
+// returning the decoded StringValue. The first code point must satisfy
+// IdentifierStart and the rest IdentifierPart; an escape that decodes to a code
+// point failing that test is a SyntaxError (ECMA-262 §12.7.1). start reports
+// whether the first element is being scanned (it always is for the two callers).
+func (l *Lexer) scanIdentName(start bool) (name string, escaped bool, ok bool) {
+	var b strings.Builder
+	first := start
+	for {
+		if l.ch == '\\' && l.peek() == 'u' {
+			l.readRune() // '\'
+			l.readRune() // 'u'
+			r, _, decoded := l.scanUnicodeEscape()
+			if !decoded {
+				return "", true, false // scanUnicodeEscape already recorded the error
+			}
+			if (first && !isIdentStart(r)) || (!first && !isIdentPart(r)) {
+				l.errorf("invalid Unicode escape in identifier")
+				return "", true, false
+			}
+			b.WriteRune(r)
+			escaped = true
+			first = false
+			continue
+		}
+		if first {
+			if !isIdentStart(l.ch) {
+				return "", escaped, false
+			}
+		} else if !isIdentPart(l.ch) {
+			break
+		}
+		b.WriteRune(l.ch)
+		l.readRune()
+		first = false
+	}
+	return b.String(), escaped, true
 }
 
 // regexAllowed reports whether a '/' at the current point should begin a

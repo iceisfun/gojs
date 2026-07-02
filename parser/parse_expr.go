@@ -230,7 +230,12 @@ func (p *parser) parseNew() ast.Expr {
 	kw := p.next() // new
 	if p.at(token.DOT) {
 		p.next()
-		p.expect(token.IDENT) // target
+		tgt := p.expect(token.IDENT) // target
+		// The `target` of the new.target meta-property is a fixed token, not an
+		// IdentifierName, so it may not be written with a Unicode escape (§13.3.12).
+		if tgt.Escaped {
+			p.errorAt(tgt.Pos, "'new.target' must not contain escaped characters")
+		}
 		// new.target is only valid inside a function; ordinary parsing leaves it
 		// permitted (runtime resolves it), but indirect/global eval forbids it.
 		if !p.newTargetOK {
@@ -407,6 +412,7 @@ func (p *parser) parsePrimary() ast.Expr {
 		return &ast.SuperExpr{Keyword: tk.Pos}
 	case token.IDENT:
 		p.next()
+		p.checkEscapedReserved(tk)
 		if p.inFieldInit && tk.Literal == "arguments" {
 			p.errorAt(tk.Pos, "'arguments' is not allowed in a class field initializer")
 		}
