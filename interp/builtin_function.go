@@ -98,14 +98,30 @@ func (i *Interpreter) initFunction() {
 		return String(b.String()), nil
 	})
 
-	// Symbol.hasInstance controls the instanceof operator.
-	i.defineSymbolMethod(proto, i.symHasInstance, "[Symbol.hasInstance]", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	// Symbol.hasInstance controls the instanceof operator. Per spec this
+	// property is non-writable, non-enumerable, and non-configurable.
+	hasInstance := i.newNativeFunc("[Symbol.hasInstance]", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		fn, ok := this.(*Object)
 		if !ok || !fn.IsCallable() {
 			return False, nil
 		}
-		return Bool(i.ordinaryHasInstance(ctx, fn, arg(args, 0))), nil
+		res, err := i.ordinaryHasInstance(ctx, fn, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		return Bool(res), nil
 	})
+	proto.defineOwn(SymKey(i.symHasInstance), &Property{Value: hasInstance, Writable: false, Enumerable: false, Configurable: false})
+
+	// AddRestrictedFunctionProperties: %Function.prototype% exposes "caller"
+	// and "arguments" as poison-pill accessors whose get and set both throw a
+	// TypeError. Ordinary, bound, and dynamic functions inherit these rather
+	// than owning them.
+	thrower := i.newNativeFunc("", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
+		return nil, i.throwError(ctx, "TypeError", "'caller', 'callee', and 'arguments' properties may not be accessed on ordinary functions")
+	})
+	proto.defineOwn(StrKey("caller"), &Property{Get: thrower, Set: thrower, Accessor: true, Enumerable: false, Configurable: true})
+	proto.defineOwn(StrKey("arguments"), &Property{Get: thrower, Set: thrower, Accessor: true, Enumerable: false, Configurable: true})
 
 	// The Function constructor builds a function from source strings
 	// (CreateDynamicFunction). Both `Function(...)` and `new Function(...)`
@@ -120,20 +136,26 @@ func (i *Interpreter) initFunction() {
 
 // ordinaryHasInstance implements the default instanceof check: whether ctor's
 // .prototype appears on v's prototype chain.
-func (i *Interpreter) ordinaryHasInstance(ctx context.Context, ctor *Object, v Value) bool {
+func (i *Interpreter) ordinaryHasInstance(ctx context.Context, ctor *Object, v Value) (bool, error) {
+	if !ctor.IsCallable() {
+		return false, nil
+	}
 	obj, ok := v.(*Object)
 	if !ok {
-		return false
+		return false, nil
 	}
-	protoV, _ := ctor.GetStr(ctx, "prototype")
+	protoV, err := ctor.GetStr(ctx, "prototype")
+	if err != nil {
+		return false, err
+	}
 	proto, ok := protoV.(*Object)
 	if !ok {
-		return false
+		return false, i.throwError(ctx, "TypeError", "Function has non-object prototype in instanceof check")
 	}
 	for p := obj.proto; p != nil; p = p.proto {
 		if p == proto {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

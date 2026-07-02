@@ -492,5 +492,9 @@ func (i *Interpreter) evalInstanceof(ctx context.Context, left, right Value) (Va
 	if !ctor.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "Right-hand side of 'instanceof' is not callable")
 	}
-	return Bool(i.ordinaryHasInstance(ctx, ctor, left)), nil
+	res, err := i.ordinaryHasInstance(ctx, ctor, left)
+	if err != nil {
+		return nil, err
+	}
+	return Bool(res), nil
 }
