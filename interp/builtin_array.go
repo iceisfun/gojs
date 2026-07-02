@@ -362,8 +362,15 @@ func (i *Interpreter) eachElem(ctx context.Context, o *Object, cb Value, thisArg
 	if !ok || !callback.IsCallable() {
 		return i.throwError(ctx, "TypeError", briefValue(cb)+" is not a function")
 	}
-	for j := 0; j < len(o.elems); j++ {
-		v := o.elems[j]
+	// The iteration length is captured once (per spec): elements the callback
+	// appends are not visited, and a callback that shrinks the array leaves the
+	// tail as holes rather than reading out of bounds.
+	n := len(o.elems)
+	for j := 0; j < n; j++ {
+		v := theHole
+		if j < len(o.elems) {
+			v = o.elems[j]
+		}
 		if isHole(v) {
 			if skipHoles {
 				continue
