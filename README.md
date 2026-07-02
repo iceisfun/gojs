@@ -170,9 +170,15 @@ promise microtasks run) before returning.
 ```bash
 go install github.com/iceisfun/gojs/cmd/gojs@latest
 
-gojs run app.js          # run a JavaScript file
-gojs run app.ts          # TypeScript, transpiled in-process
+gojs run app.js               # run a JavaScript file
+gojs run app.ts               # TypeScript, transpiled in-process
+gojs run --permissive app.ts  # tolerate TypeScript syntax errors
 ```
+
+Malformed TypeScript is rejected with a `file:line:column` error by default
+(safer when the output is about to run); `--permissive` (or `ts.Permissive()`
+when embedding) restores `ts.transpileModule`'s tolerant behavior. Runtime error
+stacks report the original `.ts` position via source maps.
 
 The runner resolves `require()`/imports against the entry file's directory
 (TypeScript modules are transpiled on load) and installs the standalone-runner
