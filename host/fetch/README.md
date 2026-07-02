@@ -99,7 +99,7 @@ it is sent; returning an error rejects the fetch with a `TypeError`.
   in Go.
 - **Threading.** `send` runs on the VM goroutine, copies the request body out
   there, then performs the blocking HTTP on a worker goroutine (which never
-  touches VM state). It holds the event loop open with `VM.KeepAlive` for the
+  touches VM state). It holds the event loop open with `VM.Pin` for the
   duration and delivers the result via `VM.Enqueue`, building the response value
   and settling the promise back on the VM goroutine.
 - **Binary bridge.** This package relies on the engine's `Uint8Array` and the

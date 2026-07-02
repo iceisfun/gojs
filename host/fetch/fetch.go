@@ -18,7 +18,7 @@
 // A native function invoked from JavaScript runs on the VM goroutine. send reads
 // its arguments and copies the request body there, then does the blocking HTTP
 // on its own goroutine (never touching VM state from it). It keeps the event
-// loop alive with VM.KeepAlive for the duration and delivers the result back via
+// loop alive with VM.Pin for the duration and delivers the result back via
 // VM.Enqueue, building the response value and settling the promise on the VM
 // goroutine.
 //
@@ -171,7 +171,7 @@ func (cfg *config) newSend(vm *gojs.VM) *gojs.Object {
 		redirected := &boolBox{}
 		client.CheckRedirect = redirectPolicy(redirect, redirected)
 
-		release := vm.KeepAlive()
+		release := vm.Pin()
 		go func() {
 			resp, err := client.Do(req)
 			var data []byte
