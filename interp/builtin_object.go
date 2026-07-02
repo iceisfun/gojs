@@ -424,37 +424,146 @@ func (i *Interpreter) enumerableKeys(o *Object, project func(string, Value) Valu
 	return out
 }
 
-// applyDescriptor installs a property from a descriptor object.
+// applyDescriptor implements OrdinaryDefineOwnProperty /
+// ValidateAndApplyPropertyDescriptor (§10.1.6) with the Throw flag set: it
+// merges only the fields the descriptor actually specifies onto any existing
+// property (leaving the rest untouched), enforces the invariants for
+// non-configurable and non-writable properties, and raises a TypeError when a
+// change is disallowed.
 func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) error {
-	p := &Property{}
+	// Which attributes does the descriptor specify? Presence — not truthiness —
+	// determines what gets applied; absent fields are inherited from the
+	// current property (or take spec defaults for a brand-new one).
+	hasEnum := desc.HasOwn(StrKey("enumerable"))
+	hasConf := desc.HasOwn(StrKey("configurable"))
+	hasValue := desc.HasOwn(StrKey("value"))
+	hasWritable := desc.HasOwn(StrKey("writable"))
 	hasGet := desc.HasOwn(StrKey("get"))
 	hasSet := desc.HasOwn(StrKey("set"))
-	if hasGet || hasSet {
-		p.Accessor = true
-		if g, _ := desc.GetStr(ctx, "get"); g != nil {
-			if go_, ok := g.(*Object); ok {
-				p.Get = go_
+
+	if (hasGet || hasSet) && (hasValue || hasWritable) {
+		return i.throwError(ctx, "TypeError",
+			"Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, "+keyName(key))
+	}
+
+	var enumerable, configurable, writable bool
+	var value Value = Undef
+	var getter, setter *Object
+	if hasEnum {
+		v, _ := desc.GetStr(ctx, "enumerable")
+		enumerable = ToBoolean(v)
+	}
+	if hasConf {
+		v, _ := desc.GetStr(ctx, "configurable")
+		configurable = ToBoolean(v)
+	}
+	if hasValue {
+		value, _ = desc.GetStr(ctx, "value")
+	}
+	if hasWritable {
+		v, _ := desc.GetStr(ctx, "writable")
+		writable = ToBoolean(v)
+	}
+	if hasGet {
+		v, _ := desc.GetStr(ctx, "get")
+		if fn, ok := v.(*Object); ok && fn.IsCallable() {
+			getter = fn
+		} else if !IsUndefined(v) {
+			return i.throwError(ctx, "TypeError", "Getter must be a function: "+keyName(key))
+		}
+	}
+	if hasSet {
+		v, _ := desc.GetStr(ctx, "set")
+		if fn, ok := v.(*Object); ok && fn.IsCallable() {
+			setter = fn
+		} else if !IsUndefined(v) {
+			return i.throwError(ctx, "TypeError", "Setter must be a function: "+keyName(key))
+		}
+	}
+	isAccessorDesc := hasGet || hasSet
+	isDataDesc := hasValue || hasWritable
+
+	current, exists := o.getOwn(key)
+	if !exists {
+		if !o.extensible {
+			return i.throwError(ctx, "TypeError",
+				"Cannot define property "+keyName(key)+", object is not extensible")
+		}
+		p := &Property{Enumerable: enumerable, Configurable: configurable}
+		if isAccessorDesc {
+			p.Accessor = true
+			p.Get = getter
+			p.Set = setter
+		} else {
+			p.Value = value
+			p.Writable = writable
+		}
+		o.defineOwn(key, p)
+		return nil
+	}
+
+	// The property already exists: a non-configurable property constrains which
+	// redefinitions are permitted (§10.1.6.3).
+	if !current.Configurable {
+		if hasConf && configurable {
+			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+		}
+		if hasEnum && enumerable != current.Enumerable {
+			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+		}
+		switch {
+		case isAccessorDesc && !current.Accessor, isDataDesc && current.Accessor:
+			// Changing the kind of a non-configurable property is forbidden.
+			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+		case current.Accessor:
+			if hasGet && getter != current.Get {
+				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			}
+			if hasSet && setter != current.Set {
+				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			}
+		case !current.Writable:
+			if hasWritable && writable {
+				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			}
+			if hasValue && !sameValue(value, current.Value) {
+				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
 			}
 		}
-		if s, _ := desc.GetStr(ctx, "set"); s != nil {
-			if so, ok := s.(*Object); ok {
-				p.Set = so
-			}
+	}
+
+	// Apply: start from a copy of the current descriptor and overwrite only the
+	// specified fields, converting between data and accessor forms as needed.
+	np := *current
+	switch {
+	case isAccessorDesc:
+		if !np.Accessor {
+			np = Property{Accessor: true, Enumerable: np.Enumerable, Configurable: np.Configurable}
 		}
-	} else {
-		v, _ := desc.GetStr(ctx, "value")
-		p.Value = v
-		if w, _ := desc.GetStr(ctx, "writable"); ToBoolean(w) {
-			p.Writable = true
+		if hasGet {
+			np.Get = getter
+		}
+		if hasSet {
+			np.Set = setter
+		}
+	case isDataDesc:
+		if np.Accessor {
+			np = Property{Enumerable: np.Enumerable, Configurable: np.Configurable}
+		}
+		if hasValue {
+			np.Value = value
+		}
+		if hasWritable {
+			np.Writable = writable
 		}
 	}
-	if e, _ := desc.GetStr(ctx, "enumerable"); ToBoolean(e) {
-		p.Enumerable = true
+	if hasEnum {
+		np.Enumerable = enumerable
 	}
-	if c, _ := desc.GetStr(ctx, "configurable"); ToBoolean(c) {
-		p.Configurable = true
+	if hasConf {
+		np.Configurable = configurable
 	}
-	o.defineOwn(key, p)
+	o.defineOwn(key, &np)
 	return nil
 }
 
