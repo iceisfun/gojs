@@ -30,7 +30,11 @@ func scanGroups(src []rune) (int, map[string]int, error) {
 					if !ok {
 						return 0, nil, errAt(i, "invalid capture group name")
 					}
-					names[name] = count
+					// Keep the first occurrence's index so a name duplicated
+					// across alternatives (ES2025) enumerates in source order.
+					if _, dup := names[name]; !dup {
+						names[name] = count
+					}
 					i = end
 					continue
 				}

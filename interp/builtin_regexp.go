@@ -2,6 +2,7 @@ package interp
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/iceisfun/gojs/jsregexp"
@@ -449,9 +450,11 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 	arr.SetData("input", String(jsregexp.FromUnits(units)))
 
 	names := re.GroupNames()
+	orderedNames := orderedGroupNames(names)
 	if len(names) > 0 {
 		groups := NewObject(nil)
-		for name, idx := range names {
+		for _, name := range orderedNames {
+			idx := names[name]
 			s, e := m[2*idx], m[2*idx+1]
 			if idx >= n || s < 0 {
 				groups.SetData(name, Undef)
@@ -481,7 +484,8 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 		indicesArr := i.newArray(indices)
 		if len(names) > 0 {
 			ig := NewObject(nil)
-			for name, idx := range names {
+			for _, name := range orderedNames {
+				idx := names[name]
 				if idx >= n {
 					ig.SetData(name, Undef)
 				} else {
@@ -495,6 +499,21 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 		arr.SetData("indices", indicesArr)
 	}
 	return arr
+}
+
+// orderedGroupNames returns the named-capture names sorted by capture index, so
+// the exec result's `groups` object enumerates in source (left-to-right) order
+// rather than the nondeterministic order of the underlying map (§22.2.7.2).
+func orderedGroupNames(names map[string]int) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Slice(out, func(a, b int) bool { return names[out[a]] < names[out[b]] })
+	return out
 }
 
 // stringSplitString implements String.prototype.split with a string separator.
