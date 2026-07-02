@@ -76,6 +76,8 @@ type promiseState struct {
 func (i *Interpreter) initPromise() {
 	proto := i.promiseProto
 	proto.class = "Promise"
+	// Promise.prototype[Symbol.toStringTag] = "Promise" (§27.2.5.5).
+	proto.defineOwn(SymKey(i.symToStringTag), &Property{Value: String("Promise"), Writable: false, Enumerable: false, Configurable: true})
 
 	// -----------------------------------------------------------------------
 	// Promise.prototype.then(onFulfilled, onRejected)
@@ -84,73 +86,90 @@ func (i *Interpreter) initPromise() {
 	// settles based on the handler return values.  §27.2.5.4
 	// -----------------------------------------------------------------------
 	i.defineMethod(proto, "then", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		p, ok := this.(*Object)
-		if !ok || p.class != "Promise" {
-			return nil, i.throwError(ctx, "TypeError", "Promise.prototype.then called on non-Promise")
+		p, err := i.requirePromise(ctx, this, "then")
+		if err != nil {
+			return nil, err
 		}
-		return i.promiseThen(p, arg(args, 0), arg(args, 1)), nil
+		// C = SpeciesConstructor(p, %Promise%); result = NewPromiseCapability(C).
+		c, err := i.speciesConstructor(ctx, p, i.promiseCtor)
+		if err != nil {
+			return nil, err
+		}
+		cap, err := i.newPromiseCapability(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		resolve, reject := i.capabilityResolvers(cap)
+		i.performPromiseThen(p, arg(args, 0), arg(args, 1), resolve, reject)
+		return cap.promise, nil
 	})
 
 	// -----------------------------------------------------------------------
-	// Promise.prototype.catch(onRejected)
+	// Promise.prototype.catch(onRejected) — §27.2.5.1
 	//
-	// Shorthand for then(undefined, onRejected).  §27.2.5.1
+	// Generic: Invoke(this, "then", « undefined, onRejected »).
 	// -----------------------------------------------------------------------
 	i.defineMethod(proto, "catch", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		p, ok := this.(*Object)
-		if !ok || p.class != "Promise" {
-			return nil, i.throwError(ctx, "TypeError", "Promise.prototype.catch called on non-Promise")
-		}
-		return i.promiseThen(p, Undef, arg(args, 0)), nil
+		return i.invokeMethod(ctx, this, "then", []Value{Undef, arg(args, 0)})
 	})
 
 	// -----------------------------------------------------------------------
-	// Promise.prototype.finally(onFinally)
+	// Promise.prototype.finally(onFinally) — §27.2.5.3
 	//
-	// Runs onFinally on settlement without changing the value/reason.
-	// If onFinally is not callable, it passes through like a plain .then.
-	// §27.2.5.3
+	// Generic in `this` (only requires an object): computes the species
+	// constructor, wraps onFinally so the original value/reason passes through,
+	// and dispatches through Invoke(this, "then", ...).
 	// -----------------------------------------------------------------------
 	i.defineMethod(proto, "finally", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		p, ok := this.(*Object)
-		if !ok || p.class != "Promise" {
-			return nil, i.throwError(ctx, "TypeError", "Promise.prototype.finally called on non-Promise")
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Promise.prototype.finally called on non-object")
+		}
+		c, err := i.speciesConstructor(ctx, p, i.promiseCtor)
+		if err != nil {
+			return nil, err
 		}
 		onFinally := arg(args, 0)
-		fn, isFn := onFinally.(*Object)
-		if !isFn || !fn.IsCallable() {
-			// Non-callable: behaves like .then(onFinally, onFinally) — both
-			// handlers will pass through value/reason unchanged.
-			return i.promiseThen(p, onFinally, onFinally), nil
+		thenArg0, thenArg1 := onFinally, onFinally
+		if fn, isFn := onFinally.(*Object); isFn && fn.IsCallable() {
+			// thenFinally:  v => PromiseResolve(C, onFinally()).then(() => v)
+			thenArg0 = i.newNativeFunc("", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
+				v := arg(a, 0)
+				result, err := i.call(ctx, onFinally, Undef, nil)
+				if err != nil {
+					return nil, err
+				}
+				rp, err := i.promiseResolve(ctx, c, result)
+				if err != nil {
+					return nil, err
+				}
+				valueThunk := i.newNativeFunc("", 0, func(_ context.Context, _ Value, _ []Value) (Value, error) {
+					return v, nil
+				})
+				return i.invokeThenValue(ctx, rp, valueThunk)
+			})
+			// catchFinally: r => PromiseResolve(C, onFinally()).then(() => { throw r })
+			thenArg1 = i.newNativeFunc("", 1, func(ctx context.Context, _ Value, a []Value) (Value, error) {
+				r := arg(a, 0)
+				result, err := i.call(ctx, onFinally, Undef, nil)
+				if err != nil {
+					return nil, err
+				}
+				rp, err := i.promiseResolve(ctx, c, result)
+				if err != nil {
+					return nil, err
+				}
+				thrower := i.newNativeFunc("", 0, func(_ context.Context, _ Value, _ []Value) (Value, error) {
+					return nil, NewThrow(r)
+				})
+				return i.invokeThenValue(ctx, rp, thrower)
+			})
 		}
-		// Callable: wrap to preserve the original value/reason.
-		//
-		// thenFinally:  v => Promise.resolve(onFinally()).then(() => v)
-		// catchFinally: r => Promise.resolve(onFinally()).then(() => { throw r })
-		thenFinally := i.newNativeFunc("", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-			v := arg(args, 0)
-			result, err := i.call(ctx, onFinally, Undef, nil)
-			if err != nil {
-				return nil, err
-			}
-			// Wrap result in a resolved promise then map to v.
-			rp := i.promiseResolveValue(result)
-			return i.promiseThen(rp, i.newNativeFunc("", 0, func(_ context.Context, _ Value, _ []Value) (Value, error) {
-				return v, nil
-			}), Undef), nil
-		})
-		catchFinally := i.newNativeFunc("", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-			r := arg(args, 0)
-			result, err := i.call(ctx, onFinally, Undef, nil)
-			if err != nil {
-				return nil, err
-			}
-			rp := i.promiseResolveValue(result)
-			return i.promiseThen(rp, i.newNativeFunc("", 0, func(_ context.Context, _ Value, _ []Value) (Value, error) {
-				return nil, NewThrow(r)
-			}), Undef), nil
-		})
-		return i.promiseThen(p, thenFinally, catchFinally), nil
+		thenFn, err := i.getMethodStr2(ctx, this, "then")
+		if err != nil {
+			return nil, err
+		}
+		return thenFn.fn.call(ctx, this, []Value{thenArg0, thenArg1})
 	})
 
 	// -----------------------------------------------------------------------
@@ -168,11 +187,13 @@ func (i *Interpreter) initPromise() {
 			return nil, i.throwError(ctx, "TypeError", "Promise resolver must be a function")
 		}
 		pObj, resolve, reject := i.newPromise()
-		resolveFn := i.newNativeFunc("resolve", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
+		// The resolving functions are anonymous built-ins (name "") per
+		// CreateResolvingFunctions (§27.2.1.3).
+		resolveFn := i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
 			resolve(arg(args, 0))
 			return Undef, nil
 		})
-		rejectFn := i.newNativeFunc("reject", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
+		rejectFn := i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
 			reject(arg(args, 0))
 			return Undef, nil
 		})
@@ -191,73 +212,130 @@ func (i *Interpreter) initPromise() {
 	linkCtor(ctor, proto)
 	i.defineSpeciesGetter(ctor)
 
+	// get Promise[Symbol.species] returns the this value (§27.2.4.7), so that
+	// subclasses inherit the base constructor for SpeciesConstructor.
+	i.defineSpeciesGetter(ctor)
+
 	// -----------------------------------------------------------------------
-	// Promise.resolve(value)
+	// Promise.resolve(value) — §27.2.4.7 → PromiseResolve(C, value)
 	//
-	// If value is already a native Promise, return it unchanged.  Otherwise
-	// wrap it in a resolved promise (handles thenables via resolution).
-	// §27.2.4.5
+	// C is the `this` value and must be an object. If value is a promise whose
+	// constructor is C, it is returned unchanged; otherwise a new capability of
+	// C is created and resolved with value.
 	// -----------------------------------------------------------------------
-	i.defineMethod(ctor, "resolve", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		v := arg(args, 0)
-		if obj, ok := v.(*Object); ok && obj.class == "Promise" {
-			return obj, nil
+	i.defineMethod(ctor, "resolve", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		c, ok := this.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Promise.resolve called on non-object")
 		}
-		return i.promiseResolveValue(v), nil
+		return i.promiseResolve(ctx, c, arg(args, 0))
 	})
 
 	// -----------------------------------------------------------------------
-	// Promise.reject(reason)
+	// Promise.reject(reason) — §27.2.4.6
 	//
-	// Returns a promise already rejected with reason.  §27.2.4.4
+	// Builds a capability of `this` and rejects it with reason.
 	// -----------------------------------------------------------------------
-	i.defineMethod(ctor, "reject", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		pObj, _, reject := i.newPromise()
-		reject(arg(args, 0))
-		return pObj, nil
+	i.defineMethod(ctor, "reject", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		c, ok := this.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Promise.reject called on non-object")
+		}
+		cap, err := i.newPromiseCapability(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := i.call(ctx, cap.reject, Undef, []Value{arg(args, 0)}); err != nil {
+			return nil, err
+		}
+		return cap.promise, nil
 	})
 
 	// -----------------------------------------------------------------------
-	// Promise.all(iterable)
-	//
-	// Resolves with an array of all fulfilled values; rejects on the first
-	// rejection.  §27.2.4.1
+	// Promise.all / allSettled / race / any — §27.2.4.1-.4
 	// -----------------------------------------------------------------------
-	i.defineMethod(ctor, "all", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		return i.promiseAll(ctx, arg(args, 0))
+	i.defineMethod(ctor, "all", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.promiseAllStatic(ctx, this, arg(args, 0))
+	})
+	i.defineMethod(ctor, "allSettled", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.promiseAllSettledStatic(ctx, this, arg(args, 0))
+	})
+	i.defineMethod(ctor, "race", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.promiseRaceStatic(ctx, this, arg(args, 0))
+	})
+	i.defineMethod(ctor, "any", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.promiseAnyStatic(ctx, this, arg(args, 0))
 	})
 
 	// -----------------------------------------------------------------------
-	// Promise.allSettled(iterable)
-	//
-	// Resolves once every promise settles; result is an array of
-	// {status, value|reason} descriptor objects.  §27.2.4.2
+	// Promise.withResolvers() — §27.2.4.8
 	// -----------------------------------------------------------------------
-	i.defineMethod(ctor, "allSettled", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		return i.promiseAllSettled(ctx, arg(args, 0))
+	i.defineMethod(ctor, "withResolvers", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		c, ok := this.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Promise.withResolvers called on non-object")
+		}
+		cap, err := i.newPromiseCapability(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		obj := NewObject(i.objectProto)
+		obj.SetData("promise", cap.promise)
+		obj.SetData("resolve", cap.resolve)
+		obj.SetData("reject", cap.reject)
+		return obj, nil
 	})
 
 	// -----------------------------------------------------------------------
-	// Promise.race(iterable)
-	//
-	// Resolves or rejects with the value/reason of the first settled promise.
-	// An empty iterable produces a forever-pending promise.  §27.2.4.3
+	// Promise.try(callback, ...args) — §27.2.4.7 (ES2025)
 	// -----------------------------------------------------------------------
-	i.defineMethod(ctor, "race", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		return i.promiseRace(ctx, arg(args, 0))
+	i.defineMethod(ctor, "try", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		c, ok := this.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Promise.try called on non-object")
+		}
+		cap, err := i.newPromiseCapability(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		callback := arg(args, 0)
+		var rest []Value
+		if len(args) > 1 {
+			rest = args[1:]
+		}
+		result, cbErr := i.call(ctx, callback, Undef, rest)
+		if cbErr != nil {
+			return i.ifAbruptRejectPromise(ctx, cap, cbErr)
+		}
+		if _, err := i.call(ctx, cap.resolve, Undef, []Value{result}); err != nil {
+			return nil, err
+		}
+		return cap.promise, nil
 	})
 
-	// -----------------------------------------------------------------------
-	// Promise.any(iterable)
-	//
-	// Resolves with the first fulfilled value; if all reject, rejects with an
-	// AggregateError carrying all reasons.  §27.2.4.4 (ES2021)
-	// -----------------------------------------------------------------------
-	i.defineMethod(ctor, "any", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		return i.promiseAny(ctx, arg(args, 0))
-	})
-
+	i.promiseCtor = ctor
 	i.setGlobalHidden("Promise", ctor)
+}
+
+// promiseResolve implements PromiseResolve(C, x) (§27.2.4.7.1).
+func (i *Interpreter) promiseResolve(ctx context.Context, c *Object, x Value) (Value, error) {
+	if xo, ok := x.(*Object); ok && xo.class == "Promise" {
+		xctor, err := xo.GetStr(ctx, "constructor")
+		if err != nil {
+			return nil, err
+		}
+		if xctor == Value(c) {
+			return xo, nil
+		}
+	}
+	cap, err := i.newPromiseCapability(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := i.call(ctx, cap.resolve, Undef, []Value{x}); err != nil {
+		return nil, err
+	}
+	return cap.promise, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -436,12 +514,21 @@ func (i *Interpreter) getPromiseState(p *Object) *promiseState {
 	return &promiseState{status: promiseFulfilled, result: Undef}
 }
 
-// promiseThen registers fulfill/reject reactions on p and returns a new
-// promise whose settlement is driven by the reactions.  This is the core of
-// the Promises/A+ "then" operation (§27.2.5.4.1).
+// promiseThen registers fulfill/reject reactions on p and returns a new native
+// promise whose settlement is driven by the reactions. It is the internal fast
+// path used by async/await and Promise.prototype.finally where the result
+// promise is always a plain %Promise%.
 func (i *Interpreter) promiseThen(p *Object, onFulfilled, onRejected Value) *Object {
-	state := i.getPromiseState(p)
 	resultP, resolve, reject := i.newPromise()
+	i.performPromiseThen(p, onFulfilled, onRejected, resolve, reject)
+	return resultP
+}
+
+// performPromiseThen implements PerformPromiseThen (§27.2.5.4.1), wiring the
+// fulfill/reject reactions to the supplied resolve/reject functions of the
+// result capability.
+func (i *Interpreter) performPromiseThen(p *Object, onFulfilled, onRejected Value, resolve, reject func(Value)) {
+	state := i.getPromiseState(p)
 
 	// Fulfill reaction: if handler is callable, call it and adopt the result;
 	// otherwise pass the value through to resolve.
@@ -479,8 +566,52 @@ func (i *Interpreter) promiseThen(p *Object, onFulfilled, onRejected Value) *Obj
 			return i.triggerReaction(rejectReaction, reason)
 		})
 	}
+}
 
-	return resultP
+// capabilityResolvers adapts a promise capability's callable resolve/reject into
+// the func(Value) shape used by the reaction machinery.
+func (i *Interpreter) capabilityResolvers(cap *promiseCapability) (resolve, reject func(Value)) {
+	resolve = func(v Value) { _, _ = i.call(i.ctx, cap.resolve, Undef, []Value{v}) }
+	reject = func(v Value) { _, _ = i.call(i.ctx, cap.reject, Undef, []Value{v}) }
+	return resolve, reject
+}
+
+// requirePromise performs the RequireInternalSlot([[PromiseState]]) brand check:
+// this must be an object carrying a promise state slot.
+func (i *Interpreter) requirePromise(ctx context.Context, this Value, method string) (*Object, error) {
+	if p, ok := this.(*Object); ok && p.internal != nil {
+		if _, ok := p.internal["state"].(*promiseState); ok {
+			return p, nil
+		}
+	}
+	return nil, i.throwError(ctx, "TypeError", "Promise.prototype."+method+" called on non-Promise")
+}
+
+// invokeMethod implements Invoke(V, P, args) (§7.3.18): GetV (which boxes a
+// primitive via ToObject), require callable, then Call with V as this.
+func (i *Interpreter) invokeMethod(ctx context.Context, v Value, name string, args []Value) (Value, error) {
+	o, err := i.ToObject(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	fnV, err := o.GetStr(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	fn, ok := fnV.(*Object)
+	if !ok || !fn.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", name+" is not a function")
+	}
+	return fn.fn.call(ctx, v, args)
+}
+
+// invokeThenValue performs Invoke(promise, "then", « onFulfilled »).
+func (i *Interpreter) invokeThenValue(ctx context.Context, promise Value, onFulfilled Value) (Value, error) {
+	thenFn, err := i.getMethodStr2(ctx, promise, "then")
+	if err != nil {
+		return nil, err
+	}
+	return thenFn.fn.call(ctx, promise, []Value{onFulfilled})
 }
 
 // triggerReaction executes a single promise reaction microtask.
@@ -522,185 +653,4 @@ func (i *Interpreter) promiseResolveValue(v Value) *Object {
 	pObj, resolve, _ := i.newPromise()
 	resolve(v)
 	return pObj
-}
-
-// ---------------------------------------------------------------------------
-// Static combinators
-// ---------------------------------------------------------------------------
-
-// promiseAll implements Promise.all: resolves with an array of fulfillment
-// values once all input promises fulfil; rejects on the first rejection.
-// If iteration itself throws, that error propagates synchronously (matching
-// IfAbruptRejectPromise semantics for non-iterable inputs).
-func (i *Interpreter) promiseAll(ctx context.Context, iterable Value) (*Object, error) {
-	resultP, resolve, reject := i.newPromise()
-
-	var promises []Value
-	err := i.iterate(ctx, iterable, func(v Value) error {
-		promises = append(promises, v)
-		return nil
-	})
-	if err != nil {
-		if tv, ok := ThrownValue(err); ok {
-			reject(tv)
-			return resultP, nil
-		}
-		return nil, err
-	}
-
-	if len(promises) == 0 {
-		resolve(i.newArray(nil))
-		return resultP, nil
-	}
-
-	results := make([]Value, len(promises))
-	remaining := len(promises)
-
-	for idx, p := range promises {
-		idx := idx
-		pObj := i.promiseResolveValue(p)
-		i.promiseThen(pObj,
-			i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-				results[idx] = arg(args, 0)
-				remaining--
-				if remaining == 0 {
-					resolve(i.newArray(append([]Value{}, results...)))
-				}
-				return Undef, nil
-			}),
-			i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-				reject(arg(args, 0))
-				return Undef, nil
-			}))
-	}
-	return resultP, nil
-}
-
-// promiseAllSettled implements Promise.allSettled: resolves once every input
-// promise has settled, producing an array of {status, value|reason} objects.
-func (i *Interpreter) promiseAllSettled(ctx context.Context, iterable Value) (*Object, error) {
-	resultP, resolve, _ := i.newPromise()
-
-	var promises []Value
-	err := i.iterate(ctx, iterable, func(v Value) error {
-		promises = append(promises, v)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if len(promises) == 0 {
-		resolve(i.newArray(nil))
-		return resultP, nil
-	}
-
-	results := make([]Value, len(promises))
-	remaining := len(promises)
-
-	makeSettleHandler := func(idx int, status string, key string) *Object {
-		return i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-			desc := NewObject(i.objectProto)
-			desc.SetData("status", String(status))
-			desc.SetData(key, arg(args, 0))
-			results[idx] = desc
-			remaining--
-			if remaining == 0 {
-				resolve(i.newArray(append([]Value{}, results...)))
-			}
-			return Undef, nil
-		})
-	}
-
-	for idx, p := range promises {
-		pObj := i.promiseResolveValue(p)
-		i.promiseThen(pObj,
-			makeSettleHandler(idx, "fulfilled", "value"),
-			makeSettleHandler(idx, "rejected", "reason"))
-	}
-	return resultP, nil
-}
-
-// promiseRace implements Promise.race: resolves or rejects with the first
-// promise to settle.  An empty iterable yields a forever-pending promise.
-func (i *Interpreter) promiseRace(ctx context.Context, iterable Value) (*Object, error) {
-	resultP, resolve, reject := i.newPromise()
-
-	err := i.iterate(ctx, iterable, func(v Value) error {
-		pObj := i.promiseResolveValue(v)
-		i.promiseThen(pObj,
-			i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-				resolve(arg(args, 0))
-				return Undef, nil
-			}),
-			i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-				reject(arg(args, 0))
-				return Undef, nil
-			}))
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resultP, nil
-}
-
-// promiseAny implements Promise.any (ES2021): resolves with the first
-// fulfilled value; if every promise rejects, rejects with an AggregateError
-// carrying all rejection reasons.
-func (i *Interpreter) promiseAny(ctx context.Context, iterable Value) (*Object, error) {
-	resultP, resolve, reject := i.newPromise()
-
-	var promises []Value
-	err := i.iterate(ctx, iterable, func(v Value) error {
-		promises = append(promises, v)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if len(promises) == 0 {
-		// Vacuously all rejected.
-		reject(i.makeAggregateError(i.newArray(nil), "All promises were rejected"))
-		return resultP, nil
-	}
-
-	errors := make([]Value, len(promises))
-	remaining := len(promises)
-
-	for idx, p := range promises {
-		idx := idx
-		pObj := i.promiseResolveValue(p)
-		i.promiseThen(pObj,
-			i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-				resolve(arg(args, 0))
-				return Undef, nil
-			}),
-			i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
-				errors[idx] = arg(args, 0)
-				remaining--
-				if remaining == 0 {
-					reject(i.makeAggregateError(
-						i.newArray(append([]Value{}, errors...)),
-						"All promises were rejected",
-					))
-				}
-				return Undef, nil
-			}))
-	}
-	return resultP, nil
-}
-
-// makeAggregateError constructs a minimal AggregateError-like object carrying
-// an .errors array and a .message string.  A full AggregateError subclass is
-// not yet installed as a global; this object inherits from Error.prototype.
-func (i *Interpreter) makeAggregateError(errors *Object, message string) Value {
-	obj := NewObject(i.errorProto)
-	obj.class = "Error"
-	obj.SetHidden("name", String("AggregateError"))
-	obj.SetHidden("message", String(message))
-	obj.SetHidden("errors", errors)
-	obj.SetHidden("stack", String("AggregateError: "+message))
-	return obj
 }

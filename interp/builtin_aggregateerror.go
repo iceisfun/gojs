@@ -10,6 +10,8 @@ func (i *Interpreter) initAggregateError(errorCtor *Object) {
 	proto := NewObject(i.errorProto)
 	proto.SetHidden("name", String("AggregateError"))
 	proto.SetHidden("message", String(""))
+	// Recorded so Promise.any can build a spec-correct AggregateError instance.
+	i.aggregateErrorProto = proto
 
 	build := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		obj := NewObject(proto)

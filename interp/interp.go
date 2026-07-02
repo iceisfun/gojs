@@ -125,6 +125,8 @@ type intrinsics struct {
 	mapProto                  *Object
 	setProto                  *Object
 	promiseProto              *Object
+	promiseCtor               *Object // %Promise%, for SpeciesConstructor defaults
+	aggregateErrorProto       *Object // %AggregateError.prototype%, for Promise.any
 	iteratorProto             *Object
 	arrayIteratorProto        *Object // %ArrayIteratorPrototype%
 	iteratorHelperProto       *Object // %IteratorHelperPrototype%
