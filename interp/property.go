@@ -20,10 +20,12 @@ func (o *Object) GetStr(ctx context.Context, name string) (Value, error) {
 // getWithReceiver resolves key starting at o but binds getters' `this` to
 // receiver (which matters for inherited accessors).
 func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver Value) (Value, error) {
-	if o.proxy != nil {
-		return o.proxy.get(ctx, key, receiver)
-	}
 	for cur := o; cur != nil; cur = cur.proto {
+		// A Proxy anywhere on the chain intercepts [[Get]] for the whole
+		// remaining chain (its target may itself continue the lookup).
+		if cur.proxy != nil {
+			return cur.proxy.get(ctx, key, receiver)
+		}
 		if p, ok := cur.getOwn(key); ok {
 			if p.Accessor {
 				if p.Get == nil {

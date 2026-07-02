@@ -68,7 +68,11 @@ func (p *proxyState) get(ctx context.Context, key PropertyKey, receiver Value) (
 	// Invariant: a non-configurable, non-writable data property must report its
 	// exact value; a non-configurable accessor with no getter must report
 	// undefined.
-	if td, ok := p.target.getOwn(key); ok && !td.Configurable {
+	td, ok, err := i.getOwnPropertyV(ctx, p.target, key)
+	if err != nil {
+		return nil, err
+	}
+	if ok && !td.Configurable {
 		if !td.Accessor && !td.Writable && !sameValue(res, td.Value) {
 			return nil, i.throwError(ctx, "TypeError", "proxy get: inconsistent non-configurable non-writable property")
 		}
@@ -99,7 +103,11 @@ func (p *proxyState) set(ctx context.Context, key PropertyKey, v, receiver Value
 	if !ToBoolean(res) {
 		return false, nil
 	}
-	if td, ok := p.target.getOwn(key); ok && !td.Configurable {
+	td, ok, err := i.getOwnPropertyV(ctx, p.target, key)
+	if err != nil {
+		return false, err
+	}
+	if ok && !td.Configurable {
 		if !td.Accessor && !td.Writable && !sameValue(v, td.Value) {
 			return false, i.throwError(ctx, "TypeError", "proxy set: cannot change a non-configurable non-writable property")
 		}
@@ -128,11 +136,19 @@ func (p *proxyState) has(ctx context.Context, key PropertyKey) (bool, error) {
 		return false, err
 	}
 	if !ToBoolean(res) {
-		if td, ok := p.target.getOwn(key); ok {
+		td, ok, err := i.getOwnPropertyV(ctx, p.target, key)
+		if err != nil {
+			return false, err
+		}
+		if ok {
 			if !td.Configurable {
 				return false, i.throwError(ctx, "TypeError", "proxy has: cannot report a non-configurable property as absent")
 			}
-			if !p.target.extensible {
+			ext, err := i.isExtensibleV(ctx, p.target)
+			if err != nil {
+				return false, err
+			}
+			if !ext {
 				return false, i.throwError(ctx, "TypeError", "proxy has: cannot report a property of a non-extensible target as absent")
 			}
 		}
@@ -160,8 +176,22 @@ func (p *proxyState) deleteProperty(ctx context.Context, key PropertyKey) (bool,
 	if !ToBoolean(res) {
 		return false, nil
 	}
-	if td, ok := p.target.getOwn(key); ok && !td.Configurable {
+	td, ok, err := i.getOwnPropertyV(ctx, p.target, key)
+	if err != nil {
+		return false, err
+	}
+	if ok && !td.Configurable {
 		return false, i.throwError(ctx, "TypeError", "proxy deleteProperty: cannot delete a non-configurable property")
+	}
+	// A non-extensible target cannot lose a property it still reports as own.
+	if ok {
+		ext, err := i.isExtensibleV(ctx, p.target)
+		if err != nil {
+			return false, err
+		}
+		if !ext {
+			return false, i.throwError(ctx, "TypeError", "proxy deleteProperty: cannot report deletion of a property of a non-extensible target")
+		}
 	}
 	return true, nil
 }
@@ -183,13 +213,20 @@ func (p *proxyState) getOwnProperty(ctx context.Context, key PropertyKey) (*Prop
 	if err != nil {
 		return nil, false, err
 	}
-	targetDesc, hasTarget := p.target.getOwn(key)
+	targetDesc, hasTarget, err := i.getOwnPropertyV(ctx, p.target, key)
+	if err != nil {
+		return nil, false, err
+	}
+	targetExt, err := i.isExtensibleV(ctx, p.target)
+	if err != nil {
+		return nil, false, err
+	}
 	if IsUndefined(res) {
 		if hasTarget {
 			if !targetDesc.Configurable {
 				return nil, false, i.throwError(ctx, "TypeError", "proxy getOwnPropertyDescriptor: cannot report a non-configurable property as non-existent")
 			}
-			if !p.target.extensible {
+			if !targetExt {
 				return nil, false, i.throwError(ctx, "TypeError", "proxy getOwnPropertyDescriptor: cannot report a property of a non-extensible target as non-existent")
 			}
 		}
@@ -260,17 +297,37 @@ func (p *proxyState) ownKeys(ctx context.Context) ([]PropertyKey, error) {
 	}
 	// Invariant: every non-configurable own key of the target must appear, and
 	// when the target is non-extensible the key set must match the target's
-	// exactly.
-	for _, tk := range p.target.ownPropertyKeys() {
-		td, ok := p.target.getOwn(tk)
+	// exactly (no missing and no extra keys).
+	targetKeys, err := i.ownKeysV(ctx, p.target)
+	if err != nil {
+		return nil, err
+	}
+	targetExt, err := i.isExtensibleV(ctx, p.target)
+	if err != nil {
+		return nil, err
+	}
+	targetSet := map[PropertyKey]bool{}
+	for _, tk := range targetKeys {
+		targetSet[tk] = true
+		td, ok, err := i.getOwnPropertyV(ctx, p.target, tk)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
 		if !td.Configurable && !seen[tk] {
 			return nil, i.throwError(ctx, "TypeError", "proxy ownKeys: trap result omits a non-configurable key")
 		}
-		if !p.target.extensible && !seen[tk] {
+		if !targetExt && !seen[tk] {
 			return nil, i.throwError(ctx, "TypeError", "proxy ownKeys: trap result omits a key of a non-extensible target")
+		}
+	}
+	if !targetExt {
+		for _, k := range keys {
+			if !targetSet[k] {
+				return nil, i.throwError(ctx, "TypeError", "proxy ownKeys: trap result adds a key not present on a non-extensible target")
+			}
 		}
 	}
 	return keys, nil
@@ -331,8 +388,15 @@ func (p *proxyState) getPrototypeOf(ctx context.Context) (Value, error) {
 		}
 	}
 	// Invariant: a non-extensible target must report its actual prototype.
-	if !p.target.extensible {
-		actual, _ := i.getProtoV(ctx, p.target)
+	ext, err := i.isExtensibleV(ctx, p.target)
+	if err != nil {
+		return nil, err
+	}
+	if !ext {
+		actual, err := i.getProtoV(ctx, p.target)
+		if err != nil {
+			return nil, err
+		}
 		if !sameValue(res, actual) {
 			return nil, i.throwError(ctx, "TypeError", "proxy getPrototypeOf: inconsistent prototype for a non-extensible target")
 		}
@@ -360,8 +424,15 @@ func (p *proxyState) setPrototypeOf(ctx context.Context, proto Value) (bool, err
 	if !ToBoolean(res) {
 		return false, nil
 	}
-	if !p.target.extensible {
-		actual, _ := i.getProtoV(ctx, p.target)
+	ext, err := i.isExtensibleV(ctx, p.target)
+	if err != nil {
+		return false, err
+	}
+	if !ext {
+		actual, err := i.getProtoV(ctx, p.target)
+		if err != nil {
+			return false, err
+		}
 		if !sameValue(proto, actual) {
 			return false, i.throwError(ctx, "TypeError", "proxy setPrototypeOf: cannot change the prototype of a non-extensible target")
 		}
@@ -386,7 +457,11 @@ func (p *proxyState) isExtensible(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if ToBoolean(res) != p.target.extensible {
+	targetExt, err := i.isExtensibleV(ctx, p.target)
+	if err != nil {
+		return false, err
+	}
+	if ToBoolean(res) != targetExt {
 		return false, i.throwError(ctx, "TypeError", "proxy isExtensible: result must match the target's extensibility")
 	}
 	return ToBoolean(res), nil
@@ -409,8 +484,14 @@ func (p *proxyState) preventExtensions(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if ToBoolean(res) && p.target.extensible {
-		return false, i.throwError(ctx, "TypeError", "proxy preventExtensions: cannot report success while the target is still extensible")
+	if ToBoolean(res) {
+		targetExt, err := i.isExtensibleV(ctx, p.target)
+		if err != nil {
+			return false, err
+		}
+		if targetExt {
+			return false, i.throwError(ctx, "TypeError", "proxy preventExtensions: cannot report success while the target is still extensible")
+		}
 	}
 	return ToBoolean(res), nil
 }

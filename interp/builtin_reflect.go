@@ -32,12 +32,18 @@ func (i *Interpreter) setV(ctx context.Context, o *Object, key PropertyKey, v, r
 	return i.ordinarySet(ctx, o, key, v, receiver)
 }
 
-// hasV performs [[HasProperty]].
+// hasV performs [[HasProperty]], walking the prototype chain so a Proxy at any
+// depth intercepts the lookup.
 func (i *Interpreter) hasV(ctx context.Context, o *Object, key PropertyKey) (bool, error) {
-	if o.proxy != nil {
-		return o.proxy.has(ctx, key)
+	for cur := o; cur != nil; cur = cur.proto {
+		if cur.proxy != nil {
+			return cur.proxy.has(ctx, key)
+		}
+		if _, ok := cur.getOwn(key); ok {
+			return true, nil
+		}
 	}
-	return o.Has(key), nil
+	return false, nil
 }
 
 // deleteV performs [[Delete]].
@@ -191,9 +197,24 @@ func (i *Interpreter) ordinarySetPrototypeOf(o *Object, proto Value) bool {
 // ascending order, then the remaining string keys in insertion order, then the
 // symbol keys in insertion order.
 func (o *Object) ownPropertyKeys() []PropertyKey {
-	out := make([]PropertyKey, 0, len(o.keys))
+	out := make([]PropertyKey, 0, len(o.keys)+1)
 	for _, name := range o.OwnKeys() {
 		out = append(out, StrKey(name))
+	}
+	// An Array exposes a non-enumerable own "length" key immediately after its
+	// integer indices (OwnKeys omits it because length is stored implicitly).
+	if o.isArray {
+		at := 0
+		for at < len(out) {
+			if _, isIdx := arrayIndex(out[at].Str); isIdx {
+				at++
+			} else {
+				break
+			}
+		}
+		out = append(out, PropertyKey{})
+		copy(out[at+1:], out[at:])
+		out[at] = StrKey("length")
 	}
 	for _, k := range o.keys {
 		if k.IsSymbol() {

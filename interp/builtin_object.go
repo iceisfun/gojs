@@ -526,22 +526,38 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 	var value Value = Undef
 	var getter, setter *Object
 	if hasEnum {
-		v, _ := desc.GetStr(ctx, "enumerable")
+		v, err := desc.GetStr(ctx, "enumerable")
+		if err != nil {
+			return false, err
+		}
 		enumerable = ToBoolean(v)
 	}
 	if hasConf {
-		v, _ := desc.GetStr(ctx, "configurable")
+		v, err := desc.GetStr(ctx, "configurable")
+		if err != nil {
+			return false, err
+		}
 		configurable = ToBoolean(v)
 	}
 	if hasValue {
-		value, _ = desc.GetStr(ctx, "value")
+		v, err := desc.GetStr(ctx, "value")
+		if err != nil {
+			return false, err
+		}
+		value = v
 	}
 	if hasWritable {
-		v, _ := desc.GetStr(ctx, "writable")
+		v, err := desc.GetStr(ctx, "writable")
+		if err != nil {
+			return false, err
+		}
 		writable = ToBoolean(v)
 	}
 	if hasGet {
-		v, _ := desc.GetStr(ctx, "get")
+		v, err := desc.GetStr(ctx, "get")
+		if err != nil {
+			return false, err
+		}
 		if fn, ok := v.(*Object); ok && fn.IsCallable() {
 			getter = fn
 		} else if !IsUndefined(v) {
@@ -549,7 +565,10 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 		}
 	}
 	if hasSet {
-		v, _ := desc.GetStr(ctx, "set")
+		v, err := desc.GetStr(ctx, "set")
+		if err != nil {
+			return false, err
+		}
 		if fn, ok := v.(*Object); ok && fn.IsCallable() {
 			setter = fn
 		} else if !IsUndefined(v) {
