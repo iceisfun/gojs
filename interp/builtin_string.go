@@ -3,8 +3,29 @@ package interp
 import (
 	"context"
 	"strings"
-	"unicode"
 )
+
+// isECMAWhiteSpace reports whether r is in the union of the ECMAScript
+// WhiteSpace and LineTerminator code point sets (used by String.prototype
+// trim/trimStart/trimEnd). See ECMA-262 §12.2 (WhiteSpace) and §12.3
+// (LineTerminator).
+func isECMAWhiteSpace(r rune) bool {
+	switch r {
+	case 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, // TAB, LF, VT, FF, CR
+		0x0020, // SPACE
+		0x00A0, // NO-BREAK SPACE
+		0x1680, // OGHAM SPACE MARK
+		0x2028, // LINE SEPARATOR
+		0x2029, // PARAGRAPH SEPARATOR
+		0x202F, // NARROW NO-BREAK SPACE
+		0x205F, // MEDIUM MATHEMATICAL SPACE
+		0x3000, // IDEOGRAPHIC SPACE
+		0xFEFF: // ZERO WIDTH NO-BREAK SPACE (BOM)
+		return true
+	}
+	// U+2000..U+200A (various fixed-width spaces).
+	return r >= 0x2000 && r <= 0x200A
+}
 
 // initString installs the String constructor and String.prototype methods.
 // Strings are stored as Go UTF-8; methods that the spec defines over UTF-16
@@ -193,13 +214,35 @@ func (i *Interpreter) initString() {
 		return String(strings.ToLower(s)), nil
 	})
 	m("trim", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.TrimSpace(s)), nil
+		return String(strings.TrimFunc(s, isECMAWhiteSpace)), nil
 	})
 	m("trimStart", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.TrimLeftFunc(s, unicode.IsSpace)), nil
+		return String(strings.TrimLeftFunc(s, isECMAWhiteSpace)), nil
 	})
 	m("trimEnd", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.TrimRightFunc(s, unicode.IsSpace)), nil
+		return String(strings.TrimRightFunc(s, isECMAWhiteSpace)), nil
+	})
+	m("localeCompare", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+		var that string
+		if len(args) > 0 {
+			var err error
+			that, err = i.ToStringV(ctx, args[0])
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			that = "undefined"
+		}
+		// Minimal non-Intl implementation: lexicographic comparison over
+		// UTF-16 code units. Comparing the Go UTF-8 strings yields the same
+		// ordering for the Basic Multilingual Plane.
+		if s < that {
+			return Number(-1), nil
+		}
+		if s > that {
+			return Number(1), nil
+		}
+		return Number(0), nil
 	})
 	m("padStart", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return String(pad(s, argIntOr(ctx, i, args, 0, 0), padStr(ctx, i, args), true)), nil
@@ -313,6 +356,64 @@ func (i *Interpreter) initString() {
 				return nil, i.throwError(ctx, "RangeError", "Invalid code point "+NumberToString(n))
 			}
 			b.WriteRune(rune(int64(n)))
+		}
+		return String(b.String()), nil
+	})
+	// String.raw (§22.1.3.28): the tag function for template literals. It
+	// concatenates the raw literal segments interleaved with the string forms
+	// of the supplied substitutions.
+	i.defineMethod(ctor, "raw", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		var template Value = Undef
+		if len(args) > 0 {
+			template = args[0]
+		}
+		cooked, err := i.ToObject(ctx, template)
+		if err != nil {
+			return nil, err
+		}
+		rawv, err := i.getV(ctx, cooked, StrKey("raw"), cooked)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := i.ToObject(ctx, rawv)
+		if err != nil {
+			return nil, err
+		}
+		lengthv, err := i.getV(ctx, raw, StrKey("length"), raw)
+		if err != nil {
+			return nil, err
+		}
+		literalSegments, err := i.toLength(ctx, lengthv)
+		if err != nil {
+			return nil, err
+		}
+		if literalSegments <= 0 {
+			return String(""), nil
+		}
+		var b strings.Builder
+		for idx := 0; idx < literalSegments; idx++ {
+			seg, err := i.getV(ctx, raw, StrKey(intToStr(idx)), raw)
+			if err != nil {
+				return nil, err
+			}
+			segStr, err := i.ToStringV(ctx, seg)
+			if err != nil {
+				return nil, err
+			}
+			b.WriteString(segStr)
+			if idx+1 == literalSegments {
+				break
+			}
+			// Substitutions are args[1:]; substitutions[idx] == args[idx+1].
+			// Absent substitutions contribute the empty String (§22.1.3.28
+			// steps 12.f/12.g), not "undefined".
+			if idx+1 < len(args) {
+				nextStr, err := i.ToStringV(ctx, args[idx+1])
+				if err != nil {
+					return nil, err
+				}
+				b.WriteString(nextStr)
+			}
 		}
 		return String(b.String()), nil
 	})

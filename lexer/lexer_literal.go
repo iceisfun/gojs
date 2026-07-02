@@ -350,8 +350,12 @@ func (l *Lexer) scanUnicodeEscapeCombining(b *strings.Builder) {
 // substitution and resumes the template. The returned token is one of
 // TEMPLATE_NOSUB, TEMPLATE_HEAD, TEMPLATE_MIDDLE, or TEMPLATE_TAIL.
 func (l *Lexer) scanTemplate(start token.Pos, nl bool, head bool) token.Token {
-	begin := l.offset
 	l.readRune() // consume '`' (head) or '}' (continuation)
+	// innerBegin marks the first character after the opening delimiter. The
+	// Template Raw Value (ECMA-262 §12.9.6) is the source text between the
+	// delimiters with escape sequences left undecoded and line terminators
+	// normalized to LF; it is captured from the raw source slice below.
+	innerBegin := l.offset
 
 	var b strings.Builder
 	for {
@@ -359,20 +363,20 @@ func (l *Lexer) scanTemplate(start token.Pos, nl bool, head bool) token.Token {
 		case l.ch == eof:
 			return l.errorf("unterminated template literal")
 		case l.ch == '`':
+			raw := templateRawValue(l.input[innerBegin:l.offset])
 			l.readRune()
-			raw := l.input[begin:l.offset]
 			typ := token.TEMPLATE_TAIL
 			if head {
 				typ = token.TEMPLATE_NOSUB
 			}
 			return token.Token{Type: typ, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl}
 		case l.ch == '$' && l.peek() == '{':
+			raw := templateRawValue(l.input[innerBegin:l.offset])
 			l.readRune() // $
 			l.readRune() // {
 			// Remember the brace depth so the matching '}' resumes template
 			// scanning rather than closing a block.
 			l.templateBraceStack = append(l.templateBraceStack, l.braceDepth)
-			raw := l.input[begin:l.offset]
 			typ := token.TEMPLATE_MIDDLE
 			if head {
 				typ = token.TEMPLATE_HEAD
@@ -386,6 +390,29 @@ func (l *Lexer) scanTemplate(start token.Pos, nl bool, head bool) token.Token {
 			l.readRune()
 		}
 	}
+}
+
+// templateRawValue computes a template segment's Template Raw Value from the
+// source text between its delimiters: escape sequences are preserved verbatim,
+// while <CR><LF> and lone <CR> line terminators are normalized to a single
+// <LF> (ECMA-262 §12.9.6, TRV).
+func templateRawValue(s string) string {
+	if !strings.ContainsRune(s, '\r') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\r' {
+			b.WriteByte('\n')
+			if i+1 < len(s) && s[i+1] == '\n' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // scanRegex scans a regular-expression literal /pattern/flags. The current rune
