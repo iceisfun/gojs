@@ -69,6 +69,10 @@ type Interpreter struct {
 	// moduleProvider gates require(); modules caches evaluated modules by id.
 	moduleProvider ModuleProvider
 	modules        map[string]*Object
+	// moduleNamespaces caches the module namespace object produced for each id
+	// imported via dynamic import(), so a module is evaluated at most once and
+	// repeated imports share the same namespace.
+	moduleNamespaces map[string]*Object
 
 	// rng is the per-interpreter PRNG backing Math.random.
 	rng *prng

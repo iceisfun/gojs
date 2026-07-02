@@ -101,6 +101,8 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 		return i.evalCall(ctx, e, env)
 	case *ast.NewExpr:
 		return i.evalNew(ctx, e, env)
+	case *ast.ImportCall:
+		return i.evalImportCall(ctx, e, env)
 	case *ast.SpreadElement:
 		return i.evalExpr(ctx, e.Argument, env)
 	case *ast.AwaitExpr:

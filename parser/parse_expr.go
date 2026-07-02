@@ -363,6 +363,24 @@ func (p *parser) parseArguments() ([]ast.Expr, token.Token) {
 	return args, rparen
 }
 
+// parseImportCall parses a dynamic import: import(AssignmentExpression) or
+// import(AssignmentExpression, Options). The cursor is on the `import` keyword.
+func (p *parser) parseImportCall() ast.Expr {
+	kw := p.next() // import
+	p.expect(token.LPAREN)
+	spec := p.parseAssignExpr()
+	var opts ast.Expr
+	if p.accept(token.COMMA) {
+		// A second (options) argument is optional, as is a trailing comma.
+		if !p.at(token.RPAREN) {
+			opts = p.parseAssignExpr()
+			p.accept(token.COMMA)
+		}
+	}
+	rparen := p.expect(token.RPAREN)
+	return &ast.ImportCall{Keyword: kw.Pos, Specifier: spec, Options: opts, Rparen: rparen.Pos}
+}
+
 // ---------------------------------------------------------------------------
 // Primary expressions
 // ---------------------------------------------------------------------------
@@ -447,6 +465,17 @@ func (p *parser) parsePrimary() ast.Expr {
 		}
 		p.next()
 		return &ast.Ident{NamePos: tk.Pos, Name: "async"}
+	case token.IMPORT:
+		// import(specifier) — dynamic import (ES2020). It is a valid expression in
+		// both script and module code. `import.meta` and import declarations are
+		// handled elsewhere; only the call form is a primary expression here. A
+		// non-call `import` falls through to the identifier fallback so `import.meta`
+		// still parses as a member access.
+		if p.peek(1).Type == token.LPAREN {
+			return p.parseImportCall()
+		}
+		p.next()
+		return &ast.Ident{NamePos: tk.Pos, Name: "import"}
 	case token.PRIVATE:
 		// `#field in obj` ergonomic brand check — only valid inside a class.
 		p.next()

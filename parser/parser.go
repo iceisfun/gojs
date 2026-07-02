@@ -99,6 +99,10 @@ type parser struct {
 	// new.target while a direct eval in a method or function keeps them.
 	superPropOK bool
 	newTargetOK bool
+	// moduleMode reports whether the source is being parsed as an ES module
+	// (Module goal symbol) rather than a Script. It enables `export`
+	// declarations. Module code is always strict.
+	moduleMode bool
 	// strict reports whether the code currently being parsed is strict-mode
 	// code. It is set by a "use strict" directive prologue (at the program or
 	// function level), inherited into nested functions, and always true inside a
@@ -123,6 +127,19 @@ func Parse(sourceName, source string) (*ast.Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	return p.parseProgram()
+}
+
+// ParseModule parses source under the Module goal symbol, so `export`
+// declarations are permitted and the code is strict by default. It is used to
+// load the target of a dynamic import().
+func ParseModule(sourceName, source string) (*ast.Program, error) {
+	p, err := newParser(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	p.moduleMode = true
+	p.strict = true
 	return p.parseProgram()
 }
 

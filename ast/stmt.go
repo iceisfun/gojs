@@ -133,6 +133,31 @@ type ClassDecl struct {
 func (s *ClassDecl) Pos() token.Pos { return s.Keyword }
 func (s *ClassDecl) End() token.Pos { return endOf(s.Def.Rbrace, 1) }
 
+// ExportSpecifier is one entry of an `export { local as exported }` clause.
+type ExportSpecifier struct {
+	Local    string
+	Exported string
+}
+
+// ExportStmt is an ES-module export declaration. It appears only in module
+// code. The variants it captures are:
+//
+//   - export var/let/const/function/class …   (Decl set, Default false)
+//   - export default function/class …          (Decl set, Default true)
+//   - export default AssignmentExpression;      (DefaultExpr set, Default true)
+//   - export { a, b as c };                     (Specifiers set)
+type ExportStmt struct {
+	Keyword     token.Pos
+	Decl        Stmt               // exported declaration (*VarDecl/*FuncDecl/*ClassDecl); nil otherwise
+	DefaultExpr Expr               // `export default <expr>`; nil otherwise
+	Specifiers  []*ExportSpecifier // `export { … }` entries
+	Default     bool               // true for `export default …`
+	EndPos      token.Pos
+}
+
+func (s *ExportStmt) Pos() token.Pos { return s.Keyword }
+func (s *ExportStmt) End() token.Pos { return s.EndPos }
+
 // ---------------------------------------------------------------------------
 // Control-flow statements
 // ---------------------------------------------------------------------------
@@ -322,6 +347,7 @@ func (*ExprStmt) stmtNode()     {}
 func (*VarDecl) stmtNode()      {}
 func (*FuncDecl) stmtNode()     {}
 func (*ClassDecl) stmtNode()    {}
+func (*ExportStmt) stmtNode()   {}
 func (*IfStmt) stmtNode()       {}
 func (*ForStmt) stmtNode()      {}
 func (*ForInStmt) stmtNode()    {}

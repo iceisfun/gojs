@@ -108,6 +108,16 @@ func ParseMeta(src string) Meta {
 	return m
 }
 
+// hasFeature reports whether the test declares the given feature tag.
+func hasFeature(m Meta, name string) bool {
+	for _, f := range m.Features {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
 // parseInlineList parses a YAML flow list "[a, b, c]" or a bare scalar.
 func parseInlineList(s string) []string {
 	s = strings.TrimSpace(s)
@@ -318,11 +328,19 @@ func runMode(path, src string, m Meta, mode string) Result {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	vm := interp.New(
+	opts := []interp.Option{
 		interp.WithContext(ctx),
 		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
-	)
+	}
+	// Dynamic import() tests reference sibling fixture modules by relative
+	// specifier; serve them from the test's own directory so import() can resolve
+	// and evaluate them. Gated on the feature tag so ordinary tests keep no
+	// module provider (and thus no `require` global).
+	if hasFeature(m, "dynamic-import") {
+		opts = append(opts, interp.WithModuleProvider(interp.NewDirModuleProvider(filepath.Dir(path))))
+	}
+	vm := interp.New(opts...)
 	defer vm.Close()
 	installT262Host(vm)
 

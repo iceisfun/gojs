@@ -42,6 +42,7 @@ func (i *Interpreter) initModules() {
 		return
 	}
 	i.modules = map[string]*Object{}
+	i.moduleNamespaces = map[string]*Object{}
 	i.setGlobalHidden("require", i.makeRequire(""))
 }
 

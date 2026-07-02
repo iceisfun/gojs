@@ -65,6 +65,10 @@ func (p *parser) parseStmt() ast.Stmt {
 		end := p.cur().Pos
 		p.expectSemicolon()
 		return &ast.DebuggerStmt{Keyword: tk.Pos, EndPos: end}
+	case token.EXPORT:
+		if p.moduleMode {
+			return p.parseExport()
+		}
 	}
 
 	// Labeled statement: IDENT ':' Statement.
@@ -77,6 +81,97 @@ func (p *parser) parseStmt() ast.Stmt {
 	}
 
 	return p.parseExprStmt()
+}
+
+// parseExport parses an ES-module export declaration. The cursor is on the
+// `export` keyword. It supports the forms the module loader needs: exported
+// declarations (var/let/const/function/class), default exports, and named
+// export clauses (`export { a, b as c }`). Re-exports (`export … from …`) and
+// `export *` are recognized but not resolved.
+func (p *parser) parseExport() ast.Stmt {
+	kw := p.next() // export
+	es := &ast.ExportStmt{Keyword: kw.Pos, EndPos: p.cur().Pos}
+
+	switch {
+	case p.at(token.DEFAULT):
+		p.next()
+		es.Default = true
+		switch {
+		case p.at(token.FUNCTION):
+			es.Decl = p.parseFunctionDecl(false)
+		case p.at(token.ASYNC) && p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore:
+			p.next() // async
+			es.Decl = p.parseFunctionDecl(true)
+		case p.at(token.CLASS):
+			es.Decl = p.parseClassDecl()
+		default:
+			es.DefaultExpr = p.parseAssignExpr()
+			p.expectSemicolon()
+		}
+	case p.at(token.LBRACE):
+		p.next()
+		for !p.at(token.RBRACE) && !p.at(token.EOF) {
+			local := p.parseModuleExportName()
+			exported := local
+			if p.at(token.IDENT) && p.cur().Literal == "as" && !p.cur().Escaped {
+				p.next() // as
+				exported = p.parseModuleExportName()
+			}
+			es.Specifiers = append(es.Specifiers, &ast.ExportSpecifier{Local: local, Exported: exported})
+			if !p.accept(token.COMMA) {
+				break
+			}
+		}
+		p.expect(token.RBRACE)
+		// An optional `from ModuleSpecifier` re-export clause is consumed but not
+		// resolved by the loader.
+		if p.at(token.IDENT) && p.cur().Literal == "from" {
+			p.next()
+			p.accept(token.STRING)
+		}
+		p.expectSemicolon()
+	case p.at(token.STAR):
+		// export * [as name] from '…' — consumed but not resolved.
+		p.next()
+		if p.at(token.IDENT) && p.cur().Literal == "as" {
+			p.next()
+			p.parseModuleExportName()
+		}
+		if p.at(token.IDENT) && p.cur().Literal == "from" {
+			p.next()
+			p.accept(token.STRING)
+		}
+		p.expectSemicolon()
+	case p.at(token.VAR), p.at(token.CONST), p.at(token.LET):
+		es.Decl = p.parseVarDecl()
+	case p.at(token.FUNCTION):
+		es.Decl = p.parseFunctionDecl(false)
+	case p.at(token.ASYNC) && p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore:
+		p.next() // async
+		es.Decl = p.parseFunctionDecl(true)
+	case p.at(token.CLASS):
+		es.Decl = p.parseClassDecl()
+	default:
+		p.errorf("unexpected token %s after export", p.cur().Type)
+		p.next()
+	}
+	if es.Decl != nil {
+		es.EndPos = es.Decl.End()
+	}
+	return es
+}
+
+// parseModuleExportName parses an import/export binding name: an identifier or
+// any identifier-like keyword.
+func (p *parser) parseModuleExportName() string {
+	tk := p.cur()
+	if tk.Type == token.IDENT || tk.Type.IsKeyword() {
+		p.next()
+		return identText(tk)
+	}
+	p.errorf("expected export name but got %s", tk.Type)
+	p.next()
+	return ""
 }
 
 // letIsDeclaration reports whether a `let` at the cursor begins a declaration

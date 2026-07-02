@@ -343,6 +343,20 @@ type NewExpr struct {
 func (e *NewExpr) Pos() token.Pos { return e.Keyword }
 func (e *NewExpr) End() token.Pos { return e.EndPos }
 
+// ImportCall is a dynamic import() expression (ECMA-262 ES2020):
+// import(Specifier) or import(Specifier, Options). It evaluates to a Promise
+// for the imported module's namespace object. It is distinct from an import
+// declaration and from the import.meta meta-property.
+type ImportCall struct {
+	Keyword   token.Pos
+	Specifier Expr
+	Options   Expr // the optional second argument; nil when absent
+	Rparen    token.Pos
+}
+
+func (e *ImportCall) Pos() token.Pos { return e.Keyword }
+func (e *ImportCall) End() token.Pos { return endOf(e.Rparen, 1) }
+
 // ---------------------------------------------------------------------------
 // Function expressions
 // ---------------------------------------------------------------------------
@@ -432,6 +446,7 @@ func (e *AssignPattern) End() token.Pos { return e.Default.End() }
 // exprNode markers
 // ---------------------------------------------------------------------------
 
+func (*ImportCall) exprNode()         {}
 func (*Ident) exprNode()              {}
 func (*PrivateIdent) exprNode()       {}
 func (*NumberLit) exprNode()          {}
