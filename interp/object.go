@@ -18,6 +18,10 @@ import (
 // implemented).
 type Symbol struct {
 	Desc string // optional description, for debugging and Symbol.prototype.toString
+	// HasDesc reports whether a description was supplied. It distinguishes
+	// Symbol() (description undefined) from Symbol("") (empty-string
+	// description), which Symbol.prototype.description must report differently.
+	HasDesc bool
 }
 
 // Typeof returns "symbol".

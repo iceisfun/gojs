@@ -230,6 +230,7 @@ func (i *Interpreter) initMap() {
 
 	ctor := i.newNativeCtor("Map", 0, mapConstruct, mapConstruct)
 	linkCtor(ctor, proto)
+	i.defineSpeciesGetter(ctor)
 
 	// size accessor
 	sizeGetter := i.newNativeFunc("get size", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -412,6 +413,7 @@ func (i *Interpreter) initSet() {
 
 	ctor := i.newNativeCtor("Set", 0, setConstruct, setConstruct)
 	linkCtor(ctor, proto)
+	i.defineSpeciesGetter(ctor)
 
 	// size accessor
 	sizeGetter := i.newNativeFunc("get size", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {

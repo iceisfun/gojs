@@ -21,7 +21,7 @@ func (i *Interpreter) initSymbol() {
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Symbol.prototype.toString called on non-symbol")
 		}
-		return String("Symbol(" + sym.Desc + ")"), nil
+		return String(symbolDescriptiveString(sym)), nil
 	})
 	i.defineMethod(proto, "valueOf", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		sym, ok := thisSymbol(this)
@@ -30,60 +30,107 @@ func (i *Interpreter) initSymbol() {
 		}
 		return sym, nil
 	})
+	// Symbol.prototype.description is an accessor whose getter throws a
+	// TypeError on a non-symbol this and reports undefined when the symbol
+	// was created without a description (§20.4.3.2).
 	proto.DefineAccessor("description",
 		i.newNativeFunc("get description", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 			sym, ok := thisSymbol(this)
 			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "Symbol.prototype.description getter called on non-symbol")
+			}
+			if !sym.HasDesc {
 				return Undef, nil
 			}
 			return String(sym.Desc), nil
 		}), nil, false)
 
-	ctor := i.newNativeCtor("Symbol", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		desc := ""
-		if !IsUndefined(arg(args, 0)) {
-			var err error
-			desc, err = i.argStr(ctx, args, 0)
-			if err != nil {
-				return nil, err
-			}
+	// Symbol.prototype[Symbol.toPrimitive] returns the underlying symbol,
+	// with attributes {[[Writable]]: false, ..., [[Configurable]]: true}.
+	toPrim := i.newNativeFunc("[Symbol.toPrimitive]", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		sym, ok := thisSymbol(this)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Symbol.prototype[Symbol.toPrimitive] called on non-symbol")
 		}
-		return &Symbol{Desc: desc}, nil
+		return sym, nil
+	})
+	proto.defineOwn(SymKey(i.symToPrimitive), &Property{Value: toPrim, Writable: false, Enumerable: false, Configurable: true})
+
+	// Symbol.prototype[Symbol.toStringTag] is the string "Symbol".
+	proto.defineOwn(SymKey(i.symToStringTag), &Property{Value: String("Symbol"), Writable: false, Enumerable: false, Configurable: true})
+
+	ctor := i.newNativeCtor("Symbol", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if IsUndefined(arg(args, 0)) {
+			return &Symbol{}, nil
+		}
+		desc, err := i.argStr(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		return &Symbol{Desc: desc, HasDesc: true}, nil
 	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return nil, i.throwError(ctx, "TypeError", "Symbol is not a constructor")
 	})
 	ctor.fn.ctor = false
 	linkCtor(ctor, proto)
 
-	// Well-known symbols.
-	ctor.SetHidden("iterator", i.symIterator)
-	ctor.SetHidden("asyncIterator", i.symAsyncIterator)
-	ctor.SetHidden("toPrimitive", i.symToPrimitive)
-	ctor.SetHidden("toStringTag", i.symToStringTag)
-	ctor.SetHidden("hasInstance", i.symHasInstance)
-	ctor.SetHidden("match", i.symMatch)
-	ctor.SetHidden("matchAll", i.symMatchAll)
-	ctor.SetHidden("replace", i.symReplace)
-	ctor.SetHidden("search", i.symSearch)
-	ctor.SetHidden("split", i.symSplit)
-	ctor.SetHidden("species", i.symSpecies)
+	// Well-known symbols are non-writable, non-enumerable, non-configurable
+	// data properties on the Symbol constructor (§20.4.2).
+	wellKnown := func(name string, s *Symbol) {
+		ctor.defineOwn(StrKey(name), &Property{Value: s, Writable: false, Enumerable: false, Configurable: false})
+	}
+	wellKnown("iterator", i.symIterator)
+	wellKnown("asyncIterator", i.symAsyncIterator)
+	wellKnown("toPrimitive", i.symToPrimitive)
+	wellKnown("toStringTag", i.symToStringTag)
+	wellKnown("hasInstance", i.symHasInstance)
+	wellKnown("match", i.symMatch)
+	wellKnown("matchAll", i.symMatchAll)
+	wellKnown("replace", i.symReplace)
+	wellKnown("search", i.symSearch)
+	wellKnown("split", i.symSplit)
+	wellKnown("species", i.symSpecies)
+	wellKnown("unscopables", i.symUnscopables)
+	wellKnown("isConcatSpreadable", i.symIsConcatSpreadable)
 
-	// A tiny registry for Symbol.for/keyFor.
-	registry := map[string]*Symbol{}
+	// The GlobalSymbolRegistry backs Symbol.for/Symbol.keyFor. It maps a
+	// string key to its registered symbol and back (§20.4.2.2, §20.4.2.6).
+	byKey := map[string]*Symbol{}
+	bySym := map[*Symbol]string{}
 	i.defineMethod(ctor, "for", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		key, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		if s, ok := registry[key]; ok {
+		if s, ok := byKey[key]; ok {
 			return s, nil
 		}
-		s := &Symbol{Desc: key}
-		registry[key] = s
+		s := &Symbol{Desc: key, HasDesc: true}
+		byKey[key] = s
+		bySym[s] = key
 		return s, nil
+	})
+	i.defineMethod(ctor, "keyFor", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		sym, ok := arg(args, 0).(*Symbol)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Symbol.keyFor requires a symbol argument")
+		}
+		if key, ok := bySym[sym]; ok {
+			return String(key), nil
+		}
+		return Undef, nil
 	})
 
 	i.setGlobalHidden("Symbol", ctor)
+}
+
+// symbolDescriptiveString renders a symbol as "Symbol(desc)" per SymbolDescriptiveString
+// (§20.4.3.3.1): a symbol with no description yields "Symbol()".
+func symbolDescriptiveString(sym *Symbol) string {
+	if !sym.HasDesc {
+		return "Symbol()"
+	}
+	return "Symbol(" + sym.Desc + ")"
 }
 
 func thisSymbol(this Value) (*Symbol, bool) {

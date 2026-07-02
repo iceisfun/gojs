@@ -21,13 +21,28 @@ func (i *Interpreter) initError() {
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Error.prototype.toString called on non-object")
 		}
-		nameV, _ := o.GetStr(ctx, "name")
+		// §20.5.3.4: name defaults to "Error" when undefined, message to the
+		// empty String; both Get and ToString are observable and may throw.
+		nameV, err := o.GetStr(ctx, "name")
+		if err != nil {
+			return nil, err
+		}
 		name := "Error"
 		if !IsUndefined(nameV) {
-			name, _ = i.ToStringV(ctx, nameV)
+			if name, err = i.ToStringV(ctx, nameV); err != nil {
+				return nil, err
+			}
 		}
-		msgV, _ := o.GetStr(ctx, "message")
-		msg, _ := i.ToStringV(ctx, msgV)
+		msgV, err := o.GetStr(ctx, "message")
+		if err != nil {
+			return nil, err
+		}
+		msg := ""
+		if !IsUndefined(msgV) {
+			if msg, err = i.ToStringV(ctx, msgV); err != nil {
+				return nil, err
+			}
+		}
 		switch {
 		case msg == "":
 			return String(name), nil
@@ -40,6 +55,12 @@ func (i *Interpreter) initError() {
 
 	ctor := i.newErrorCtor("Error", i.errorProto)
 	linkCtor(ctor, i.errorProto)
+	// Error.isError reports whether its argument has an [[ErrorData]] slot,
+	// which gojs marks with the object's internal class "Error" (§20.5.2.1).
+	i.defineMethod(ctor, "isError", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, ok := arg(args, 0).(*Object)
+		return Bool(ok && o.class == "Error"), nil
+	})
 	i.setGlobalHidden("Error", ctor)
 
 	for _, name := range nativeErrorNames {
@@ -54,6 +75,9 @@ func (i *Interpreter) initError() {
 		i.nativeErrorCtors[name] = subCtor
 		i.setGlobalHidden(name, subCtor)
 	}
+
+	i.initAggregateError(ctor)
+	i.initErrorStack(i.errorProto)
 }
 
 // newErrorCtor builds an Error-family constructor whose instances use proto.
@@ -78,7 +102,9 @@ func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 				obj.SetHidden("cause", c)
 			}
 		}
-		obj.SetHidden("stack", String(name+": captured stack unavailable"))
+		// The stack trace lives in an internal slot, exposed via the
+		// Error.prototype.stack accessor rather than an own data property.
+		setErrorStack(obj, name+": captured stack unavailable")
 		return obj, nil
 	}
 	return i.newNativeCtor(name, 1, build, build)
@@ -93,7 +119,7 @@ func (i *Interpreter) newError(name, message string) *Object {
 	obj := NewObject(proto)
 	obj.class = "Error"
 	obj.SetHidden("message", String(message))
-	obj.SetHidden("stack", String(name+": "+message))
+	setErrorStack(obj, name+": "+message)
 	return obj
 }
 

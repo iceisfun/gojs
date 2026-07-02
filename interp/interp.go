@@ -80,17 +80,19 @@ type Interpreter struct {
 	regexpEngine RegExpEngine
 
 	// wellKnownSymbols
-	symIterator      *Symbol
-	symAsyncIterator *Symbol
-	symToPrimitive   *Symbol
-	symToStringTag   *Symbol
-	symHasInstance   *Symbol
-	symMatch         *Symbol
-	symMatchAll      *Symbol
-	symReplace       *Symbol
-	symSearch        *Symbol
-	symSplit         *Symbol
-	symSpecies       *Symbol
+	symIterator           *Symbol
+	symAsyncIterator      *Symbol
+	symToPrimitive        *Symbol
+	symToStringTag        *Symbol
+	symHasInstance        *Symbol
+	symMatch              *Symbol
+	symMatchAll           *Symbol
+	symReplace            *Symbol
+	symSearch             *Symbol
+	symSplit              *Symbol
+	symSpecies            *Symbol
+	symUnscopables        *Symbol
+	symIsConcatSpreadable *Symbol
 
 	// unitsKey/unitsVal memoize the most recent UTF-16 encoding of a RegExp
 	// subject string (see (*Interpreter).toUnits), so match/replace/split/
@@ -214,17 +216,19 @@ func New(opts ...Option) *Interpreter {
 		i.rng = newPRNG(0)
 	}
 
-	i.symIterator = &Symbol{Desc: "Symbol.iterator"}
-	i.symAsyncIterator = &Symbol{Desc: "Symbol.asyncIterator"}
-	i.symToPrimitive = &Symbol{Desc: "Symbol.toPrimitive"}
-	i.symToStringTag = &Symbol{Desc: "Symbol.toStringTag"}
-	i.symHasInstance = &Symbol{Desc: "Symbol.hasInstance"}
-	i.symMatch = &Symbol{Desc: "Symbol.match"}
-	i.symMatchAll = &Symbol{Desc: "Symbol.matchAll"}
-	i.symReplace = &Symbol{Desc: "Symbol.replace"}
-	i.symSearch = &Symbol{Desc: "Symbol.search"}
-	i.symSplit = &Symbol{Desc: "Symbol.split"}
-	i.symSpecies = &Symbol{Desc: "Symbol.species"}
+	i.symIterator = &Symbol{Desc: "Symbol.iterator", HasDesc: true}
+	i.symAsyncIterator = &Symbol{Desc: "Symbol.asyncIterator", HasDesc: true}
+	i.symToPrimitive = &Symbol{Desc: "Symbol.toPrimitive", HasDesc: true}
+	i.symToStringTag = &Symbol{Desc: "Symbol.toStringTag", HasDesc: true}
+	i.symHasInstance = &Symbol{Desc: "Symbol.hasInstance", HasDesc: true}
+	i.symMatch = &Symbol{Desc: "Symbol.match", HasDesc: true}
+	i.symMatchAll = &Symbol{Desc: "Symbol.matchAll", HasDesc: true}
+	i.symReplace = &Symbol{Desc: "Symbol.replace", HasDesc: true}
+	i.symSearch = &Symbol{Desc: "Symbol.search", HasDesc: true}
+	i.symSplit = &Symbol{Desc: "Symbol.split", HasDesc: true}
+	i.symSpecies = &Symbol{Desc: "Symbol.species", HasDesc: true}
+	i.symUnscopables = &Symbol{Desc: "Symbol.unscopables", HasDesc: true}
+	i.symIsConcatSpreadable = &Symbol{Desc: "Symbol.isConcatSpreadable", HasDesc: true}
 
 	i.bootstrap()
 	return i
