@@ -156,6 +156,12 @@ func stringToNumber(s string) float64 {
 	if t == "" {
 		return 0
 	}
+	// Numeric separators ('_') are valid only in source NumericLiterals, not in
+	// the StringNumericLiteral grammar used by ToNumber(String). Go's strconv
+	// accepts them, so reject any input containing '_' up front.
+	if strings.IndexByte(t, '_') >= 0 {
+		return math.NaN()
+	}
 	switch t {
 	case "Infinity", "+Infinity":
 		return math.Inf(1)
