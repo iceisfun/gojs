@@ -1,30 +1,31 @@
 // Package process installs a Node-like `process` global on a gojs VM. It is a
-// host capability — like the other host/* packages, it is opt-in — intended for
-// standalone runners and scripts that expect a minimal Node environment
-// (process.argv, process.env, process.stdout.write, process.exit, …).
+// thin shim over the VM's capability providers — nothing here touches the host
+// directly:
 //
-// It is a compatibility shim, not a Node runtime: only a small, commonly used
-// surface is provided, and time/exit/IO are host-controlled through options so
-// an embedder can sandbox them.
+//   - process.stdout.write / process.stderr.write route through the VM's
+//     PrintProvider (the same sink as console), so an embedder that redirects
+//     console output to a log or web app captures process output too. Writes are
+//     line-buffered (the PrintProvider is line-oriented); a trailing partial
+//     line is flushed on process.exit.
+//   - process.exit / cwd / env / platform / arch / pid come from the VM's
+//     OsProvider. Without one, those facilities are simply absent — a sandboxed
+//     VM cannot exit the host, read its environment, or learn what it runs on.
+//   - process.hrtime uses the TimeProvider; process.nextTick uses the microtask
+//     queue.
+//
+// Only argv is supplied here (the invocation); everything else is a capability
+// the host grants and can intercept.
 package process
 
 import (
-	"io"
-	"os"
-	"runtime"
+	"context"
 	"strings"
-	"time"
 
 	"github.com/iceisfun/gojs"
 )
 
 type config struct {
-	argv   []string
-	env    map[string]string
-	stdout io.Writer
-	stderr io.Writer
-	exit   func(int)
-	cwd    func() (string, error)
+	argv []string
 }
 
 // Option configures the installed process object.
@@ -33,95 +34,44 @@ type Option func(*config)
 // WithArgs sets process.argv (the full vector, including argv[0]).
 func WithArgs(argv ...string) Option { return func(c *config) { c.argv = argv } }
 
-// WithEnv sets process.env. A nil map means the OS environment.
-func WithEnv(env map[string]string) Option { return func(c *config) { c.env = env } }
-
-// WithStdout redirects process.stdout.write.
-func WithStdout(w io.Writer) Option { return func(c *config) { c.stdout = w } }
-
-// WithStderr redirects process.stderr.write.
-func WithStderr(w io.Writer) Option { return func(c *config) { c.stderr = w } }
-
-// WithExit overrides process.exit. The default calls os.Exit; an embedder that
-// must not let a script kill the host should override it (e.g. to record the
-// code and cancel the VM's context).
-func WithExit(fn func(int)) Option { return func(c *config) { c.exit = fn } }
-
-// WithCwd overrides process.cwd().
-func WithCwd(fn func() (string, error)) Option { return func(c *config) { c.cwd = fn } }
-
-// Install adds the process global to vm.
+// Install adds the process global to vm, backed by vm's providers.
 func Install(vm *gojs.VM, opts ...Option) error {
-	cfg := &config{
-		stdout: os.Stdout,
-		stderr: os.Stderr,
-		exit:   os.Exit,
-		cwd:    os.Getwd,
-	}
+	cfg := &config{}
 	for _, o := range opts {
 		o(cfg)
 	}
 	if cfg.argv == nil {
 		cfg.argv = []string{"gojs"}
 	}
-	if cfg.env == nil {
-		cfg.env = osEnv()
-	}
 
+	ctx := context.Background()
 	proc := vm.NewPlainObject()
 
-	// argv / argv0
+	// argv / argv0 — the invocation, always present.
 	argv := make([]gojs.Value, len(cfg.argv))
 	for i, a := range cfg.argv {
 		argv[i] = gojs.String(a)
 	}
 	proc.SetData("argv", vm.NewArray(argv...))
-	if len(cfg.argv) > 0 {
-		proc.SetData("argv0", gojs.String(cfg.argv[0]))
-	}
+	proc.SetData("argv0", gojs.String(cfg.argv[0]))
 
-	// env
-	env := vm.NewPlainObject()
-	for k, v := range cfg.env {
-		env.SetData(k, gojs.String(v))
-	}
-	proc.SetData("env", env)
-
-	// Static host facts.
-	proc.SetData("platform", gojs.String(goosToPlatform(runtime.GOOS)))
-	proc.SetData("arch", gojs.String(goarchToArch(runtime.GOARCH)))
-	proc.SetData("pid", gojs.Number(float64(os.Getpid())))
-	proc.SetData("version", gojs.String("v22.0.0")) // Node-compat version string
+	// Node-compat version strings (constants, not host facts).
+	proc.SetData("version", gojs.String("v22.0.0"))
 	versions := vm.NewPlainObject()
 	versions.SetData("node", gojs.String("22.0.0"))
 	proc.SetData("versions", versions)
 
-	// stdout / stderr: { write(chunk) -> true }
-	proc.SetData("stdout", writable(vm, cfg.stdout))
-	proc.SetData("stderr", writable(vm, cfg.stderr))
+	// stdout / stderr → PrintProvider (line-buffered). Silent without a printer.
+	stdout := &lineWriter{}
+	stderr := &lineWriter{}
+	if printer := vm.PrintProvider(); printer != nil {
+		stdout.emit = func(line string) { printer.Print(ctx, line) }
+		stderr.emit = func(line string) { printer.Warn(ctx, line) }
+	}
+	proc.SetData("stdout", writable(vm, stdout))
+	proc.SetData("stderr", writable(vm, stderr))
 
-	// exit([code])
-	proc.SetData("exit", vm.NewFunction("exit", func(args []gojs.Value) (gojs.Value, error) {
-		code := 0
-		if len(args) > 0 {
-			if n, ok := args[0].(gojs.Number); ok {
-				code = int(n)
-			}
-		}
-		cfg.exit(code)
-		return gojs.Undefined, nil
-	}))
-
-	// cwd()
-	proc.SetData("cwd", vm.NewFunction("cwd", func([]gojs.Value) (gojs.Value, error) {
-		dir, err := cfg.cwd()
-		if err != nil {
-			return gojs.String(""), nil
-		}
-		return gojs.String(dir), nil
-	}))
-
-	// nextTick(fn, ...args) — schedule fn on the microtask queue.
+	// nextTick(fn, ...args) → microtask queue (a core VM capability).
 	proc.SetData("nextTick", vm.NewFunction("nextTick", func(args []gojs.Value) (gojs.Value, error) {
 		if len(args) == 0 {
 			return gojs.Undefined, nil
@@ -135,25 +85,93 @@ func Install(vm *gojs.VM, opts ...Option) error {
 		return gojs.Undefined, nil
 	}))
 
-	// hrtime([prev]) -> [seconds, nanoseconds], high-resolution monotonic time.
-	start := time.Now()
-	proc.SetData("hrtime", vm.NewFunction("hrtime", func(args []gojs.Value) (gojs.Value, error) {
-		ns := time.Since(start).Nanoseconds()
-		if len(args) > 0 {
-			if arr, ok := vm.ToGo(args[0]).([]any); ok && len(arr) == 2 {
-				ps, _ := arr[0].(float64)
-				pn, _ := arr[1].(float64)
-				ns -= int64(ps)*1e9 + int64(pn)
+	// hrtime([prev]) → TimeProvider. Present only when a clock is granted.
+	if clock := vm.TimeProvider(); clock != nil {
+		base := clock.Monotonic(ctx)
+		proc.SetData("hrtime", vm.NewFunction("hrtime", func(args []gojs.Value) (gojs.Value, error) {
+			ns := int64((clock.Monotonic(ctx) - base) * 1e6)
+			if len(args) > 0 {
+				if prev, ok := vm.ToGo(args[0]).([]any); ok && len(prev) == 2 {
+					ps, _ := prev[0].(float64)
+					pn, _ := prev[1].(float64)
+					ns -= int64(ps)*1e9 + int64(pn)
+				}
 			}
+			return vm.NewArray(gojs.Number(float64(ns/1e9)), gojs.Number(float64(ns%1e9))), nil
+		}))
+	}
+
+	// OS facilities → OsProvider. Present only when granted; a sandbox omits them.
+	if osp := vm.OsProvider(); osp != nil {
+		env := vm.NewPlainObject()
+		for k, v := range osp.Environ(ctx) {
+			env.SetData(k, gojs.String(v))
 		}
-		return vm.NewArray(gojs.Number(float64(ns/1e9)), gojs.Number(float64(ns%1e9))), nil
-	}))
+		proc.SetData("env", env)
+		proc.SetData("platform", gojs.String(osp.Platform()))
+		proc.SetData("arch", gojs.String(osp.Arch()))
+		proc.SetData("pid", gojs.Number(float64(osp.Pid())))
+
+		proc.SetData("exit", vm.NewFunction("exit", func(args []gojs.Value) (gojs.Value, error) {
+			code := 0
+			if len(args) > 0 {
+				if n, ok := args[0].(gojs.Number); ok {
+					code = int(n)
+				}
+			}
+			stdout.flush()
+			stderr.flush()
+			osp.Exit(ctx, code)
+			return gojs.Undefined, nil
+		}))
+		proc.SetData("cwd", vm.NewFunction("cwd", func([]gojs.Value) (gojs.Value, error) {
+			dir, err := osp.Cwd(ctx)
+			if err != nil {
+				return gojs.String(""), nil
+			}
+			return gojs.String(dir), nil
+		}))
+	}
 
 	vm.SetGlobal("process", proc)
 	return nil
 }
 
-func writable(vm *gojs.VM, w io.Writer) *gojs.Object {
+// lineWriter adapts a byte-stream write() to the line-oriented PrintProvider: it
+// emits each complete line (without the newline) and holds a trailing partial
+// line until the next newline or an explicit flush.
+type lineWriter struct {
+	buf  strings.Builder
+	emit func(line string) // nil = discard
+}
+
+func (w *lineWriter) write(s string) {
+	if w.emit == nil {
+		return
+	}
+	w.buf.WriteString(s)
+	content := w.buf.String()
+	for {
+		i := strings.IndexByte(content, '\n')
+		if i < 0 {
+			break
+		}
+		w.emit(content[:i])
+		content = content[i+1:]
+	}
+	w.buf.Reset()
+	w.buf.WriteString(content)
+}
+
+func (w *lineWriter) flush() {
+	if w.emit == nil || w.buf.Len() == 0 {
+		return
+	}
+	w.emit(w.buf.String())
+	w.buf.Reset()
+}
+
+func writable(vm *gojs.VM, w *lineWriter) *gojs.Object {
 	o := vm.NewPlainObject()
 	o.SetData("write", vm.NewFunction("write", func(args []gojs.Value) (gojs.Value, error) {
 		if len(args) > 0 {
@@ -161,39 +179,9 @@ func writable(vm *gojs.VM, w io.Writer) *gojs.Object {
 			if err != nil {
 				return nil, err
 			}
-			io.WriteString(w, s)
+			w.write(s)
 		}
 		return gojs.True, nil
 	}))
 	return o
-}
-
-func osEnv() map[string]string {
-	m := make(map[string]string)
-	for _, kv := range os.Environ() {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			m[kv[:i]] = kv[i+1:]
-		}
-	}
-	return m
-}
-
-func goosToPlatform(goos string) string {
-	switch goos {
-	case "windows":
-		return "win32"
-	default:
-		return goos // linux, darwin, freebsd, … match Node
-	}
-}
-
-func goarchToArch(goarch string) string {
-	switch goarch {
-	case "amd64":
-		return "x64"
-	case "386":
-		return "ia32"
-	default:
-		return goarch // arm64, arm, … match Node
-	}
 }

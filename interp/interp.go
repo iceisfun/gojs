@@ -43,6 +43,7 @@ type Interpreter struct {
 	printer PrintProvider
 	timer   TimerProvider
 	clock   TimeProvider
+	os      OsProvider
 
 	// security holds opt-in hardening switches (see Security / WithSecurity).
 	security Security
@@ -197,6 +198,24 @@ func WithTimeProvider(p TimeProvider) Option {
 func WithTimerProvider(p TimerProvider) Option {
 	return func(i *Interpreter) { i.timer = p }
 }
+
+// WithOsProvider grants access to host OS facilities (environment, cwd, exit,
+// platform/arch/pid) — see [OsProvider]. Without one, those facilities are
+// unavailable. It backs the `process` global installed by host/process.
+func WithOsProvider(p OsProvider) Option {
+	return func(i *Interpreter) { i.os = p }
+}
+
+// PrintProvider returns the configured console-output sink, or nil. It lets host
+// packages (e.g. host/process's process.stdout) route their output through the
+// same capability as console.
+func (i *Interpreter) PrintProvider() PrintProvider { return i.printer }
+
+// TimeProvider returns the configured clock, or nil.
+func (i *Interpreter) TimeProvider() TimeProvider { return i.clock }
+
+// OsProvider returns the configured OS-facilities provider, or nil.
+func (i *Interpreter) OsProvider() OsProvider { return i.os }
 
 // RegExpEngine selects which regular-expression backend the VM installs.
 type RegExpEngine int

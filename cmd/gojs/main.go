@@ -38,6 +38,7 @@ func main() {
 		interp.WithPrintProvider(interp.NewDefaultPrintProvider()),
 		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
+		interp.WithOsProvider(interp.NewDefaultOsProvider()),
 	)
 
 	// A Node-like process global for standalone runs. argv is

@@ -77,6 +77,7 @@ clock, or schedule timers.
 | `TimeProvider`    | `Date` / `performance.now` clock source    | `NewDefaultTimeProvider()`  |
 | `TimerProvider`   | `setTimeout` / `setInterval` scheduling    | `NewDefaultTimerProvider()` |
 | `ModuleProvider`  | `require(specifier)` module loading        | `NewMapModuleProvider`, `NewDirModuleProvider` |
+| `OsProvider`      | `process` env / cwd / exit / platform / arch / pid | `NewDefaultOsProvider()`, `NewFilteredOsProvider(filter)` |
 
 Resource use is bounded with `WithLimits(Limits{MaxCallDepth, MaxSteps})`:
 recursion raises a catchable `RangeError`, and the step budget is an

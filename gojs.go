@@ -37,6 +37,17 @@ var (
 	NewDirModuleProvider = interp.NewDirModuleProvider
 )
 
+// OsProvider gates host OS access (env, cwd, exit, platform/arch/pid) — the
+// capability backing the `process` global. Alias for [interp.OsProvider].
+type OsProvider = interp.OsProvider
+
+// OS provider option and default implementations, re-exported.
+var (
+	WithOsProvider        = interp.WithOsProvider
+	NewDefaultOsProvider  = interp.NewDefaultOsProvider
+	NewFilteredOsProvider = interp.NewFilteredOsProvider
+)
+
 // Value type aliases for building/inspecting JavaScript values from Go.
 type (
 	// Object is a JavaScript object (also arrays and functions).
