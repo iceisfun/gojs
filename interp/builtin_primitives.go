@@ -105,7 +105,7 @@ func (i *Interpreter) initSymbol() {
 		if s, ok := byKey[key]; ok {
 			return s, nil
 		}
-		s := &Symbol{Desc: key, HasDesc: true}
+		s := &Symbol{Desc: key, HasDesc: true, Registered: true}
 		byKey[key] = s
 		bySym[s] = key
 		return s, nil
