@@ -15,7 +15,11 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		return Bool(o.HasOwn(key)), nil
+		_, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		return Bool(ok), nil
 	})
 	i.defineMethod(proto, "isPrototypeOf", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		target, ok := arg(args, 0).(*Object)
@@ -42,7 +46,11 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		if p, ok := o.getOwn(key); ok {
+		p, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			return Bool(p.Enumerable), nil
 		}
 		return False, nil
@@ -94,14 +102,21 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		return i.newArray(i.enumerableKeys(o, func(k string, _ Value) Value { return String(k) })), nil
+		vals, err := i.enumerableKeys(ctx, o, func(k string, _ Value) Value { return String(k) })
+		if err != nil {
+			return nil, err
+		}
+		return i.newArray(vals), nil
 	})
 	i.defineMethod(ctor, "values", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, err := i.ToObject(ctx, arg(args, 0))
 		if err != nil {
 			return nil, err
 		}
-		vals := i.enumerableKeys(o, func(_ string, v Value) Value { return v })
+		vals, err := i.enumerableKeys(ctx, o, func(_ string, v Value) Value { return v })
+		if err != nil {
+			return nil, err
+		}
 		return i.newArray(vals), nil
 	})
 	i.defineMethod(ctor, "entries", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -109,9 +124,12 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		pairs := i.enumerableKeys(o, func(k string, v Value) Value {
+		pairs, err := i.enumerableKeys(ctx, o, func(k string, v Value) Value {
 			return i.newArray([]Value{String(k), v})
 		})
+		if err != nil {
+			return nil, err
+		}
 		return i.newArray(pairs), nil
 	})
 	i.defineMethod(ctor, "assign", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -180,21 +198,28 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		if o.proto == nil {
-			return Nul, nil
-		}
-		return o.proto, nil
+		return i.getProtoV(ctx, o)
 	})
 	i.defineMethod(ctor, "setPrototypeOf", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if IsNullish(arg(args, 0)) {
+			return nil, i.throwError(ctx, "TypeError", "Object.setPrototypeOf called on null or undefined")
+		}
+		proto := arg(args, 1)
+		if _, ok := proto.(*Object); !ok {
+			if _, ok := proto.(Null); !ok {
+				return nil, i.throwError(ctx, "TypeError", "Object prototype may only be an Object or null")
+			}
+		}
 		o, ok := arg(args, 0).(*Object)
 		if !ok {
 			return arg(args, 0), nil
 		}
-		switch p := arg(args, 1).(type) {
-		case *Object:
-			o.proto = p
-		case Null:
-			o.proto = nil
+		status, err := i.setProtoV(ctx, o, proto)
+		if err != nil {
+			return nil, err
+		}
+		if !status {
+			return nil, i.throwError(ctx, "TypeError", "Object.setPrototypeOf: cannot set prototype")
 		}
 		return o, nil
 	})
@@ -235,9 +260,15 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
+		keys, err := i.ownKeysV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
 		var out []Value
-		for _, name := range o.OwnKeys() {
-			out = append(out, String(name))
+		for _, k := range keys {
+			if !k.IsSymbol() {
+				out = append(out, String(k.Str))
+			}
 		}
 		return i.newArray(out), nil
 	})
@@ -278,7 +309,10 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		p, ok := o.getOwn(key)
+		p, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			return Undef, nil
 		}
@@ -302,8 +336,12 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
+		keys, err := i.ownKeysV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
 		var syms []Value
-		for _, k := range o.keys {
+		for _, k := range keys {
 			if k.IsSymbol() {
 				syms = append(syms, k.Sym)
 			}
@@ -312,11 +350,20 @@ func (i *Interpreter) initObject() {
 	})
 	i.defineMethod(ctor, "isExtensible", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, ok := arg(args, 0).(*Object)
-		return Bool(ok && o.extensible), nil
+		if !ok {
+			return False, nil
+		}
+		ext, err := i.isExtensibleV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+		return Bool(ext), nil
 	})
 	i.defineMethod(ctor, "preventExtensions", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if o, ok := arg(args, 0).(*Object); ok {
-			o.extensible = false
+			if _, err := i.preventExtensionsV(ctx, o); err != nil {
+				return nil, err
+			}
 		}
 		return arg(args, 0), nil
 	})
@@ -412,25 +459,62 @@ func (i *Interpreter) descriptorToObject(p *Property) *Object {
 }
 
 // enumerableKeys collects a value for each own enumerable string-keyed property
-// of o, in key order, via project.
-func (i *Interpreter) enumerableKeys(o *Object, project func(string, Value) Value) []Value {
-	var out []Value
-	for _, name := range o.OwnKeys() {
-		if p, ok := o.getOwn(StrKey(name)); ok && p.Enumerable {
-			v, _ := o.GetStr(context.Background(), name)
-			out = append(out, project(name, v))
-		}
+// of o, in key order, via project. It routes through the object internal
+// methods so a Proxy's ownKeys/getOwnPropertyDescriptor/get traps run.
+func (i *Interpreter) enumerableKeys(ctx context.Context, o *Object, project func(string, Value) Value) ([]Value, error) {
+	keys, err := i.ownKeysV(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var out []Value
+	for _, k := range keys {
+		if k.IsSymbol() {
+			continue
+		}
+		p, ok, err := i.getOwnPropertyV(ctx, o, k)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !p.Enumerable {
+			continue
+		}
+		v, err := i.getV(ctx, o, k, o)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, project(k.Str, v))
+	}
+	return out, nil
 }
 
-// applyDescriptor implements OrdinaryDefineOwnProperty /
-// ValidateAndApplyPropertyDescriptor (§10.1.6) with the Throw flag set: it
-// merges only the fields the descriptor actually specifies onto any existing
-// property (leaving the rest untouched), enforces the invariants for
-// non-configurable and non-writable properties, and raises a TypeError when a
-// change is disallowed.
+// applyDescriptor is the Throw-flag form of OrdinaryDefineOwnProperty used by
+// Object.defineProperty: it applies the descriptor and raises a TypeError when
+// an invariant forbids the change. Reflect.defineProperty uses
+// defineOwnFromDescriptor directly, observing the boolean result instead.
 func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) error {
+	ok, err := i.definePropertyV(ctx, o, key, desc)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if _, exists := o.getOwn(key); o.proxy == nil && !exists {
+			return i.throwError(ctx, "TypeError",
+				"Cannot define property "+keyName(key)+", object is not extensible")
+		}
+		return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+	}
+	return nil
+}
+
+// defineOwnFromDescriptor implements OrdinaryDefineOwnProperty /
+// ValidateAndApplyPropertyDescriptor (§10.1.6). It merges only the fields the
+// descriptor actually specifies onto any existing property (leaving the rest
+// untouched) and enforces the invariants for non-configurable and non-writable
+// properties. It returns whether the definition was applied: an unmet invariant
+// yields (false, nil), while a malformed descriptor (accessors combined with a
+// value/writable, or a non-callable getter/setter) — a ToPropertyDescriptor
+// failure that throws even for Reflect.defineProperty — yields a non-nil error.
+func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
 	// Which attributes does the descriptor specify? Presence — not truthiness —
 	// determines what gets applied; absent fields are inherited from the
 	// current property (or take spec defaults for a brand-new one).
@@ -442,7 +526,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 	hasSet := desc.HasOwn(StrKey("set"))
 
 	if (hasGet || hasSet) && (hasValue || hasWritable) {
-		return i.throwError(ctx, "TypeError",
+		return false, i.throwError(ctx, "TypeError",
 			"Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, "+keyName(key))
 	}
 
@@ -450,34 +534,53 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 	var value Value = Undef
 	var getter, setter *Object
 	if hasEnum {
-		v, _ := desc.GetStr(ctx, "enumerable")
+		v, err := desc.GetStr(ctx, "enumerable")
+		if err != nil {
+			return false, err
+		}
 		enumerable = ToBoolean(v)
 	}
 	if hasConf {
-		v, _ := desc.GetStr(ctx, "configurable")
+		v, err := desc.GetStr(ctx, "configurable")
+		if err != nil {
+			return false, err
+		}
 		configurable = ToBoolean(v)
 	}
 	if hasValue {
-		value, _ = desc.GetStr(ctx, "value")
+		v, err := desc.GetStr(ctx, "value")
+		if err != nil {
+			return false, err
+		}
+		value = v
 	}
 	if hasWritable {
-		v, _ := desc.GetStr(ctx, "writable")
+		v, err := desc.GetStr(ctx, "writable")
+		if err != nil {
+			return false, err
+		}
 		writable = ToBoolean(v)
 	}
 	if hasGet {
-		v, _ := desc.GetStr(ctx, "get")
+		v, err := desc.GetStr(ctx, "get")
+		if err != nil {
+			return false, err
+		}
 		if fn, ok := v.(*Object); ok && fn.IsCallable() {
 			getter = fn
 		} else if !IsUndefined(v) {
-			return i.throwError(ctx, "TypeError", "Getter must be a function: "+keyName(key))
+			return false, i.throwError(ctx, "TypeError", "Getter must be a function: "+keyName(key))
 		}
 	}
 	if hasSet {
-		v, _ := desc.GetStr(ctx, "set")
+		v, err := desc.GetStr(ctx, "set")
+		if err != nil {
+			return false, err
+		}
 		if fn, ok := v.(*Object); ok && fn.IsCallable() {
 			setter = fn
 		} else if !IsUndefined(v) {
-			return i.throwError(ctx, "TypeError", "Setter must be a function: "+keyName(key))
+			return false, i.throwError(ctx, "TypeError", "Setter must be a function: "+keyName(key))
 		}
 	}
 	isAccessorDesc := hasGet || hasSet
@@ -486,8 +589,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 	current, exists := o.getOwn(key)
 	if !exists {
 		if !o.extensible {
-			return i.throwError(ctx, "TypeError",
-				"Cannot define property "+keyName(key)+", object is not extensible")
+			return false, nil
 		}
 		p := &Property{Enumerable: enumerable, Configurable: configurable}
 		if isAccessorDesc {
@@ -499,35 +601,35 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 			p.Writable = writable
 		}
 		o.defineOwn(key, p)
-		return nil
+		return true, nil
 	}
 
 	// The property already exists: a non-configurable property constrains which
 	// redefinitions are permitted (§10.1.6.3).
 	if !current.Configurable {
 		if hasConf && configurable {
-			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			return false, nil
 		}
 		if hasEnum && enumerable != current.Enumerable {
-			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			return false, nil
 		}
 		switch {
 		case isAccessorDesc && !current.Accessor, isDataDesc && current.Accessor:
 			// Changing the kind of a non-configurable property is forbidden.
-			return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+			return false, nil
 		case current.Accessor:
 			if hasGet && getter != current.Get {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 			if hasSet && setter != current.Set {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 		case !current.Writable:
 			if hasWritable && writable {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 			if hasValue && !sameValue(value, current.Value) {
-				return i.throwError(ctx, "TypeError", "Cannot redefine property: "+keyName(key))
+				return false, nil
 			}
 		}
 	}
@@ -564,7 +666,7 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 		np.Configurable = configurable
 	}
 	o.defineOwn(key, &np)
-	return nil
+	return true, nil
 }
 
 // defineProperties applies each own enumerable descriptor in props to o.

@@ -177,16 +177,23 @@ func (i *Interpreter) bindThisValue(this Value, strict bool) Value {
 // with it as `this`, and return the body's object result or the new object.
 func (i *Interpreter) makeConstruct(fnObj *Object, call CallFn) CallFn {
 	return func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		protoV, _ := fnObj.GetStr(ctx, "prototype")
+		// Publish new.target for the body (see Interpreter.pendingNewTarget).
+		if newTarget == nil {
+			newTarget = fnObj
+		}
+		// OrdinaryCreateFromConstructor: the instance's prototype comes from
+		// new.target (which differs from the invoked function under
+		// Reflect.construct or a subclass), falling back to %Object.prototype%.
+		protoSource := fnObj
+		if nt, ok := newTarget.(*Object); ok {
+			protoSource = nt
+		}
+		protoV, _ := protoSource.GetStr(ctx, "prototype")
 		proto, ok := protoV.(*Object)
 		if !ok {
 			proto = i.objectProto
 		}
 		self := NewObject(proto)
-		// Publish new.target for the body (see Interpreter.pendingNewTarget).
-		if newTarget == nil {
-			newTarget = fnObj
-		}
 		i.pendingNewTarget = newTarget
 		result, err := call(ctx, self, args)
 		if err != nil {

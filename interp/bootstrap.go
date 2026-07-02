@@ -66,6 +66,8 @@ func (i *Interpreter) bootstrap() {
 	i.initArrayBuffer()
 	i.initDataView()
 	i.initPromise()
+	i.initReflect()
+	i.initProxy()
 	i.initConsole()
 	i.initGlobals()
 	i.initTimers()

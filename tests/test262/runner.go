@@ -55,7 +55,7 @@ type Result struct {
 // are language areas gojs does not implement yet; running them only produces
 // noise.
 var unsupportedFeatures = map[string]bool{
-	"Proxy": true, "Reflect": true, "TypedArray": true, "ArrayBuffer": true,
+	"Proxy": false, "Reflect": false, "TypedArray": true, "ArrayBuffer": true,
 	"SharedArrayBuffer": true, "Atomics": true, "WeakRef": true,
 	"FinalizationRegistry": true, "Temporal": true, "Intl": true,
 	"tail-call-optimization": true, "import-assertions": true,

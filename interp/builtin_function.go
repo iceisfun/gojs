@@ -77,8 +77,15 @@ func (i *Interpreter) initFunction() {
 		})
 		// A bound constructor stays constructable, ignoring boundThis on `new`.
 		if fn.fn.construct != nil {
-			bound.fn.construct = func(ctx context.Context, newThis Value, callArgs []Value) (Value, error) {
-				return fn.fn.construct(ctx, newThis, append(append([]Value{}, boundArgs...), callArgs...))
+			bound.fn.construct = func(ctx context.Context, newTarget Value, callArgs []Value) (Value, error) {
+				// Per BoundFunctionCreate's [[Construct]]: when new.target is the
+				// bound function itself, substitute the target so the instance's
+				// prototype derives from the target, not the (prototype-less) bound
+				// wrapper.
+				if newTarget == Value(bound) {
+					newTarget = fn
+				}
+				return fn.fn.construct(ctx, newTarget, append(append([]Value{}, boundArgs...), callArgs...))
 			}
 			bound.fn.ctor = true
 		}
@@ -159,10 +166,20 @@ func (i *Interpreter) ordinaryHasInstance(ctx context.Context, ctor *Object, v V
 	if !ok {
 		return false, i.throwError(ctx, "TypeError", "Function has non-object prototype in instanceof check")
 	}
-	for p := obj.proto; p != nil; p = p.proto {
-		if p == proto {
+	// Walk the prototype chain via [[GetPrototypeOf]] so a Proxy's trap runs.
+	cur := obj
+	for {
+		pv, err := i.getProtoV(ctx, cur)
+		if err != nil {
+			return false, err
+		}
+		next, ok := pv.(*Object)
+		if !ok {
+			return false, nil
+		}
+		if next == proto {
 			return true, nil
 		}
+		cur = next
 	}
-	return false, nil
 }

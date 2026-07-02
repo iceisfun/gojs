@@ -159,15 +159,29 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			return nil, err
 		}
 		defer i.leaveCall()
-		self := NewObject(proto)
-		env := NewEnvironment(classEnv, true)
-		env.homeObj = proto
-		env.setThis(self)
 		// new.target is the constructor originally invoked with `new` (propagated
 		// unchanged down a super() chain). Default to undefined for safety.
 		if newTarget == nil {
 			newTarget = Undef
 		}
+		// A base class's instance takes its prototype from new.target.prototype
+		// (which differs under Reflect.construct with an explicit newTarget); a
+		// derived class populates a fresh object whose prototype is this class's
+		// own proto and reconciles it in invokeSuperOnto.
+		instProto := proto
+		if cd.superCtor == nil {
+			if nt, ok := newTarget.(*Object); ok {
+				if pv, _ := nt.GetStr(ctx, "prototype"); pv != nil {
+					if po, ok := pv.(*Object); ok {
+						instProto = po
+					}
+				}
+			}
+		}
+		self := NewObject(instProto)
+		env := NewEnvironment(classEnv, true)
+		env.homeObj = proto
+		env.setThis(self)
 		env.newTgt = newTarget
 
 		// With a superclass, `this` field/private init and body run after super()

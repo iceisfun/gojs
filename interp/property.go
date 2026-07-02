@@ -21,6 +21,11 @@ func (o *Object) GetStr(ctx context.Context, name string) (Value, error) {
 // receiver (which matters for inherited accessors).
 func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver Value) (Value, error) {
 	for cur := o; cur != nil; cur = cur.proto {
+		// A Proxy anywhere on the chain intercepts [[Get]] for the whole
+		// remaining chain (its target may itself continue the lookup).
+		if cur.proxy != nil {
+			return cur.proxy.get(ctx, key, receiver)
+		}
 		if p, ok := cur.getOwn(key); ok {
 			if p.Accessor {
 				if p.Get == nil {
@@ -69,6 +74,11 @@ func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool,
 	// Search the prototype chain for an accessor or a non-writable data
 	// property that governs the assignment.
 	for cur := o; cur != nil; cur = cur.proto {
+		// A Proxy anywhere on the chain governs the whole write via its set
+		// trap, with the original object as the receiver.
+		if cur.proxy != nil {
+			return cur.proxy.set(ctx, key, v, o)
+		}
 		p, ok := cur.getOwn(key)
 		if !ok {
 			continue

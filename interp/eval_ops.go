@@ -107,7 +107,11 @@ func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Env
 	if err != nil {
 		return nil, err
 	}
-	return Bool(o.Delete(key)), nil
+	ok2, err := i.deleteV(ctx, o, key)
+	if err != nil {
+		return nil, err
+	}
+	return Bool(ok2), nil
 }
 
 // evalUpdate implements prefix/postfix ++ and --.
@@ -473,7 +477,11 @@ func (i *Interpreter) evalIn(ctx context.Context, left Value, rightExpr ast.Expr
 	if err != nil {
 		return nil, err
 	}
-	return Bool(obj.Has(key)), nil
+	has, err := i.hasV(ctx, obj, key)
+	if err != nil {
+		return nil, err
+	}
+	return Bool(has), nil
 }
 
 // evalInstanceof implements the instanceof operator, honoring Symbol.hasInstance.
