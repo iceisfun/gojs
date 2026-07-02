@@ -134,6 +134,8 @@ type intrinsics struct {
 	stringIteratorProto       *Object // %StringIteratorPrototype%
 	iteratorCtor              *Object // %Iterator%
 	generatorProto            *Object
+	asyncIteratorProto        *Object // %AsyncIteratorPrototype%
+	asyncGeneratorProto       *Object // %AsyncGeneratorPrototype%
 	dateProto                 *Object
 	arrayBufferProto          *Object // %ArrayBuffer.prototype%
 	dataViewProto             *Object // %DataView.prototype%

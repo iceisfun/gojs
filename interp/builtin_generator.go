@@ -24,7 +24,10 @@ type generatorState struct {
 	resume chan resumeMsg // consumer → body: value/behavior for the pending yield
 	out    chan yieldMsg  // body → consumer: a yielded/returned/thrown result
 	done   bool
-	ctx    context.Context // cancelled when the interpreter closes
+	// asyncGen is true when this coroutine drives an async generator, so a
+	// `yield` first awaits its operand before delivering it to the consumer.
+	asyncGen bool
+	ctx      context.Context // cancelled when the interpreter closes
 }
 
 // resumeMsg is sent into the generator by next/return/throw.
@@ -48,6 +51,12 @@ type yieldMsg struct {
 	value Value
 	done  bool
 	err   error
+	// awaited marks a suspension produced by `await` (as opposed to `yield`):
+	// the async-generator driver resolves the value and resumes the body without
+	// delivering an iterator result to the consumer. It is meaningless for sync
+	// generators (which never await) and async functions (whose every suspension
+	// is an await).
+	awaited bool
 }
 
 // startCoroutine sets up a suspendable coroutine over a function body: it binds
@@ -62,9 +71,10 @@ type yieldMsg struct {
 // at a time — cooperative coroutining, not parallelism.
 func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (*generatorState, func(resumeMsg) yieldMsg, error) {
 	gs := &generatorState{
-		resume: make(chan resumeMsg),
-		out:    make(chan yieldMsg),
-		ctx:    i.ctx,
+		resume:   make(chan resumeMsg),
+		out:      make(chan yieldMsg),
+		asyncGen: def.Async && def.Generator,
+		ctx:      i.ctx,
 	}
 
 	env := NewEnvironment(closure, true)
@@ -238,14 +248,25 @@ func (i *Interpreter) evalYield(ctx context.Context, e *ast.YieldExpr, env *Envi
 		}
 		val = v
 	}
+	// In an async generator, `yield x` first awaits x (AsyncGeneratorYield,
+	// §27.6.3.8 step 5) and then delivers the settled value to the consumer.
+	if gs.asyncGen {
+		awaited, err := i.doAwait(gs, val)
+		if err != nil {
+			return nil, err
+		}
+		return i.doYield(gs, awaited)
+	}
 	return i.doYield(gs, val)
 }
 
-// doYield hands value to the consumer and blocks until resumed, translating a
-// return()/throw() resume into the appropriate control signal.
-func (i *Interpreter) doYield(gs *generatorState, value Value) (Value, error) {
+// suspend hands a message to the consumer/driver and blocks until resumed,
+// translating a return()/throw() resume into the appropriate control signal.
+// awaited distinguishes an `await` suspension (transparent to an async
+// generator's consumer) from a `yield` suspension (which delivers a result).
+func (i *Interpreter) suspend(gs *generatorState, value Value, awaited bool) (Value, error) {
 	select {
-	case gs.out <- yieldMsg{value: value, done: false}:
+	case gs.out <- yieldMsg{value: value, done: false, awaited: awaited}:
 	case <-gs.ctx.Done():
 		return nil, gs.ctx.Err()
 	}
@@ -262,6 +283,25 @@ func (i *Interpreter) doYield(gs *generatorState, value Value) (Value, error) {
 	case <-gs.ctx.Done():
 		return nil, gs.ctx.Err()
 	}
+}
+
+// doYield hands a yielded value to the consumer and blocks until resumed.
+func (i *Interpreter) doYield(gs *generatorState, value Value) (Value, error) {
+	return i.suspend(gs, value, false)
+}
+
+// doAwait suspends for an awaited value; the async driver resolves it to a
+// promise and resumes with the settled value (or a thrown rejection).
+func (i *Interpreter) doAwait(gs *generatorState, value Value) (Value, error) {
+	return i.suspend(gs, value, true)
+}
+
+// createIterResult builds a { value, done } iterator-result object.
+func (i *Interpreter) createIterResult(value Value, done bool) *Object {
+	o := NewObject(i.objectProto)
+	o.SetData("value", value)
+	o.SetData("done", Bool(done))
+	return o
 }
 
 // evalYieldDelegate implements `yield*`: it drives an inner iterable, yielding

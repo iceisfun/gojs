@@ -96,6 +96,7 @@ func (i *Interpreter) evalAwait(ctx context.Context, e *ast.AwaitExpr, env *Envi
 		return operand, nil
 	}
 	// Suspend: hand the awaited operand to the async driver and resume with the
-	// settled value (doYield turns a rejection into a thrown value).
-	return i.doYield(gs, operand)
+	// settled value (doAwait turns a rejection into a thrown value). The awaited
+	// flag keeps an async generator's driver from treating this as a yield.
+	return i.doAwait(gs, operand)
 }

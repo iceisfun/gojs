@@ -45,6 +45,12 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// leaves it nil, so new.target reads as undefined inside the body.
 		nt := i.pendingNewTarget
 		i.pendingNewTarget = nil
+		// An async generator returns an async generator object whose
+		// next/return/throw yield promises (see makeAsyncGenerator). Checked
+		// before the plain-generator case since it is both Async and Generator.
+		if def.Generator && def.Async && kind == kindNormal {
+			return i.makeAsyncGenerator(def, closure, homeObj, i.bindThisValue(this, strict), args)
+		}
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
 		if def.Generator && kind == kindNormal {
