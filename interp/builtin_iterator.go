@@ -237,11 +237,15 @@ func (i *Interpreter) iteratorHelperReturn(ctx context.Context, this Value, _ []
 		return i.newIterResult(Undef, true), nil
 	}
 	st.done = true
+	// While closing, the generator is in the executing state, so a re-entrant
+	// next/return must observe running and throw.
+	st.running = true
 	// IteratorCloseAll closes the underlying iterators in reverse List order.
 	var pending error
 	for k := len(st.live) - 1; k >= 0; k-- {
 		pending = i.iteratorClose(ctx, st.live[k], pending)
 	}
+	st.running = false
 	if pending != nil {
 		return nil, pending
 	}
@@ -306,6 +310,9 @@ func (i *Interpreter) initIterator() {
 
 	// Iterator.from(obj). §27.1.4.1
 	i.defineMethod(ctor, "from", 1, i.iteratorFrom)
+
+	// Iterator.concat(...items). §27.1.4.2
+	i.defineMethod(ctor, "concat", 0, i.iteratorConcat)
 
 	// -----------------------------------------------------------------------
 	// %Iterator.prototype% accessors and helper methods.
@@ -436,6 +443,71 @@ func (i *Interpreter) iteratorFrom(ctx context.Context, _ Value, args []Value) (
 	wrapper.class = "Iterator Wrap"
 	wrapper.internal = map[string]any{"wrapIterated": rec}
 	return wrapper, nil
+}
+
+// concatItem pairs an eagerly-fetched @@iterator method with its iterable, per
+// the Records built by Iterator.concat.
+type concatItem struct {
+	method   *Object
+	iterable *Object
+}
+
+func (i *Interpreter) iteratorConcat(ctx context.Context, _ Value, args []Value) (Value, error) {
+	var iterables []concatItem
+	for _, item := range args {
+		o, ok := item.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", briefValue(item)+" is not an object")
+		}
+		method, err := i.getMethod(ctx, o, i.symIterator)
+		if err != nil {
+			return nil, err
+		}
+		if method == nil {
+			return nil, i.throwError(ctx, "TypeError", briefValue(item)+" is not iterable")
+		}
+		iterables = append(iterables, concatItem{method: method, iterable: o})
+	}
+	return i.newIterHelper(func(st *iterHelperState) {
+		idx := 0
+		var cur *iterRecord
+		st.pull = func(ctx context.Context) (Value, bool, error) {
+			for {
+				if cur == nil {
+					if idx >= len(iterables) {
+						return Undef, true, nil
+					}
+					it := iterables[idx]
+					idx++
+					iterV, err := it.method.fn.call(ctx, it.iterable, nil)
+					if err != nil {
+						return nil, false, err
+					}
+					iterO, ok := iterV.(*Object)
+					if !ok {
+						return nil, false, i.throwError(ctx, "TypeError", "iterator is not an object")
+					}
+					rec, err := i.getIteratorDirect(ctx, iterO)
+					if err != nil {
+						return nil, false, err
+					}
+					cur = rec
+					st.live = []*iterRecord{cur}
+				}
+				value, done, err := i.iteratorStepValue(ctx, cur)
+				if err != nil {
+					st.live = nil
+					return nil, false, err
+				}
+				if done {
+					cur = nil
+					st.live = nil
+					continue
+				}
+				return value, false, nil
+			}
+		}
+	}), nil
 }
 
 // hasInPrototypeChain reports whether target appears on obj's prototype chain.
