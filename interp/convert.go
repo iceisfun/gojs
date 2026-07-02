@@ -21,8 +21,17 @@ func (i *Interpreter) ToPrimitive(ctx context.Context, v Value, hint string) (Va
 	if !ok {
 		return v, nil
 	}
-	// Symbol.toPrimitive takes precedence when present.
-	if fn, ok := i.methodBySymbol(obj, i.symToPrimitive); ok {
+	// Symbol.toPrimitive takes precedence when present. GetMethod performs a
+	// real [[Get]] so accessor properties run (and can propagate errors).
+	exotic, err := obj.Get(ctx, SymKey(i.symToPrimitive))
+	if err != nil {
+		return nil, err
+	}
+	if !IsNullish(exotic) {
+		fn, ok := exotic.(*Object)
+		if !ok || !fn.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Symbol.toPrimitive is not a function")
+		}
 		h := hint
 		if h == "" {
 			h = "default"
