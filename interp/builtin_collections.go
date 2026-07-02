@@ -26,40 +26,56 @@ import "context"
 
 // mapEntry is a single key/value pair in an orderedMap.
 type mapEntry struct {
-	key Value
-	val Value
+	key     Value
+	val     Value
+	deleted bool // tombstone: the entry was removed but its slot is preserved
 }
 
 // orderedMap is a lightweight ordered map backed by a slice. Iteration always
 // visits entries in the order they were first inserted. Mutation does not
-// change a key's position in the slice; only explicit deletion removes it
-// (replaced by a tombstone so existing iterators can stay index-stable).
+// change a key's position in the slice; deletion replaces the entry with a
+// tombstone (deleted=true) so existing iterators stay index-stable and observe
+// spec-mandated semantics (§24.1.3.1: "The existing [[MapData]] List is
+// preserved because there may be existing iterators suspended midway"). The
+// tombstones are cleared only by clear(), which resets the whole list.
 //
 // Lookup is O(n) by linear scan, which is acceptable for the first-pass
 // implementation and matches what V8 / SpiderMonkey use for small maps.
 type orderedMap struct {
 	entries []mapEntry
+	count   int // number of live (non-tombstone) entries
 }
 
-// find returns the index of the first entry whose key is SameValueZero-equal
-// to k, or -1 when absent.
+// find returns the index of the first live entry whose key is SameValueZero-
+// equal to k, or -1 when absent.
 func (m *orderedMap) find(k Value) int {
 	for idx := range m.entries {
-		if sameValueZero(m.entries[idx].key, k) {
+		if !m.entries[idx].deleted && sameValueZero(m.entries[idx].key, k) {
 			return idx
 		}
 	}
 	return -1
 }
 
+// canonicalizeKey implements CanonicalizeKeyedCollectionKey (§24.5.1): the
+// number -0 is normalized to +0 so it is stored and reported as +0.
+func canonicalizeKey(v Value) Value {
+	if n, ok := v.(Number); ok && float64(n) == 0 {
+		return Number(0)
+	}
+	return v
+}
+
 // set inserts or updates the entry for k. Insertion order is preserved:
 // existing keys stay in their original position.
 func (m *orderedMap) set(k, v Value) {
+	k = canonicalizeKey(k)
 	if idx := m.find(k); idx >= 0 {
 		m.entries[idx].val = v
 		return
 	}
 	m.entries = append(m.entries, mapEntry{key: k, val: v})
+	m.count++
 }
 
 // get returns the value for k and whether it was found.
@@ -73,21 +89,42 @@ func (m *orderedMap) get(k Value) (Value, bool) {
 // has reports whether k is a key in the map.
 func (m *orderedMap) has(k Value) bool { return m.find(k) >= 0 }
 
-// delete removes the entry for k, reporting whether one existed.
+// delete tombstones the entry for k, reporting whether one existed.
 func (m *orderedMap) delete(k Value) bool {
 	idx := m.find(k)
 	if idx < 0 {
 		return false
 	}
-	m.entries = append(m.entries[:idx], m.entries[idx+1:]...)
+	m.entries[idx] = mapEntry{deleted: true}
+	m.count--
 	return true
 }
 
-// size returns the number of entries.
-func (m *orderedMap) size() int { return len(m.entries) }
+// size returns the number of live entries.
+func (m *orderedMap) size() int { return m.count }
 
-// clear removes all entries.
-func (m *orderedMap) clear() { m.entries = m.entries[:0] }
+// clear removes all entries. The backing list is reset; any live iterators read
+// the list length afresh and so observe completion.
+func (m *orderedMap) clear() {
+	m.entries = nil
+	m.count = 0
+}
+
+// nextLive returns the first live entry at or after idx (skipping tombstones)
+// together with the index to resume from; ok is false when none remain. It
+// re-reads the backing list on each call, so entries appended after an iterator
+// was created are observed (spec CreateMapIterator/CreateSetIterator re-read the
+// entry count on every step).
+func (m *orderedMap) nextLive(idx int) (mapEntry, int, bool) {
+	for idx < len(m.entries) {
+		e := m.entries[idx]
+		idx++
+		if !e.deleted {
+			return e, idx, true
+		}
+	}
+	return mapEntry{}, idx, false
+}
 
 // ---------------------------------------------------------------------------
 // orderedSet — ordered set with SameValueZero equality, backed by orderedMap
@@ -102,9 +139,22 @@ type orderedSet struct {
 var setSentinel Value = True // any non-nil constant works
 
 func (s *orderedSet) add(v Value) {
+	v = canonicalizeKey(v)
 	if s.m.find(v) < 0 {
 		s.m.entries = append(s.m.entries, mapEntry{key: v, val: setSentinel})
+		s.m.count++
 	}
+}
+
+// values returns a snapshot slice of the set's live values in insertion order.
+func (s *orderedSet) values() []Value {
+	out := make([]Value, 0, s.m.count)
+	for idx := range s.m.entries {
+		if !s.m.entries[idx].deleted {
+			out = append(out, s.m.entries[idx].key)
+		}
+	}
+	return out
 }
 
 func (s *orderedSet) has(v Value) bool    { return s.m.has(v) }
@@ -184,53 +234,87 @@ func (i *Interpreter) initMap() {
 	proto := i.mapProto
 	proto.class = "Map"
 
-	// Constructor: new Map(iterable?)
+	// Constructor: new Map(iterable?). §24.1.1.1
 	// The iterable (if supplied) must produce [key, value] pairs.
-	mapConstruct := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var obj *Object
-		if o, ok := this.(*Object); ok && o != i.global && o.class == "Map" {
-			obj = o
-		} else {
-			obj = NewObject(proto)
-			obj.class = "Map"
-		}
+	//
+	// Called without new (NewTarget undefined) → TypeError.
+	mapCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return nil, i.throwError(ctx, "TypeError", "Constructor Map requires 'new'")
+	}
+	mapConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		obj := NewObject(i.protoFromNewTarget(ctx, newTarget, proto))
+		obj.class = "Map"
 		m := &orderedMap{}
 		obj.internal = map[string]any{"Map": m}
 
-		// Populate from optional iterable argument.
-		if iterable := arg(args, 0); !IsNullish(iterable) && !IsUndefined(iterable) {
-			err := i.iterate(ctx, iterable, func(item Value) error {
-				// Each item must be an iterable of [key, value].
-				itemObj, ok := item.(*Object)
-				if !ok || !itemObj.isArray {
-					// Try iterating — the item could be any [k,v] iterable.
-					var pair []Value
-					if err2 := i.iterate(ctx, item, func(v Value) error {
-						pair = append(pair, v)
-						return nil
-					}); err2 != nil {
-						return i.throwError(ctx, "TypeError", "Map iterable items must be key-value pairs")
-					}
-					k := arg(pair, 0)
-					v := arg(pair, 1)
-					m.set(k, v)
-					return nil
-				}
-				k := undefIfHole(arg(itemObj.elems, 0))
-				v := undefIfHole(arg(itemObj.elems, 1))
-				m.set(k, v)
-				return nil
-			})
+		// Populate from optional iterable argument via AddEntriesFromIterable.
+		if iterable := arg(args, 0); !IsNullish(iterable) {
+			// adder = ? Get(map, "set"); require callable.
+			adder, err := obj.GetStr(ctx, "set")
 			if err != nil {
+				return nil, err
+			}
+			ao, ok := adder.(*Object)
+			if !ok || !ao.IsCallable() {
+				return nil, i.throwError(ctx, "TypeError", "Map: 'set' is not callable")
+			}
+			if err := i.addFromIterable(ctx, iterable, func(item Value) error {
+				// Each entry must be an Object; read "0" and "1", then call set.
+				itemObj, ok := item.(*Object)
+				if !ok {
+					return i.throwError(ctx, "TypeError", "Map iterable items must be objects")
+				}
+				k, err := itemObj.GetStr(ctx, "0")
+				if err != nil {
+					return err
+				}
+				v, err := itemObj.GetStr(ctx, "1")
+				if err != nil {
+					return err
+				}
+				_, e := i.call(ctx, adder, obj, []Value{k, v})
+				return e
+			}); err != nil {
 				return nil, err
 			}
 		}
 		return obj, nil
 	}
 
-	ctor := i.newNativeCtor("Map", 0, mapConstruct, mapConstruct)
+	ctor := i.newNativeCtor("Map", 0, mapCall, mapConstruct)
 	linkCtor(ctor, proto)
 	i.defineSpeciesGetter(ctor)
+
+	// Map.groupBy(items, callback) → Map keyed by callback results (§24.1.1.2).
+	i.defineMethod(ctor, "groupBy", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		cb, ok := arg(args, 1).(*Object)
+		if !ok || !cb.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Map.groupBy callback is not a function")
+		}
+		groups := &orderedMap{}
+		idx := 0
+		err := i.iterate(ctx, arg(args, 0), func(v Value) error {
+			kv, err := cb.fn.call(ctx, Undef, []Value{v, Number(float64(idx))})
+			if err != nil {
+				return err
+			}
+			key := canonicalizeKey(kv)
+			if bucket, ok := groups.get(key); ok {
+				bucket.(*Object).elems = append(bucket.(*Object).elems, v)
+			} else {
+				groups.set(key, i.newArray([]Value{v}))
+			}
+			idx++
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := NewObject(proto)
+		out.class = "Map"
+		out.internal = map[string]any{"Map": groups}
+		return out, nil
+	})
 
 	// size accessor
 	sizeGetter := i.newNativeFunc("get size", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -273,6 +357,49 @@ func (i *Interpreter) initMap() {
 		return Bool(m.has(arg(args, 0))), nil
 	})
 
+	// getOrInsert(key, value) → existing value or the inserted value (§24.1.3.x).
+	i.defineMethod(proto, "getOrInsert", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		m := mapSlot(this)
+		if m == nil {
+			return nil, i.throwError(ctx, "TypeError", "Map.prototype.getOrInsert called on incompatible receiver")
+		}
+		key := arg(args, 0)
+		if v, ok := m.get(key); ok {
+			return v, nil
+		}
+		value := arg(args, 1)
+		m.set(key, value)
+		return value, nil
+	})
+
+	// getOrInsertComputed(key, callback) → existing value or the value computed
+	// by callback, which is inserted (§24.1.3.x).
+	i.defineMethod(proto, "getOrInsertComputed", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		m := mapSlot(this)
+		if m == nil {
+			return nil, i.throwError(ctx, "TypeError", "Map.prototype.getOrInsertComputed called on incompatible receiver")
+		}
+		cb, ok := arg(args, 1).(*Object)
+		if !ok || !cb.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Map.prototype.getOrInsertComputed callback is not callable")
+		}
+		key := canonicalizeKey(arg(args, 0))
+		if v, ok := m.get(key); ok {
+			return v, nil
+		}
+		value, err := cb.fn.call(ctx, Undef, []Value{key})
+		if err != nil {
+			return nil, err
+		}
+		// The callback may have modified the map; re-check before inserting.
+		if idx := m.find(key); idx >= 0 {
+			m.entries[idx].val = value
+		} else {
+			m.set(key, value)
+		}
+		return value, nil
+	})
+
 	// delete(key) → boolean
 	i.defineMethod(proto, "delete", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		m := mapSlot(this)
@@ -299,8 +426,19 @@ func (i *Interpreter) initMap() {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.forEach called on incompatible receiver")
 		}
 		cb := arg(args, 0)
+		if co, ok := cb.(*Object); !ok || !co.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Map.prototype.forEach callback is not callable")
+		}
 		cbThis := arg(args, 1)
-		for _, e := range m.entries {
+		// Walk the live backing list by index so entries added during the
+		// callback are visited and tombstoned (deleted) entries are skipped.
+		idx := 0
+		for {
+			e, next, ok := m.nextLive(idx)
+			if !ok {
+				break
+			}
+			idx = next
 			if _, err := i.call(ctx, cb, cbThis, []Value{e.val, e.key, this}); err != nil {
 				return nil, err
 			}
@@ -308,22 +446,21 @@ func (i *Interpreter) initMap() {
 		return Undef, nil
 	})
 
-	// keys() → iterator of keys
+	// keys() → iterator of keys (live over the backing list; §24.1.5.1)
 	mapKeysFn := i.newNativeFunc("keys", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		m := mapSlot(this)
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.keys called on incompatible receiver")
 		}
-		// Snapshot entries to avoid mutation issues during iteration.
-		snap := append([]mapEntry{}, m.entries...)
-		idx := 0
+		idx, done := 0, false
 		return i.newIterator(func() (Value, bool) {
-			if idx >= len(snap) {
+			e, next, ok := m.nextLive(idx)
+			if done || !ok {
+				done = true
 				return Undef, false
 			}
-			k := snap[idx].key
-			idx++
-			return k, true
+			idx = next
+			return e.key, true
 		}), nil
 	})
 	proto.SetHidden("keys", mapKeysFn)
@@ -334,15 +471,15 @@ func (i *Interpreter) initMap() {
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.values called on incompatible receiver")
 		}
-		snap := append([]mapEntry{}, m.entries...)
-		idx := 0
+		idx, done := 0, false
 		return i.newIterator(func() (Value, bool) {
-			if idx >= len(snap) {
+			e, next, ok := m.nextLive(idx)
+			if done || !ok {
+				done = true
 				return Undef, false
 			}
-			v := snap[idx].val
-			idx++
-			return v, true
+			idx = next
+			return e.val, true
 		}), nil
 	})
 	proto.SetHidden("values", mapValuesFn)
@@ -353,14 +490,14 @@ func (i *Interpreter) initMap() {
 		if m == nil {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.entries called on incompatible receiver")
 		}
-		snap := append([]mapEntry{}, m.entries...)
-		idx := 0
+		idx, done := 0, false
 		return i.newIterator(func() (Value, bool) {
-			if idx >= len(snap) {
+			e, next, ok := m.nextLive(idx)
+			if done || !ok {
+				done = true
 				return Undef, false
 			}
-			e := snap[idx]
-			idx++
+			idx = next
 			return i.newArray([]Value{e.key, e.val}), true
 		}), nil
 	})
@@ -370,6 +507,14 @@ func (i *Interpreter) initMap() {
 	proto.defineOwn(SymKey(i.symIterator), &Property{
 		Value:        mapEntriesFn,
 		Writable:     true,
+		Configurable: true,
+	})
+
+	// Map.prototype[Symbol.toStringTag] = "Map" (§24.1.3.13).
+	proto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value:        String("Map"),
+		Writable:     false,
+		Enumerable:   false,
 		Configurable: true,
 	})
 
@@ -387,31 +532,39 @@ func (i *Interpreter) initSet() {
 	proto := i.setProto
 	proto.class = "Set"
 
-	// Constructor: new Set(iterable?)
-	setConstruct := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var obj *Object
-		if o, ok := this.(*Object); ok && o != i.global && o.class == "Set" {
-			obj = o
-		} else {
-			obj = NewObject(proto)
-			obj.class = "Set"
-		}
+	// Constructor: new Set(iterable?). §24.2.1.1
+	//
+	// Called without new (NewTarget undefined) → TypeError.
+	setCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return nil, i.throwError(ctx, "TypeError", "Constructor Set requires 'new'")
+	}
+	setConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		obj := NewObject(i.protoFromNewTarget(ctx, newTarget, proto))
+		obj.class = "Set"
 		s := &orderedSet{}
 		obj.internal = map[string]any{"Set": s}
 
-		if iterable := arg(args, 0); !IsNullish(iterable) && !IsUndefined(iterable) {
-			err := i.iterate(ctx, iterable, func(v Value) error {
-				s.add(v)
-				return nil
-			})
+		if iterable := arg(args, 0); !IsNullish(iterable) {
+			// adder = ? Get(set, "add"); require callable.
+			adder, err := obj.GetStr(ctx, "add")
 			if err != nil {
+				return nil, err
+			}
+			ao, ok := adder.(*Object)
+			if !ok || !ao.IsCallable() {
+				return nil, i.throwError(ctx, "TypeError", "Set: 'add' is not callable")
+			}
+			if err := i.addFromIterable(ctx, iterable, func(v Value) error {
+				_, e := i.call(ctx, adder, obj, []Value{v})
+				return e
+			}); err != nil {
 				return nil, err
 			}
 		}
 		return obj, nil
 	}
 
-	ctor := i.newNativeCtor("Set", 0, setConstruct, setConstruct)
+	ctor := i.newNativeCtor("Set", 0, setCall, setConstruct)
 	linkCtor(ctor, proto)
 	i.defineSpeciesGetter(ctor)
 
@@ -472,8 +625,20 @@ func (i *Interpreter) initSet() {
 			return nil, i.throwError(ctx, "TypeError", "Set.prototype.forEach called on incompatible receiver")
 		}
 		cb := arg(args, 0)
+		if co, ok := cb.(*Object); !ok || !co.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Set.prototype.forEach callback is not callable")
+		}
 		cbThis := arg(args, 1)
-		for _, e := range s.m.entries {
+		// Walk the live backing list by index so values added during the callback
+		// are visited and tombstoned values are skipped (§24.2.3.6 re-reads
+		// entriesCount each step).
+		idx := 0
+		for {
+			e, next, ok := s.m.nextLive(idx)
+			if !ok {
+				break
+			}
+			idx = next
 			if _, err := i.call(ctx, cb, cbThis, []Value{e.key, e.key, this}); err != nil {
 				return nil, err
 			}
@@ -481,43 +646,29 @@ func (i *Interpreter) initSet() {
 		return Undef, nil
 	})
 
-	// values() → iterator of values (also aliased as keys())
+	// values() → iterator of values (also aliased as keys()). The iterator reads
+	// the live backing list by index, so values added before it is exhausted are
+	// visited (§24.2.5.1 CreateSetIterator re-reads entriesCount each step).
 	setValuesFn := i.newNativeFunc("values", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s := setSlot(this)
 		if s == nil {
 			return nil, i.throwError(ctx, "TypeError", "Set.prototype.values called on incompatible receiver")
 		}
-		snap := append([]mapEntry{}, s.m.entries...)
-		idx := 0
+		idx, done := 0, false
 		return i.newIterator(func() (Value, bool) {
-			if idx >= len(snap) {
+			e, next, ok := s.m.nextLive(idx)
+			if done || !ok {
+				done = true // once exhausted, the iterator stays done (§24.2.5.1)
 				return Undef, false
 			}
-			v := snap[idx].key
-			idx++
-			return v, true
+			idx = next
+			return e.key, true
 		}), nil
 	})
 	proto.SetHidden("values", setValuesFn)
 
-	// keys() is identical to values() per spec (§24.2.3.8)
-	setKeysFn := i.newNativeFunc("keys", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		s := setSlot(this)
-		if s == nil {
-			return nil, i.throwError(ctx, "TypeError", "Set.prototype.keys called on incompatible receiver")
-		}
-		snap := append([]mapEntry{}, s.m.entries...)
-		idx := 0
-		return i.newIterator(func() (Value, bool) {
-			if idx >= len(snap) {
-				return Undef, false
-			}
-			v := snap[idx].key
-			idx++
-			return v, true
-		}), nil
-	})
-	proto.SetHidden("keys", setKeysFn)
+	// keys() is the very same function object as values() per spec (§24.2.3.10).
+	proto.SetHidden("keys", setValuesFn)
 
 	// entries() → iterator of [value, value] pairs (§24.2.3.4)
 	i.defineMethod(proto, "entries", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -525,15 +676,15 @@ func (i *Interpreter) initSet() {
 		if s == nil {
 			return nil, i.throwError(ctx, "TypeError", "Set.prototype.entries called on incompatible receiver")
 		}
-		snap := append([]mapEntry{}, s.m.entries...)
-		idx := 0
+		idx, done := 0, false
 		return i.newIterator(func() (Value, bool) {
-			if idx >= len(snap) {
+			e, next, ok := s.m.nextLive(idx)
+			if done || !ok {
+				done = true // once exhausted, the iterator stays done (§24.2.5.1)
 				return Undef, false
 			}
-			v := snap[idx].key
-			idx++
-			return i.newArray([]Value{v, v}), true
+			idx = next
+			return i.newArray([]Value{e.key, e.key}), true
 		}), nil
 	})
 
@@ -541,6 +692,24 @@ func (i *Interpreter) initSet() {
 	proto.defineOwn(SymKey(i.symIterator), &Property{
 		Value:        setValuesFn,
 		Writable:     true,
+		Configurable: true,
+	})
+
+	// ES2025 set-method family. Each takes a set-like `other` and follows the
+	// GetSetRecord semantics precisely (§24.2.3).
+	i.defineMethod(proto, "union", 1, i.setUnion)
+	i.defineMethod(proto, "intersection", 1, i.setIntersection)
+	i.defineMethod(proto, "difference", 1, i.setDifference)
+	i.defineMethod(proto, "symmetricDifference", 1, i.setSymmetricDifference)
+	i.defineMethod(proto, "isSubsetOf", 1, i.setIsSubsetOf)
+	i.defineMethod(proto, "isSupersetOf", 1, i.setIsSupersetOf)
+	i.defineMethod(proto, "isDisjointFrom", 1, i.setIsDisjointFrom)
+
+	// Set.prototype[Symbol.toStringTag] = "Set" (§24.2.3.13).
+	proto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value:        String("Set"),
+		Writable:     false,
+		Enumerable:   false,
 		Configurable: true,
 	})
 
