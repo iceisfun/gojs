@@ -13,18 +13,36 @@ func (i *Interpreter) initJSON() {
 	j.class = "JSON"
 
 	i.defineMethod(j, "stringify", 3, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		indent := jsonIndent(ctx, i, arg(args, 2))
-		// Apply an optional replacer (function or key-allowlist array) before
-		// serialization.
-		value, keep, err := i.applyReplacer(ctx, arg(args, 0), arg(args, 1))
+		st := &jsonState{i: i, seen: map[*Object]bool{}}
+
+		// Determine ReplacerFunction and PropertyList (§25.5.2).
+		replacer := arg(args, 1)
+		if ro, ok := replacer.(*Object); ok {
+			if ro.IsCallable() {
+				st.replacerFn = ro
+			} else if ro.isArray {
+				list, err := i.jsonPropertyList(ctx, ro)
+				if err != nil {
+					return nil, err
+				}
+				st.propList = list
+			}
+		}
+
+		// Determine the gap string from the space argument (unwrapping Number and
+		// String wrapper objects first).
+		gap, err := i.jsonGap(ctx, arg(args, 2))
 		if err != nil {
 			return nil, err
 		}
-		if !keep {
-			return Undef, nil
-		}
+		st.gap = gap
+
+		// wrapper = OrdinaryObjectCreate(%Object.prototype%); wrapper[""] = value.
+		wrapper := NewObject(i.objectProto)
+		wrapper.SetData("", arg(args, 0))
+
 		var b strings.Builder
-		ok, err := i.jsonStringify(ctx, &b, "", value, indent, "", map[*Object]bool{})
+		ok, err := st.serializeProperty(ctx, &b, wrapper, "", "")
 		if err != nil {
 			return nil, err
 		}
@@ -58,11 +76,81 @@ func (i *Interpreter) initJSON() {
 		return v, nil
 	})
 
+	// JSON[Symbol.toStringTag] = "JSON" (§25.5.3).
+	j.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value:        String("JSON"),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
+
 	i.setGlobalHidden("JSON", j)
 }
 
-// jsonIndent computes the gap string from the space argument.
-func jsonIndent(ctx context.Context, i *Interpreter, space Value) string {
+// jsonState holds the serialization state shared across a single
+// JSON.stringify call (§25.5.2): the replacer function, an optional property
+// allow-list (from an array replacer), the indentation gap, and the stack of
+// objects currently being serialized (for cyclic-structure detection).
+type jsonState struct {
+	i          *Interpreter
+	replacerFn *Object          // ReplacerFunction, or nil
+	propList   []string         // PropertyList (array replacer), or nil
+	gap        string           // indentation unit
+	seen       map[*Object]bool // objects on the current serialization stack
+}
+
+// jsonPropertyList builds the ordered, de-duplicated PropertyList from an array
+// replacer: each element that is a String, a Number, or a Number/String wrapper
+// object contributes its string form (§25.5.2 step 5.b.iii).
+func (i *Interpreter) jsonPropertyList(ctx context.Context, arr *Object) ([]string, error) {
+	list := []string{} // non-nil: an array replacer is an allow-list even if empty
+	seen := map[string]bool{}
+	n := len(arr.elems)
+	for idx := 0; idx < n; idx++ {
+		v := undefIfHole(arr.elems[idx])
+		var item string
+		var ok bool
+		switch x := v.(type) {
+		case String:
+			item, ok = string(x), true
+		case Number:
+			item, ok = NumberToString(float64(x)), true
+		case *Object:
+			if x.class == "String" || x.class == "Number" {
+				s, err := i.ToStringV(ctx, v)
+				if err != nil {
+					return nil, err
+				}
+				item, ok = s, true
+			}
+		}
+		if ok && !seen[item] {
+			seen[item] = true
+			list = append(list, item)
+		}
+	}
+	return list, nil
+}
+
+// jsonGap computes the indentation gap from the space argument, unwrapping
+// Number and String wrapper objects first (§25.5.2 steps 6-8).
+func (i *Interpreter) jsonGap(ctx context.Context, space Value) (string, error) {
+	if o, ok := space.(*Object); ok {
+		switch o.class {
+		case "Number":
+			f, err := i.ToNumberV(ctx, o)
+			if err != nil {
+				return "", err
+			}
+			space = Number(f)
+		case "String":
+			s, err := i.ToStringV(ctx, o)
+			if err != nil {
+				return "", err
+			}
+			space = String(s)
+		}
+	}
 	switch x := space.(type) {
 	case Number:
 		n := int(ToInteger(float64(x)))
@@ -72,36 +160,76 @@ func jsonIndent(ctx context.Context, i *Interpreter, space Value) string {
 		if n < 0 {
 			n = 0
 		}
-		return strings.Repeat(" ", n)
+		return strings.Repeat(" ", n), nil
 	case String:
 		s := string(x)
-		if len(s) > 10 {
-			s = s[:10]
+		// Truncate to 10 code units (code points here).
+		if r := []rune(s); len(r) > 10 {
+			s = string(r[:10])
 		}
-		return s
+		return s, nil
 	default:
-		return ""
+		return "", nil
 	}
 }
 
-// jsonStringify serializes v. It returns ok=false when v is not serializable
-// (undefined, a function, or a symbol) at the top level, so callers can emit
-// undefined.
-func (i *Interpreter) jsonStringify(ctx context.Context, b *strings.Builder, key string, v Value, indent, cur string, seen map[*Object]bool) (bool, error) {
-	// Honor a toJSON method when present.
-	if o, ok := v.(*Object); ok {
-		if tj, _ := o.GetStr(ctx, "toJSON"); tj != nil {
-			if fn, ok := tj.(*Object); ok && fn.IsCallable() {
-				res, err := fn.fn.call(ctx, o, []Value{String(key)})
-				if err != nil {
-					return false, err
-				}
-				v = res
+// serializeProperty implements SerializeJSONProperty (§25.5.2.1): it fetches
+// holder[key], applies toJSON and the replacer, unwraps primitive wrappers, and
+// serializes the result. ok=false means the value is omitted (undefined, a
+// function, or a symbol).
+func (st *jsonState) serializeProperty(ctx context.Context, b *strings.Builder, holder *Object, key, cur string) (bool, error) {
+	i := st.i
+	value, err := holder.GetStr(ctx, key)
+	if err != nil {
+		return false, err
+	}
+
+	// toJSON: applies to Objects and BigInts, incl. primitive BigInts whose
+	// toJSON is inherited from BigInt.prototype (§25.5.2.1 step 2).
+	if _, isObj := value.(*Object); isObj || isBigIntValue(value) {
+		tj, err := i.getProperty(ctx, value, StrKey("toJSON"))
+		if err != nil {
+			return false, err
+		}
+		if fn, ok := tj.(*Object); ok && fn.IsCallable() {
+			value, err = fn.fn.call(ctx, value, []Value{String(key)})
+			if err != nil {
+				return false, err
 			}
 		}
 	}
 
-	switch x := v.(type) {
+	// ReplacerFunction: Call(replacer, holder, «key, value»).
+	if st.replacerFn != nil {
+		value, err = st.replacerFn.fn.call(ctx, holder, []Value{String(key), value})
+		if err != nil {
+			return false, err
+		}
+	}
+
+	// Unwrap Number/String/Boolean/BigInt primitive wrappers.
+	if o, ok := value.(*Object); ok {
+		switch o.class {
+		case "Number":
+			f, err := i.ToNumberV(ctx, o)
+			if err != nil {
+				return false, err
+			}
+			value = Number(f)
+		case "String":
+			s, err := i.ToStringV(ctx, o)
+			if err != nil {
+				return false, err
+			}
+			value = String(s)
+		case "Boolean":
+			value = o.primitive
+		case "BigInt":
+			value = o.primitive
+		}
+	}
+
+	switch x := value.(type) {
 	case Undefined, *Symbol:
 		return false, nil
 	case Null:
@@ -124,38 +252,47 @@ func (i *Interpreter) jsonStringify(ctx context.Context, b *strings.Builder, key
 	case String:
 		writeJSONString(b, string(x))
 		return true, nil
+	case *BigInt:
+		return false, i.throwError(ctx, "TypeError", "Do not know how to serialize a BigInt")
 	case *Object:
 		if x.IsCallable() {
 			return false, nil
 		}
-		if seen[x] {
+		if st.seen[x] {
 			return false, i.throwError(ctx, "TypeError", "Converting circular structure to JSON")
 		}
-		seen[x] = true
-		defer delete(seen, x)
+		st.seen[x] = true
+		defer delete(st.seen, x)
 		if x.isArray {
-			return true, i.jsonArray(ctx, b, x, indent, cur, seen)
+			return true, st.serializeArray(ctx, b, x, cur)
 		}
-		return true, i.jsonObject(ctx, b, x, indent, cur, seen)
+		return true, st.serializeObject(ctx, b, x, cur)
 	default:
 		return false, nil
 	}
 }
 
-func (i *Interpreter) jsonArray(ctx context.Context, b *strings.Builder, o *Object, indent, cur string, seen map[*Object]bool) error {
+// isBigIntValue reports whether value is a primitive BigInt.
+func isBigIntValue(value Value) bool {
+	_, ok := value.(*BigInt)
+	return ok
+}
+
+// serializeArray implements SerializeJSONArray (§25.5.2.4).
+func (st *jsonState) serializeArray(ctx context.Context, b *strings.Builder, o *Object, cur string) error {
 	if len(o.elems) == 0 {
 		b.WriteString("[]")
 		return nil
 	}
-	next := cur + indent
+	next := cur + st.gap
 	b.WriteByte('[')
-	for idx, e := range o.elems {
+	for idx := range o.elems {
 		if idx > 0 {
 			b.WriteByte(',')
 		}
-		writeNewlineIndent(b, indent, next)
+		writeNewlineIndent(b, st.gap, next)
 		var sub strings.Builder
-		ok, err := i.jsonStringify(ctx, &sub, intToStr(idx), e, indent, next, seen)
+		ok, err := st.serializeProperty(ctx, &sub, o, intToStr(idx), next)
 		if err != nil {
 			return err
 		}
@@ -165,26 +302,34 @@ func (i *Interpreter) jsonArray(ctx context.Context, b *strings.Builder, o *Obje
 			b.WriteString("null")
 		}
 	}
-	writeNewlineIndent(b, indent, cur)
+	writeNewlineIndent(b, st.gap, cur)
 	b.WriteByte(']')
 	return nil
 }
 
-func (i *Interpreter) jsonObject(ctx context.Context, b *strings.Builder, o *Object, indent, cur string, seen map[*Object]bool) error {
-	next := cur + indent
+// serializeObject implements SerializeJSONObject (§25.5.2.5).
+func (st *jsonState) serializeObject(ctx context.Context, b *strings.Builder, o *Object, cur string) error {
+	next := cur + st.gap
+
+	// K = PropertyList (array replacer) or the object's own enumerable keys.
+	var keys []string
+	if st.propList != nil {
+		keys = st.propList
+	} else {
+		for _, name := range o.OwnKeys() {
+			p, ok := o.getOwn(StrKey(name))
+			if !ok || !p.Enumerable {
+				continue
+			}
+			keys = append(keys, name)
+		}
+	}
+
 	b.WriteByte('{')
 	first := true
-	for _, name := range o.OwnKeys() {
-		p, ok := o.getOwn(StrKey(name))
-		if !ok || !p.Enumerable {
-			continue
-		}
-		val, err := o.GetStr(ctx, name)
-		if err != nil {
-			return err
-		}
+	for _, name := range keys {
 		var sub strings.Builder
-		serOK, err := i.jsonStringify(ctx, &sub, name, val, indent, next, seen)
+		serOK, err := st.serializeProperty(ctx, &sub, o, name, next)
 		if err != nil {
 			return err
 		}
@@ -195,16 +340,16 @@ func (i *Interpreter) jsonObject(ctx context.Context, b *strings.Builder, o *Obj
 			b.WriteByte(',')
 		}
 		first = false
-		writeNewlineIndent(b, indent, next)
+		writeNewlineIndent(b, st.gap, next)
 		writeJSONString(b, name)
 		b.WriteByte(':')
-		if indent != "" {
+		if st.gap != "" {
 			b.WriteByte(' ')
 		}
 		b.WriteString(sub.String())
 	}
 	if !first {
-		writeNewlineIndent(b, indent, cur)
+		writeNewlineIndent(b, st.gap, cur)
 	}
 	b.WriteByte('}')
 	return nil
@@ -434,6 +579,10 @@ func (p *jsonParser) parseString(ctx context.Context) (string, error) {
 				return "", p.errf(ctx, "Bad escape in JSON")
 			}
 			p.pos++
+		case c < 0x20:
+			// Unescaped control characters U+0000-U+001F are not permitted in a
+			// JSONString (§25.5.1 JSON grammar).
+			return "", p.errf(ctx, "Bad control character in string literal in JSON")
 		default:
 			b.WriteByte(c)
 			p.pos++
@@ -462,135 +611,6 @@ func (p *jsonParser) parseNumber(ctx context.Context) (Value, error) {
 // ---------------------------------------------------------------------------
 // Replacer (stringify) and reviver (parse)
 // ---------------------------------------------------------------------------
-
-// applyReplacer transforms a value tree per JSON.stringify's replacer argument.
-// A function replacer is invoked for every (key, value) pair top-down; a value
-// it maps to undefined is omitted. An array replacer is a property allowlist for
-// objects. It returns the transformed value and whether the top-level value
-// should be serialized at all.
-func (i *Interpreter) applyReplacer(ctx context.Context, value, replacer Value) (Value, bool, error) {
-	if fn, ok := replacer.(*Object); ok && fn.IsCallable() {
-		holder := NewObject(i.objectProto)
-		holder.SetData("", value)
-		out, keep, err := i.replaceWalk(ctx, holder, "", value, fn, map[*Object]bool{}, 0)
-		return out, keep, err
-	}
-	if arr, ok := replacer.(*Object); ok && arr.isArray {
-		allow := map[string]bool{}
-		for _, e := range arr.elems {
-			switch k := e.(type) {
-			case String:
-				allow[string(k)] = true
-			case Number:
-				allow[NumberToString(float64(k))] = true
-			}
-		}
-		return i.filterKeys(ctx, value, allow, map[*Object]bool{}), true, nil
-	}
-	return value, true, nil
-}
-
-// replaceWalk applies a function replacer recursively. holder is the object/
-// array containing key; value is holder[key]. seen guards against cyclic output
-// (a circular structure throws a TypeError) and depth bounds runaway nesting
-// from a generative replacer (throws a RangeError, as engines do).
-func (i *Interpreter) replaceWalk(ctx context.Context, holder *Object, key string, value Value, fn *Object, seen map[*Object]bool, depth int) (Value, bool, error) {
-	if depth > 4000 {
-		return nil, false, i.throwError(ctx, "RangeError", "Maximum call stack size exceeded")
-	}
-	// toJSON is honored before the replacer sees the value.
-	if o, ok := value.(*Object); ok {
-		if tj, _ := o.GetStr(ctx, "toJSON"); tj != nil {
-			if m, ok := tj.(*Object); ok && m.IsCallable() {
-				r, err := m.fn.call(ctx, o, []Value{String(key)})
-				if err != nil {
-					return nil, false, err
-				}
-				value = r
-			}
-		}
-	}
-	res, err := fn.fn.call(ctx, holder, []Value{String(key), value})
-	if err != nil {
-		return nil, false, err
-	}
-	if IsUndefined(res) {
-		return Undef, false, nil
-	}
-	switch v := res.(type) {
-	case *Object:
-		if v.IsCallable() {
-			return Undef, false, nil
-		}
-		if seen[v] {
-			return nil, false, i.throwError(ctx, "TypeError", "Converting circular structure to JSON")
-		}
-		seen[v] = true
-		defer delete(seen, v)
-		if v.isArray {
-			out := i.newArray(nil)
-			for idx := range v.elems {
-				// The replacer sees holes as undefined (array Get over 0..len).
-				sub, keep, err := i.replaceWalk(ctx, v, intToStr(idx), elemAt(v, idx), fn, seen, depth+1)
-				if err != nil {
-					return nil, false, err
-				}
-				if keep {
-					out.elems = append(out.elems, sub)
-				} else {
-					out.elems = append(out.elems, Nul)
-				}
-			}
-			return out, true, nil
-		}
-		out := NewObject(i.objectProto)
-		for _, name := range v.OwnKeys() {
-			if p, ok := v.getOwn(StrKey(name)); ok && p.Enumerable {
-				ev, _ := v.GetStr(ctx, name)
-				sub, keep, err := i.replaceWalk(ctx, v, name, ev, fn, seen, depth+1)
-				if err != nil {
-					return nil, false, err
-				}
-				if keep {
-					out.SetData(name, sub)
-				}
-			}
-		}
-		return out, true, nil
-	default:
-		return res, true, nil
-	}
-}
-
-// filterKeys returns a copy of value where objects retain only allowlisted
-// keys (arrays and their elements pass through).
-func (i *Interpreter) filterKeys(ctx context.Context, value Value, allow map[string]bool, seen map[*Object]bool) Value {
-	o, ok := value.(*Object)
-	if !ok || o.IsCallable() || seen[o] {
-		return value
-	}
-	seen[o] = true
-	defer delete(seen, o)
-	if o.isArray {
-		out := i.newArray(nil)
-		for _, e := range o.elems {
-			out.elems = append(out.elems, i.filterKeys(ctx, e, allow, seen))
-		}
-		return out
-	}
-	out := NewObject(i.objectProto)
-	for _, name := range o.OwnKeys() {
-		if !allow[name] {
-			continue
-		}
-		if p, ok := o.getOwn(StrKey(name)); ok && p.Enumerable {
-			ev, _ := o.GetStr(ctx, name)
-			out.SetData(name, i.filterKeys(ctx, ev, allow, seen))
-		}
-	}
-	return out
-}
-
 // jsonRevive applies a reviver function bottom-up: children are revived before
 // their parent, and a child revived to undefined is deleted.
 func (i *Interpreter) jsonRevive(ctx context.Context, holder *Object, key string, reviver *Object) (Value, error) {
