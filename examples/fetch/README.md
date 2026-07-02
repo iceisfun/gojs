@@ -40,3 +40,29 @@ Done.
    `AbortError`.
 
 Because the demo server runs on `127.0.0.1`, no network access is required.
+
+## Walling off the network — `NetProvider`
+
+Every dial made by `fetch` (and `sse`/`websocket`) — and therefore every DNS
+lookup — passes through the VM's `NetProvider`, the single egress wall. This
+example installs the pass-through default; wrap `DialContext` to enforce a
+policy:
+
+```go
+// Allowlist: the script may only reach api.mygame.com.
+type allowlist struct{ d net.Dialer }
+func (a allowlist) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+    host, _, _ := net.SplitHostPort(addr)
+    if host != "api.mygame.com" {
+        return nil, fmt.Errorf("egress to %s denied", host)
+    }
+    return a.d.DialContext(ctx, network, addr)
+}
+
+vm := gojs.New(gojs.WithNetProvider(allowlist{}))
+```
+
+The same seam makes network tests hermetic: a `NetProvider` that dials every
+address to a local `httptest.Server` lets a script request
+`https://api.example.com` and actually reach your loopback server — no real DNS,
+no outbound sockets (see `netprovider_test.go`).

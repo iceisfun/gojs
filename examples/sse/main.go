@@ -31,6 +31,9 @@ func main() {
 		gojs.WithPrintProvider(gojs.NewDefaultPrintProvider()),
 		gojs.WithTimeProvider(gojs.NewDefaultTimeProvider()),
 		gojs.WithTimerProvider(gojs.NewDefaultTimerProvider()),
+		// Route the SSE stream's dial (and DNS) through the egress wall.
+		// Pass-through here; wrap DialContext to allowlist or deny.
+		gojs.WithNetProvider(gojs.NewDefaultNetProvider()),
 	)
 	defer vm.Close()
 

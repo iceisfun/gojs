@@ -80,6 +80,10 @@ func main() {
 		gojs.WithPrintProvider(gojs.NewDefaultPrintProvider()),
 		gojs.WithTimeProvider(gojs.NewDefaultTimeProvider()),
 		gojs.WithTimerProvider(gojs.NewDefaultTimerProvider()),
+		// The egress wall: every fetch/sse/websocket dial (and its DNS) goes
+		// through this. NewDefaultNetProvider is pass-through; wrap its
+		// DialContext to allowlist hosts, pin addresses, or deny.
+		gojs.WithNetProvider(gojs.NewDefaultNetProvider()),
 	)
 	defer vm.Close()
 

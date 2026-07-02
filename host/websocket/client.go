@@ -407,8 +407,11 @@ func dial(ctx context.Context, rawURL, protocols string, opts options) (net.Conn
 	}
 	address := net.JoinHostPort(host, port)
 
-	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	dialContext := opts.dial
+	if dialContext == nil {
+		dialContext = (&net.Dialer{}).DialContext
+	}
+	conn, err := dialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, nil, "", "", err
 	}

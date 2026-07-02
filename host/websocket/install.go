@@ -30,7 +30,9 @@
 package websocket
 
 import (
+	"context"
 	"crypto/tls"
+	"net"
 	"time"
 
 	"github.com/iceisfun/gojs"
@@ -52,6 +54,9 @@ type options struct {
 	closeTimeout     time.Duration
 	tlsConfig        *tls.Config
 	origin           string
+	// dial, when set, establishes the underlying TCP connection — the VM's
+	// NetProvider. nil means dial directly with net.Dialer.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func defaultOptions() options {
@@ -121,6 +126,11 @@ func Install(vm *gojs.VM, opts ...Option) error {
 	cfg := defaultOptions()
 	for _, o := range opts {
 		o(&cfg)
+	}
+	// Route the underlying dial through the VM's NetProvider when installed, so
+	// the host controls WebSocket egress (and DNS) too.
+	if np := vm.NetProvider(); np != nil {
+		cfg.dial = np.DialContext
 	}
 	reg := &registry{vm: vm, opts: cfg, conns: map[int]*clientConn{}}
 

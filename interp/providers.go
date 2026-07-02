@@ -3,6 +3,7 @@ package interp
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -207,3 +208,42 @@ func (*DefaultOsProvider) Arch() string {
 
 // Pid returns the process id.
 func (*DefaultOsProvider) Pid() int { return os.Getpid() }
+
+// ---------------------------------------------------------------------------
+// NetProvider — outbound network dialing (the single egress wall)
+// ---------------------------------------------------------------------------
+
+// NetProvider is the one choke point for outbound connections made by the
+// networking host packages (host/fetch, host/sse, host/websocket). Because every
+// dial — and therefore every DNS resolution — passes through DialContext, the
+// host owns network egress: it can allowlist destinations, pin addresses, use a
+// custom resolver or proxy, meter, log, or deny outright.
+//
+// It is opt-in and orthogonal to the per-package client/dialer options: when a
+// NetProvider is installed, a net package that builds its own default client
+// routes dialing through it; a client the host supplied explicitly (e.g.
+// fetch.WithClient) is left untouched, since that is the host taking direct
+// control. Without a NetProvider, packages dial normally — but they are opt-in to
+// begin with, so nothing reaches the network unless the host installed them.
+type NetProvider interface {
+	// DialContext connects to addr ("host:port") over network ("tcp", "tcp4", …).
+	// The signature matches net.Dialer.DialContext so it drops into
+	// http.Transport.DialContext and direct dialers alike.
+	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// DefaultNetProvider is a pass-through NetProvider backed by net.Dialer — the
+// "just enable the wall" default. Wrap or replace its DialContext to enforce a
+// policy (allowlist, custom resolver, proxy, deny).
+type DefaultNetProvider struct {
+	// Dialer is the underlying dialer; the zero value is a plain net.Dialer.
+	Dialer net.Dialer
+}
+
+// NewDefaultNetProvider returns a pass-through NetProvider that dials normally.
+func NewDefaultNetProvider() *DefaultNetProvider { return &DefaultNetProvider{} }
+
+// DialContext dials through the underlying net.Dialer.
+func (p *DefaultNetProvider) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return p.Dialer.DialContext(ctx, network, addr)
+}

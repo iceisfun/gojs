@@ -129,10 +129,20 @@ func Install(vm *gojs.VM, opts ...Option) error {
 	cfg := config{
 		retry:       DefaultRetry,
 		maxAttempts: 0,
-		client:      &http.Client{}, // no Timeout: streams are long-lived
 	}
 	for _, o := range opts {
 		o(&cfg)
+	}
+	if cfg.client == nil {
+		// Default client (no Timeout: streams are long-lived). Route dialing
+		// through the VM's NetProvider when one is installed, so the host controls
+		// egress; WithHTTPClient (a host-supplied client) is left untouched.
+		cfg.client = &http.Client{}
+		if np := vm.NetProvider(); np != nil {
+			tr := http.DefaultTransport.(*http.Transport).Clone()
+			tr.DialContext = np.DialContext
+			cfg.client.Transport = tr
+		}
 	}
 
 	reg := &registry{vm: vm, cfg: cfg, streams: map[int64]*stream{}}

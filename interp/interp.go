@@ -44,6 +44,7 @@ type Interpreter struct {
 	timer   TimerProvider
 	clock   TimeProvider
 	os      OsProvider
+	net     NetProvider
 
 	// security holds opt-in hardening switches (see Security / WithSecurity).
 	security Security
@@ -205,6 +206,17 @@ func WithTimerProvider(p TimerProvider) Option {
 func WithOsProvider(p OsProvider) Option {
 	return func(i *Interpreter) { i.os = p }
 }
+
+// WithNetProvider routes outbound dialing done by the networking host packages
+// (host/fetch, host/sse, host/websocket) through p — the single egress wall (and
+// a convenient test seam; point it at a loopback server). See [NetProvider].
+func WithNetProvider(p NetProvider) Option {
+	return func(i *Interpreter) { i.net = p }
+}
+
+// NetProvider returns the configured outbound-dial provider, or nil. Networking
+// host packages consult it when building their default client/dialer.
+func (i *Interpreter) NetProvider() NetProvider { return i.net }
 
 // PrintProvider returns the configured console-output sink, or nil. It lets host
 // packages (e.g. host/process's process.stdout) route their output through the

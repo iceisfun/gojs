@@ -81,8 +81,16 @@ func Install(vm *gojs.VM, opts ...Option) error {
 	}
 	if cfg.client == nil {
 		// A default client: default transport (transparent gzip/deflate), follow
-		// redirects, no overall timeout (abort provides cancellation).
+		// redirects, no overall timeout (abort provides cancellation). When the VM
+		// has a NetProvider installed, route dialing (and thus DNS) through it so
+		// the host controls network egress; a client supplied via WithClient is
+		// left untouched (the host is already in control there).
 		cfg.client = &http.Client{}
+		if np := vm.NetProvider(); np != nil {
+			tr := http.DefaultTransport.(*http.Transport).Clone()
+			tr.DialContext = np.DialContext
+			cfg.client.Transport = tr
+		}
 	}
 
 	native := vm.NewPlainObject()

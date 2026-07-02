@@ -78,6 +78,7 @@ clock, or schedule timers.
 | `TimerProvider`   | `setTimeout` / `setInterval` scheduling    | `NewDefaultTimerProvider()` |
 | `ModuleProvider`  | `require(specifier)` module loading        | `NewMapModuleProvider`, `NewDirModuleProvider` |
 | `OsProvider`      | `process` env / cwd / exit / platform / arch / pid | `NewDefaultOsProvider()`, `NewFilteredOsProvider(filter)` |
+| `NetProvider`     | outbound dialing/DNS for `fetch`/`sse`/`websocket` | `NewDefaultNetProvider()` (pass-through; wrap to allowlist/deny) |
 
 Resource use is bounded with `WithLimits(Limits{MaxCallDepth, MaxSteps})`:
 recursion raises a catchable `RangeError`, and the step budget is an

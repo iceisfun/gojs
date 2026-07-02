@@ -48,6 +48,16 @@ var (
 	NewFilteredOsProvider = interp.NewFilteredOsProvider
 )
 
+// NetProvider is the single wall for outbound network dialing by the networking
+// host packages (fetch/sse/websocket). Alias for [interp.NetProvider].
+type NetProvider = interp.NetProvider
+
+// Net provider option and default (pass-through) implementation, re-exported.
+var (
+	WithNetProvider      = interp.WithNetProvider
+	NewDefaultNetProvider = interp.NewDefaultNetProvider
+)
+
 // Value type aliases for building/inspecting JavaScript values from Go.
 type (
 	// Object is a JavaScript object (also arrays and functions).

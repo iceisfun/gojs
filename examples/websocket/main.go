@@ -39,6 +39,9 @@ func main() {
 		gojs.WithPrintProvider(gojs.NewDefaultPrintProvider()),
 		gojs.WithTimeProvider(gojs.NewDefaultTimeProvider()),
 		gojs.WithTimerProvider(gojs.NewDefaultTimerProvider()),
+		// The WebSocket client dials through this too. Pass-through here; wrap
+		// DialContext to allowlist hosts or deny egress.
+		gojs.WithNetProvider(gojs.NewDefaultNetProvider()),
 	)
 	defer vm.Close()
 
