@@ -167,6 +167,93 @@ func skipReason(m Meta) string {
 	return ""
 }
 
+// hostFeatureSkip returns a non-empty reason when a test needs a host-environment
+// capability the Test262 runner intentionally does not provide, so it is skipped
+// rather than counted as a conformance failure. These are host features, not
+// language behavior gojs implements:
+//
+//   - $262.createRealm: gojs has a single realm per Interpreter, so cross-realm
+//     tests are unsupportable (documented under wontfix/). Every such test calls
+//     $262.createRealm — with $262 always installed by installT262Host, that call
+//     throws "$262.createRealm is not a function" at runtime; we classify it up
+//     front by source (and by the cross-realm feature tag as a backstop).
+//   - print: the runner exposes `print` only as a bespoke $DONE sentinel sink for
+//     async tests (see installAsyncDone); it deliberately does not provide a
+//     general `print` host sink. A NON-async test that references the bare `print`
+//     global therefore needs a capability we don't provide. Skipping such tests in
+//     the classification path (rather than installing a global print) keeps the
+//     async sentinel `print` untouched and avoids double-installing it.
+func hostFeatureSkip(src string, m Meta) string {
+	if strings.Contains(src, "$262.createRealm") {
+		return "host:$262.createRealm"
+	}
+	for _, f := range m.Features {
+		if f == "cross-realm" {
+			return "feature:cross-realm"
+		}
+	}
+	if !m.Flags["async"] && referencesPrintGlobal(src) {
+		return "host:print"
+	}
+	return ""
+}
+
+// referencesPrintGlobal reports whether src uses the bare `print` global as a
+// value or a call (e.g. `print(x)` or `Array.print = print`). It deliberately
+// does NOT match property access (".print"), longer identifiers ("printCodePoint",
+// "printShape", "unprintable"), or the word "print" appearing in comments/prose
+// ("... should not print a time zone"), so genuinely-supported tests are not
+// skipped merely because the substring "print" occurs in text.
+func referencesPrintGlobal(src string) bool {
+	const p = "print"
+	for i := 0; i+len(p) <= len(src); i++ {
+		if src[i:i+len(p)] != p {
+			continue
+		}
+		// Reject property access and larger identifiers on the left.
+		if i > 0 {
+			if c := src[i-1]; isIdentPart(c) || c == '.' || c == '$' {
+				continue
+			}
+		}
+		j := i + len(p)
+		// Reject larger identifiers on the right (printCodePoint, printShape).
+		if j < len(src) && isIdentPart(src[j]) {
+			continue
+		}
+		// Call/value use: the token is immediately followed (ignoring inline
+		// whitespace) by code punctuation that never introduces prose.
+		k := j
+		for k < len(src) && (src[k] == ' ' || src[k] == '\t') {
+			k++
+		}
+		if k < len(src) {
+			switch src[k] {
+			case '(', ';', ',', ')':
+				return true
+			}
+		}
+		// Value use on the right of an assignment/comparison: `= print`.
+		h := i - 1
+		for h >= 0 && (src[h] == ' ' || src[h] == '\t') {
+			h--
+		}
+		if h >= 0 && src[h] == '=' {
+			return true
+		}
+	}
+	return false
+}
+
+// isIdentPart reports whether c can appear inside a JS identifier (ASCII subset,
+// sufficient for the "print" boundary checks above).
+func isIdentPart(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
+}
+
 // Run executes a single test file, returning one Result per applicable mode
 // (strict/sloppy). It never panics; failures are captured as Fail outcomes.
 func Run(path string) []Result {
@@ -178,6 +265,9 @@ func Run(path string) []Result {
 	m := ParseMeta(src)
 
 	if reason := skipReason(m); reason != "" {
+		return []Result{{Path: path, Outcome: Skip, Reason: reason}}
+	}
+	if reason := hostFeatureSkip(src, m); reason != "" {
 		return []Result{{Path: path, Outcome: Skip, Reason: reason}}
 	}
 
