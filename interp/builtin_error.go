@@ -77,6 +77,7 @@ func (i *Interpreter) initError() {
 	}
 
 	i.initAggregateError(ctor)
+	i.initErrorStack(i.errorProto)
 }
 
 // newErrorCtor builds an Error-family constructor whose instances use proto.
@@ -101,7 +102,9 @@ func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 				obj.SetHidden("cause", c)
 			}
 		}
-		obj.SetHidden("stack", String(name+": captured stack unavailable"))
+		// The stack trace lives in an internal slot, exposed via the
+		// Error.prototype.stack accessor rather than an own data property.
+		setErrorStack(obj, name+": captured stack unavailable")
 		return obj, nil
 	}
 	return i.newNativeCtor(name, 1, build, build)
@@ -116,7 +119,7 @@ func (i *Interpreter) newError(name, message string) *Object {
 	obj := NewObject(proto)
 	obj.class = "Error"
 	obj.SetHidden("message", String(message))
-	obj.SetHidden("stack", String(name+": "+message))
+	setErrorStack(obj, name+": "+message)
 	return obj
 }
 

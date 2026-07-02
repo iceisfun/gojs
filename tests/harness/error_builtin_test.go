@@ -38,6 +38,42 @@ func TestErrorIsError(t *testing.T) {
 	`)
 }
 
+// Error.prototype.stack is an inherited accessor; instances have no own stack.
+func TestErrorStackAccessor(t *testing.T) {
+	Expect(t, `
+		var d = Object.getOwnPropertyDescriptor(Error.prototype, "stack");
+		assert.sameValue(typeof d.get, "function");
+		assert.sameValue(typeof d.set, "function");
+		assert.sameValue(d.get.name, "get stack");
+		assert.sameValue(d.set.name, "set stack");
+		assert.sameValue(d.get.length, 0);
+		assert.sameValue(d.set.length, 1);
+		assert.sameValue(d.enumerable, false);
+		assert.sameValue(d.configurable, true);
+
+		var err = new TypeError("x");
+		assert.sameValue(err.hasOwnProperty("stack"), false, "no own stack at construction");
+		assert.sameValue(typeof err.stack, "string", "inherited accessor yields a string");
+		assert.sameValue(d.get.call({}), undefined, "no [[ErrorData]]");
+		assert.throws(TypeError, function () { d.get.call(1); });
+
+		// Setter stamps an own writable/enumerable/configurable data property.
+		err.stack = "custom";
+		var od = Object.getOwnPropertyDescriptor(err, "stack");
+		assert.sameValue(od.value, "custom");
+		assert.sameValue(od.writable, true);
+		assert.sameValue(od.enumerable, true);
+		assert.sameValue(od.configurable, true);
+		assert.sameValue(err.stack, "custom", "own data property shadows accessor");
+
+		assert.throws(TypeError, function () { d.set.call(err, 123); }, "non-string value");
+		assert.throws(TypeError, function () { Error.prototype.stack = ""; }, "set on home object");
+		var plain = {};
+		d.set.call(plain, "on-plain");
+		assert.sameValue(plain.stack, "on-plain");
+	`)
+}
+
 // AggregateError constructor semantics (§20.5.7).
 func TestAggregateErrorBasics(t *testing.T) {
 	Expect(t, `

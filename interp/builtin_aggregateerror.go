@@ -41,7 +41,7 @@ func (i *Interpreter) initAggregateError(errorCtor *Object) {
 		// Step 6: install the "errors" array.
 		obj.defineOwn(StrKey("errors"), &Property{Value: i.newArray(errs), Writable: true, Enumerable: false, Configurable: true})
 
-		obj.SetHidden("stack", String("AggregateError: captured stack unavailable"))
+		setErrorStack(obj, "AggregateError: captured stack unavailable")
 		return obj, nil
 	}
 
