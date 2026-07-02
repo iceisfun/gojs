@@ -77,7 +77,54 @@ func (p *parser) parseClassAtom() classAtom {
 	if p.peek() == '\\' {
 		return p.parseClassEscape()
 	}
+	if p.flags.UnicodeSets {
+		p.checkClassSetChar()
+	}
 	return classAtom{R: p.advance(), IsChar: true}
+}
+
+// checkClassSetChar enforces the v-mode ClassSetCharacter restrictions on the
+// literal source character at the cursor (ECMA-262 §22.2.1). An unescaped
+// ClassSetCharacter must not be a ClassSetSyntaxCharacter, and must not begin a
+// ClassSetReservedDoublePunctuator (the [lookahead ∉ …] guard). These are the
+// "breaking changes from u to v": patterns valid under /u are SyntaxErrors
+// under /v. u-mode and default-mode class parsing never reach this check, since
+// v-mode operators (&&, --), ranges (-), and nested classes ([) are consumed by
+// parseClassSetV/parseClassSetMember before a literal atom is read here.
+func (p *parser) checkClassSetChar() {
+	c := p.peek()
+	if classSetSyntaxChar(c) {
+		p.fail("invalid character in character class")
+	}
+	if classSetDoublePunctChar(c) && p.peekAt(1) == c {
+		p.fail("invalid set operation")
+	}
+}
+
+// classSetSyntaxChar reports whether r is a ClassSetSyntaxCharacter (§22.2.1):
+//
+//	( ) [ ] { } / - \ |
+//
+// Inside a v-mode class these must be written escaped to be matched literally.
+func classSetSyntaxChar(r rune) bool {
+	switch r {
+	case '(', ')', '[', ']', '{', '}', '/', '-', '\\', '|':
+		return true
+	}
+	return false
+}
+
+// classSetDoublePunctChar reports whether a doubled r forms a
+// ClassSetReservedDoublePunctuator (§22.2.1):
+//
+//	&& !! ## $$ %% ** ++ ,, .. :: ;; << == >> ?? @@ ^^ `` ~~
+func classSetDoublePunctChar(r rune) bool {
+	switch r {
+	case '&', '!', '#', '$', '%', '*', '+', ',', '.',
+		':', ';', '<', '=', '>', '?', '@', '^', '`', '~':
+		return true
+	}
+	return false
 }
 
 // parseClassEscape parses '\...' within a character class (p.pos at the backslash).
