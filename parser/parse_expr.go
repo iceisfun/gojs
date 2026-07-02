@@ -99,6 +99,10 @@ func (p *parser) parseAssignExpr() ast.Expr {
 
 	if isAssignOp(p.cur().Type) {
 		opTok := p.next()
+		// Static Semantics: the LHS must be a valid assignment target. A simple
+		// assignment (=) additionally permits a refinable destructuring pattern;
+		// a compound assignment permits only a simple target.
+		p.validateAssignExprTarget(left, opTok.Type)
 		value := p.parseAssignExpr()
 		return &ast.AssignExpr{Target: left, OpPos: opTok.Pos, Op: opTok.Type, Value: value}
 	}
@@ -189,6 +193,9 @@ func (p *parser) parseUnary() ast.Expr {
 	case token.INC, token.DEC:
 		op := p.next()
 		operand := p.parseUnary()
+		// The operand of a prefix update expression must be a simple assignment
+		// target (Static Semantics: UpdateExpression early errors).
+		p.checkSimpleAssignmentTarget(operand)
 		return &ast.UpdateExpr{OpPos: op.Pos, Op: op.Type, Operand: operand, Prefix: true}
 	case token.AWAIT:
 		op := p.next()
@@ -208,6 +215,9 @@ func (p *parser) parsePostfix() ast.Expr {
 	expr := p.parseLeftHandSide()
 	if (p.at(token.INC) || p.at(token.DEC)) && !p.cur().NewlineBefore {
 		op := p.next()
+		// The operand of a postfix update expression must be a simple assignment
+		// target (Static Semantics: UpdateExpression early errors).
+		p.checkSimpleAssignmentTarget(expr)
 		return &ast.UpdateExpr{OpPos: op.Pos, Op: op.Type, Operand: expr, Prefix: false}
 	}
 	return expr

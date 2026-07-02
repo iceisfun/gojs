@@ -567,6 +567,46 @@ func (p *parser) checkBindingPattern(target ast.Expr) {
 	}
 }
 
+// validateAssignExprTarget enforces the AssignmentExpression static-semantics
+// early errors on the left-hand side of an assignment. For a simple assignment
+// (=) the LHS must be a simple assignment target (IdentifierReference or
+// MemberExpression) or a refinable destructuring AssignmentPattern (array or
+// object literal). For a compound assignment (+=, **=, &&=, …) destructuring
+// patterns are not permitted, so the LHS must be a simple assignment target.
+func (p *parser) validateAssignExprTarget(target ast.Expr, op token.Type) {
+	if p.err != nil {
+		return
+	}
+	if op == token.ASSIGN {
+		p.checkAssignmentTarget(target)
+		return
+	}
+	p.checkSimpleAssignmentTarget(target)
+}
+
+// checkSimpleAssignmentTarget reports an early error unless expr is a simple
+// assignment target: an IdentifierReference or a (non-optional) MemberExpression.
+// It is used for compound assignment operators and prefix/postfix update
+// expressions (++/--), where an array/object destructuring pattern is not a
+// legal target.
+func (p *parser) checkSimpleAssignmentTarget(expr ast.Expr) {
+	if p.err != nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.Ident:
+		if p.strict && (e.Name == "eval" || e.Name == "arguments") {
+			p.earlyError(e.NamePos, "Assignment to '"+e.Name+"' in strict mode")
+		}
+	case *ast.MemberExpr:
+		if containsOptional(e) {
+			p.earlyError(e.Pos(), "Optional chain may not be an assignment target")
+		}
+	default:
+		p.earlyError(expr.Pos(), "Invalid left-hand side in assignment")
+	}
+}
+
 // checkAssignmentTarget validates an expression used as a for-in/of assignment
 // target: it must be a simple assignment target (Ident, non-optional member
 // access) or a valid destructuring AssignmentPattern (array/object literal).
