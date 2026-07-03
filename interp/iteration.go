@@ -38,6 +38,48 @@ func (i *Interpreter) newIteratorProto(proto *Object, class string, next func() 
 	return it
 }
 
+// newCollectionIterator builds a Map/Set iterator instance. Unlike
+// newIteratorProto, the generator closure is stored in an internal slot keyed by
+// slotKey rather than captured by a per-instance next method. The shared next
+// method lives on proto (installed by defineCollectionIteratorNext) and
+// brand-checks this slot, so calling next on an incompatible receiver — a plain
+// object, the prototype itself, a Map/Set instance, or the other collection's
+// iterator — throws a TypeError as the spec requires (§24.1.5.2, §24.2.6.2).
+// Symbol.iterator is inherited from %Iterator.prototype%.
+func (i *Interpreter) newCollectionIterator(proto *Object, class, slotKey string, next func() (Value, bool)) *Object {
+	it := NewObject(proto)
+	it.class = class
+	it.internal = map[string]any{slotKey: next}
+	return it
+}
+
+// defineCollectionIteratorNext installs the shared, brand-checked next method on
+// a %MapIteratorPrototype%/%SetIteratorPrototype%. It reads the generator closure
+// from this's slotKey internal slot; a receiver lacking that slot throws a
+// TypeError (the required Map/Set Iterator brand check).
+func (i *Interpreter) defineCollectionIteratorNext(proto *Object, slotKey, label string) {
+	i.defineMethod(proto, "next", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, ok := this.(*Object)
+		var gen func() (Value, bool)
+		if ok && o.internal != nil {
+			gen, _ = o.internal[slotKey].(func() (Value, bool))
+		}
+		if gen == nil {
+			return nil, i.throwError(ctx, "TypeError", label+".prototype.next called on incompatible receiver")
+		}
+		res := NewObject(i.objectProto)
+		v, ok := gen()
+		if !ok {
+			res.SetData("value", Undef)
+			res.SetData("done", True)
+			return res, nil
+		}
+		res.SetData("value", v)
+		res.SetData("done", False)
+		return res, nil
+	})
+}
+
 // iterate consumes an iterable, invoking fn for each produced value. It fast-
 // paths arrays and strings, and otherwise drives the Symbol.iterator protocol.
 func (i *Interpreter) iterate(ctx context.Context, iterable Value, fn func(Value) error) error {
