@@ -59,6 +59,20 @@ func TestT262RegexpLiterals(t *testing.T) {
 			skip++ // literal not extractable without executing JS
 			return nil
 		}
+		// Some rejections are RegularExpressionLiteral *lexing* rules (§12.9.5)
+		// enforced by the JS lexer, not Pattern-grammar rules. jsregexp.Compile
+		// parses the pattern as `new RegExp(pat)` would and must ACCEPT these, so
+		// scoring them against Compile alone is a category error — skip them. The
+		// real engine rejects the literals correctly (verified):
+		//   - a raw LineTerminator (LF, CR, U+2028, U+2029) in the body; and
+		//   - a leading '/', since RegularExpressionFirstChar excludes '/' (a
+		//     literal beginning "//..." is a line comment, not a regex).
+		// Both are valid in a pattern string ('/' matches a slash; a
+		// LineTerminator is a PatternCharacter).
+		if wantErr && (strings.ContainsAny(pat, "\n\r\u2028\u2029") || strings.HasPrefix(pat, "/")) {
+			skip++
+			return nil
+		}
 
 		_, cerr := Compile(pat, flags)
 		gotErr := cerr != nil
