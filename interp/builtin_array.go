@@ -91,6 +91,9 @@ func (i *Interpreter) initArray() {
 	// Array.prototype.values (§23.1.3.40), not a distinct copy.
 	if vp, ok := proto.getOwn(StrKey("values")); ok {
 		proto.defineOwn(SymKey(i.symIterator), &Property{Value: vp.Value, Writable: true, Configurable: true})
+		if fn, ok := vp.Value.(*Object); ok {
+			i.arrayValuesFn = fn
+		}
 	}
 
 	// Array.prototype[Symbol.unscopables] (§23.1.3.35): a null-prototype object

@@ -20,6 +20,7 @@ const (
 	agSuspendedStart agState = iota
 	agSuspendedYield
 	agExecuting
+	agDrainingQueue
 	agCompleted
 )
 
@@ -41,59 +42,94 @@ type asyncGenDriver struct {
 	queue   []*asyncGenReq
 }
 
-// enqueue adds a request (AsyncGeneratorEnqueue) and returns its promise.
+// enqueue adds a request and dispatches it per the %AsyncGeneratorPrototype%
+// next/return/throw algorithms (ECMA-262 §27.6.1.2/.3/.4), returning its
+// promise. next/return/throw differ in how they treat a completed or
+// suspended-start generator, so dispatch is by completion mode rather than a
+// single shared resume path.
 func (d *asyncGenDriver) enqueue(c resumeMsg) Value {
 	p, resolve, reject := d.i.newPromise()
-	d.queue = append(d.queue, &asyncGenReq{completion: c, resolve: resolve, reject: reject})
-	d.resumeNext()
+	req := &asyncGenReq{completion: c, resolve: resolve, reject: reject}
+	switch c.mode {
+	case resumeNext:
+		// A completed generator answers next() with { undefined, true } at once,
+		// without queuing.
+		if d.state == agCompleted {
+			resolve(d.i.createIterResult(Undef, true))
+			return p
+		}
+		d.queue = append(d.queue, req)
+		if d.state == agSuspendedStart || d.state == agSuspendedYield {
+			d.resume(c)
+		}
+	case resumeReturn:
+		d.queue = append(d.queue, req)
+		switch d.state {
+		case agSuspendedStart, agCompleted:
+			// The body never resumes; await the return value and then close
+			// (AsyncGeneratorAwaitReturn).
+			d.state = agDrainingQueue
+			d.awaitReturn()
+		case agSuspendedYield:
+			// Resume the suspended yield with a return completion, which the body
+			// unwraps by awaiting the value (AsyncGeneratorUnwrapYieldResumption).
+			d.resume(c)
+		}
+	case resumeThrow:
+		// throw() on a suspended-start generator closes it without resuming.
+		if d.state == agSuspendedStart {
+			d.state = agCompleted
+		}
+		if d.state == agCompleted {
+			reject(c.value)
+			return p
+		}
+		d.queue = append(d.queue, req)
+		if d.state == agSuspendedYield {
+			d.resume(c)
+		}
+	}
 	return p
 }
 
-// resumeNext drives the front request (AsyncGeneratorResumeNext). It is a no-op
-// while the coroutine is executing (an in-flight await will call back in), and
-// settles requests directly once the generator has completed.
-func (d *asyncGenDriver) resumeNext() {
-	if d.state == agExecuting || len(d.queue) == 0 {
-		return
-	}
-	req := d.queue[0]
-	if d.state == agCompleted {
-		d.queue = d.queue[1:]
-		switch req.completion.mode {
-		case resumeThrow:
-			req.reject(req.completion.value)
-		case resumeReturn:
-			req.resolve(d.i.createIterResult(req.completion.value, true))
-		default:
-			req.resolve(d.i.createIterResult(Undef, true))
-		}
-		d.resumeNext()
-		return
-	}
+// resume runs the coroutine one step from a suspended state (AsyncGeneratorResume).
+func (d *asyncGenDriver) resume(c resumeMsg) {
 	d.state = agExecuting
-	d.step(req.completion)
+	d.step(c)
+}
+
+// completeStep settles the front request (AsyncGeneratorCompleteStep): a throw
+// rejects it, otherwise it resolves with a { value, done } iterator result.
+func (d *asyncGenDriver) completeStep(isThrow bool, value Value, done bool) {
+	req := d.queue[0]
+	d.queue = d.queue[1:]
+	if isThrow {
+		req.reject(value)
+	} else {
+		req.resolve(d.i.createIterResult(value, done))
+	}
 }
 
 // step resumes the coroutine once and dispatches on how it next suspends:
-// completion settles the front request, an await schedules a resume when the
-// awaited promise settles, and a yield delivers a result to the front request.
+// completion drains the queue, an await schedules a resume when the awaited
+// promise settles, and a yield delivers a result to the front request.
 func (d *asyncGenDriver) step(msg resumeMsg) {
 	res := d.advance(msg)
 	switch {
 	case res.done:
-		d.state = agCompleted
-		req := d.queue[0]
-		d.queue = d.queue[1:]
+		// The body returned or threw: settle the front request with the final
+		// completion and drain any requests queued while it ran.
+		d.state = agDrainingQueue
 		if res.err != nil {
 			if tv, ok := ThrownValue(res.err); ok {
-				req.reject(tv)
+				d.completeStep(true, tv, true)
 			} else {
-				req.reject(String(res.err.Error()))
+				d.completeStep(true, String(res.err.Error()), true)
 			}
 		} else {
-			req.resolve(d.i.createIterResult(res.value, true))
+			d.completeStep(false, res.value, true)
 		}
-		d.resumeNext()
+		d.drainQueue()
 	case res.awaited:
 		// An `await` inside the body: resolve the operand and resume when it
 		// settles, without delivering anything to the consumer. The request
@@ -109,25 +145,89 @@ func (d *asyncGenDriver) step(msg resumeMsg) {
 		})
 		d.i.promiseThen(awaited, onFulfilled, onRejected)
 	default:
-		// A `yield`: hand { value, done:false } to the front request, then serve
-		// the next queued request if any.
+		// A `yield` (AsyncGeneratorYield): hand { value, done:false } to the front
+		// request. If more requests queued while executing, continue without
+		// suspending and serve the next one; otherwise suspend at the yield.
+		d.completeStep(false, res.value, false)
+		if len(d.queue) > 0 {
+			d.state = agExecuting
+			d.step(d.queue[0].completion)
+			return
+		}
 		d.state = agSuspendedYield
-		req := d.queue[0]
-		d.queue = d.queue[1:]
-		req.resolve(d.i.createIterResult(res.value, false))
-		d.resumeNext()
 	}
+}
+
+// drainQueue settles queued requests after the body has finished
+// (AsyncGeneratorDrainQueue). It stops to await a return request's value; a
+// normal request yields { undefined, true } and a throw rejects.
+func (d *asyncGenDriver) drainQueue() {
+	for len(d.queue) > 0 {
+		c := d.queue[0].completion
+		switch c.mode {
+		case resumeReturn:
+			d.awaitReturn()
+			return
+		case resumeThrow:
+			d.completeStep(true, c.value, true)
+		default:
+			d.completeStep(false, Undef, true)
+		}
+	}
+	d.state = agCompleted
+}
+
+// awaitReturn awaits a return request's value before closing the generator
+// (AsyncGeneratorAwaitReturn). PromiseResolve(%Promise%, value) may throw (e.g.
+// a broken-promise `constructor` getter), which settles the request as a
+// rejection; otherwise the resolved value is delivered once the promise settles.
+func (d *asyncGenDriver) awaitReturn() {
+	value := d.queue[0].completion.value
+	promise, err := d.i.promiseResolve(d.i.ctx, d.i.promiseCtor, value)
+	if err != nil {
+		if tv, ok := ThrownValue(err); ok {
+			d.completeStep(true, tv, true)
+		} else {
+			d.completeStep(true, String(err.Error()), true)
+		}
+		d.drainQueue()
+		return
+	}
+	po, _ := promise.(*Object)
+	onFulfilled := d.i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
+		d.completeStep(false, arg(a, 0), true)
+		d.drainQueue()
+		return Undef, nil
+	})
+	onRejected := d.i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
+		d.completeStep(true, arg(a, 0), true)
+		d.drainQueue()
+		return Undef, nil
+	})
+	d.i.promiseThen(po, onFulfilled, onRejected)
 }
 
 // makeAsyncGenerator builds an async generator object: calling an async
 // generator function returns it without running the body, which advances lazily
 // as next/return/throw requests arrive.
-func (i *Interpreter) makeAsyncGenerator(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
-	_, advance, err := i.startCoroutine(def, closure, homeObj, this, args, false)
+func (i *Interpreter) makeAsyncGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
+	_, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, false)
 	if err != nil {
 		return nil, err
 	}
-	obj := NewObject(i.asyncGeneratorProto)
+	// OrdinaryCreateFromConstructor(fnObj, "%AsyncGeneratorPrototype%"): the
+	// instance's [[Prototype]] is the async generator function's own .prototype
+	// object (which itself inherits from %AsyncGeneratorPrototype%), falling back
+	// to the intrinsic when that property is not an object.
+	instProto := i.asyncGeneratorProto
+	if fnObj != nil {
+		if p, ok := fnObj.getOwn(StrKey("prototype")); ok && !p.Accessor {
+			if po, isObj := p.Value.(*Object); isObj {
+				instProto = po
+			}
+		}
+	}
+	obj := NewObject(instProto)
 	obj.class = "AsyncGenerator"
 	obj.internal = map[string]any{"AsyncGenerator": &asyncGenDriver{i: i, advance: advance, state: agSuspendedStart}}
 	return obj, nil

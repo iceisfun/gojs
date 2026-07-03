@@ -506,6 +506,12 @@ func (p *parser) checkFuncExprName(name string, pos token.Pos, generator, async 
 		if async {
 			p.earlyError(pos, "'await' may not be used as an identifier in this context")
 		}
+	case "eval", "arguments":
+		// A BindingIdentifier may not be `eval` or `arguments` in strict-mode code
+		// (ECMA-262 13.1.1: BindingIdentifier : Identifier early error).
+		if p.strict {
+			p.earlyError(pos, "'"+name+"' may not be used as a binding identifier in strict mode")
+		}
 	case "implements", "interface", "package", "private", "protected", "public", "let", "static":
 		if p.strict {
 			p.earlyError(pos, "'"+name+"' may not be used as an identifier in strict mode")
@@ -562,13 +568,14 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	// initializer's restrictions do not reach in) and its own yield/await
 	// reservation determined by whether it is a generator or async.
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
-	prevSuper, prevNT := p.superCallOK, p.newTargetOK
+	prevSuper, prevProp, prevNT := p.superCallOK, p.superPropOK, p.newTargetOK
 	prevStatic, prevStaticAwait := p.inStaticBlock, p.staticBlockAwait
 	p.inFieldInit = false
 	p.inStaticBlock = false // a nested function has its own arguments scope
 	p.staticBlockAwait = false
 	p.inGenerator, p.inAsync = def.Generator, async
 	p.superCallOK = false // a nested regular function never permits super()
+	p.superPropOK = false // nor super.property (only valid inside a method)
 	p.newTargetOK = true  // but new.target is valid in any function
 	paramsPos := p.cur().Pos
 	def.Params = p.parseParams()
@@ -577,7 +584,7 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	def.Body, def.Strict = p.parseFunctionBody()
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
-	p.superCallOK, p.newTargetOK = prevSuper, prevNT
+	p.superCallOK, p.superPropOK, p.newTargetOK = prevSuper, prevProp, prevNT
 	p.inStaticBlock, p.staticBlockAwait = prevStatic, prevStaticAwait
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)

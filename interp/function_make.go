@@ -72,7 +72,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// next/return/throw yield promises (see makeAsyncGenerator). Checked
 		// before the plain-generator case since it is both Async and Generator.
 		if def.Generator && def.Async && kind == kindNormal {
-			return i.makeAsyncGenerator(def, closure, homeObj, i.bindThisValue(this, strict), args)
+			return i.makeAsyncGenerator(fnObj, def, closure, homeObj, i.bindThisValue(this, strict), args)
 		}
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
@@ -86,7 +86,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			if kind == kindNormal {
 				t = i.bindThisValue(this, strict)
 			}
-			return i.asyncRun(def, closure, homeObj, t, args, kind == kindArrow)
+			return i.asyncRun(fnObj, def, closure, homeObj, t, args, kind == kindArrow)
 		}
 		env := NewEnvironment(closure, true)
 		env.strict = strict
@@ -111,7 +111,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// A named function expression can refer to itself by name.
 		if def.Name != nil && kind == kindNormal {
 			if _, exists := closure.vars[name]; !exists {
-				env.vars[name] = &binding{value: fnObj, mutable: false, initialized: true}
+				env.vars[name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
 			}
 		}
 		// The arguments object is created before the parameters are bound so it is

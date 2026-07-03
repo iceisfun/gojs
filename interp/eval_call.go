@@ -525,6 +525,11 @@ func (i *Interpreter) assignIdent(ctx context.Context, name string, value Value,
 			return i.throwError(ctx, "ReferenceError", "Cannot access '"+name+"' before initialization")
 		}
 		if !b.mutable {
+			// A non-strict immutable binding (named function expression's own name)
+			// swallows the assignment in sloppy code and throws only in strict code.
+			if b.weakImmutable && !env.isStrict() {
+				return nil
+			}
 			return i.throwError(ctx, "TypeError", "Assignment to constant variable.")
 		}
 		b.value = value

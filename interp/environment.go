@@ -96,9 +96,14 @@ func (e *Environment) generator() *generatorState {
 
 // binding is a single variable slot.
 type binding struct {
-	value       Value
-	mutable     bool // false for const
-	initialized bool // false while in the Temporal Dead Zone
+	value   Value
+	mutable bool // false for const
+	// weakImmutable marks a non-strict immutable binding (CreateImmutableBinding
+	// with S = false), i.e. a named function expression's self-name binding.
+	// Assignment throws only in strict-mode code; in sloppy code it is a silent
+	// no-op — unlike const, whose immutable binding is strict (always throws).
+	weakImmutable bool
+	initialized   bool // false while in the Temporal Dead Zone
 }
 
 // NewEnvironment creates a child environment of parent. If fnScope is true, the

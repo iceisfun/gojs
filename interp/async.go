@@ -22,8 +22,8 @@ import (
 // asyncRun invokes an async function: it starts the body coroutine and returns a
 // promise for its eventual completion, driving awaits through the microtask
 // queue.
-func (i *Interpreter) asyncRun(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (Value, error) {
-	_, advance, err := i.startCoroutine(def, closure, homeObj, this, args, arrow)
+func (i *Interpreter) asyncRun(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (Value, error) {
+	_, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, arrow)
 	if err != nil {
 		return nil, err
 	}

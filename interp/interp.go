@@ -181,6 +181,7 @@ type intrinsics struct {
 	asyncGenFuncCtor  *Object // %AsyncGeneratorFunction%
 	asyncFuncProto    *Object // %AsyncFunction.prototype%
 	asyncFuncCtor     *Object // %AsyncFunction%
+	arrayValuesFn     *Object // %Array.prototype.values% (== Array.prototype[Symbol.iterator])
 	dateProto         *Object
 	arrayBufferProto  *Object // %ArrayBuffer.prototype%
 	dataViewProto     *Object // %DataView.prototype%

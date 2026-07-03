@@ -35,6 +35,11 @@ func (i *Interpreter) initGenAsyncFunctions() {
 	i.asyncGenFuncCtor = i.makeFamilyCtor("AsyncGeneratorFunction", i.asyncGenFuncProto, dynAsyncGenerator)
 	i.asyncGenFuncProto.defineOwn(StrKey("prototype"), &Property{Value: i.asyncGeneratorProto, Writable: false, Enumerable: false, Configurable: true})
 	i.tagFamilyProto(i.asyncGenFuncProto, i.asyncGenFuncCtor, "AsyncGeneratorFunction")
+	// %AsyncGeneratorPrototype%.constructor is %AsyncGenerator% (i.e.
+	// %AsyncGeneratorFunction.prototype%), non-writable/non-enumerable/configurable
+	// (ECMA-262 §27.6.1.1). Set here because initAsyncGenerator runs before
+	// asyncGenFuncProto exists.
+	i.asyncGeneratorProto.defineOwn(StrKey("constructor"), &Property{Value: i.asyncGenFuncProto, Writable: false, Enumerable: false, Configurable: true})
 
 	// %AsyncFunction.prototype% has no "prototype" property (async functions are
 	// not constructors and expose no .prototype).

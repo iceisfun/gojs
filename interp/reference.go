@@ -224,6 +224,12 @@ func (i *Interpreter) putRefValue(ctx context.Context, ref *reference, value Val
 			return i.throwError(ctx, "ReferenceError", "Cannot access '"+ref.name+"' before initialization")
 		}
 		if !b.mutable {
+			// A non-strict immutable binding (a named function expression's own
+			// name) swallows the assignment in sloppy code and throws only in
+			// strict code; const's immutable binding is strict and always throws.
+			if b.weakImmutable && !ref.strict {
+				return nil
+			}
 			return i.throwError(ctx, "TypeError", "Assignment to constant variable.")
 		}
 		b.value = value

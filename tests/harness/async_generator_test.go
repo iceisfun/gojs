@@ -76,15 +76,19 @@ func TestAsyncGeneratorIsAsyncIterable(t *testing.T) {
 
 func TestAsyncGeneratorPrototypeShape(t *testing.T) {
 	// next/return/throw live on the shared %AsyncGeneratorPrototype%, not the
-	// instance, and the prototype carries the AsyncGenerator toStringTag.
+	// instance, and the prototype carries the AsyncGenerator toStringTag. An
+	// instance's [[Prototype]] is its function's own .prototype (per
+	// OrdinaryCreateFromConstructor), which in turn inherits from
+	// %AsyncGeneratorPrototype% — so the methods are two levels up.
 	Expect(t, `
 		async function* ag() {}
-		var proto = Object.getPrototypeOf(ag());
+		var proto = Object.getPrototypeOf(Object.getPrototypeOf(ag()));
 		assert.sameValue(proto.hasOwnProperty("next"), true);
 		assert.sameValue(proto.hasOwnProperty("return"), true);
 		assert.sameValue(proto.hasOwnProperty("throw"), true);
 		assert.sameValue(ag().hasOwnProperty("next"), false, "methods are on the prototype");
 		assert.sameValue(proto[Symbol.toStringTag], "AsyncGenerator");
+		assert.sameValue(Object.getPrototypeOf(ag.prototype), proto, "func .prototype inherits from %AsyncGeneratorPrototype%");
 	`)
 }
 

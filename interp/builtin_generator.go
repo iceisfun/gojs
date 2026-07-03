@@ -81,7 +81,7 @@ type yieldMsg struct {
 // this. Because advance blocks the caller while the body runs and the body
 // blocks at each suspension point, only one goroutine touches interpreter state
 // at a time — cooperative coroutining, not parallelism.
-func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (*generatorState, func(resumeMsg) yieldMsg, error) {
+func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (*generatorState, func(resumeMsg) yieldMsg, error) {
 	gs := &generatorState{
 		resume:   make(chan resumeMsg),
 		out:      make(chan yieldMsg),
@@ -100,6 +100,15 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 		}
 	}
 	env.gen = gs
+	// A named generator/async(-generator) function expression can refer to itself
+	// by name through an immutable binding in its body scope (mirroring the plain
+	// named-function-expression case in makeFunction). Methods (homeObj != nil) and
+	// arrows never create this binding.
+	if def.Name != nil && !arrow && homeObj == nil && fnObj != nil {
+		if _, exists := closure.vars[def.Name.Name]; !exists {
+			env.vars[def.Name.Name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
+		}
+	}
 	// Establish the arguments object before binding parameters so it is visible
 	// to default-value initializers (gojs uses an unmapped snapshot, so there is
 	// no aliasing to defer); a parameter named "arguments" shadows it, which
@@ -209,7 +218,7 @@ func generatorInstanceOf(this Value) *generatorInstance {
 // The next/return/throw methods live on %GeneratorPrototype% (see initGenerator);
 // the object only carries the coroutine state in its internal slot.
 func (i *Interpreter) makeGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
-	gs, advance, err := i.startCoroutine(def, closure, homeObj, this, args, false)
+	gs, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, false)
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +357,22 @@ func (i *Interpreter) suspend(gs *generatorState, out yieldMsg) (Value, error) {
 	case msg := <-gs.resume:
 		switch msg.mode {
 		case resumeReturn:
+			// AsyncGeneratorUnwrapYieldResumption (§27.6.3.7): a return completion
+			// resuming an async generator's `yield` awaits its value before closing
+			// the generator. PromiseResolve may itself throw (broken promise), and a
+			// rejection propagates as a throw into the body. An `await` suspension
+			// (out.awaited) is never resumed with a return, so it is excluded.
+			if gs.asyncGen && !out.awaited {
+				promise, err := i.promiseResolve(i.ctx, i.promiseCtor, msg.value)
+				if err != nil {
+					return nil, err
+				}
+				awaited, err := i.doAwait(gs, promise)
+				if err != nil {
+					return nil, err
+				}
+				return nil, &genReturn{value: awaited}
+			}
 			return nil, &genReturn{value: msg.value}
 		case resumeThrow:
 			return nil, NewThrow(msg.value)
