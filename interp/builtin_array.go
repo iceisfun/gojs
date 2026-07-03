@@ -261,50 +261,202 @@ func (i *Interpreter) arrayUnshift(ctx context.Context, this Value, args []Value
 	return Number(float64(len(o.elems))), nil
 }
 
+// arraySlice implements Array.prototype.slice (§23.1.3.25) generically: it
+// coerces `this` with ToObject, resolves the relative start/end against
+// LengthOfArrayLike, allocates the result via ArraySpeciesCreate, and copies only
+// present indices (via [[HasProperty]]/[[Get]]) so holes stay holes.
 func (i *Interpreter) arraySlice(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	n := len(o.elems)
-	start := relIndex(argIntOr(ctx, i, args, 0, 0), n)
-	end := n
-	if !IsUndefined(arg(args, 1)) {
-		end = relIndex(argIntOr(ctx, i, args, 1, n), n)
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	var out []Value
-	for j := start; j < end; j++ {
-		out = append(out, o.elems[j])
+	start, err := i.relativeIndex(ctx, arg(args, 0), length, 0)
+	if err != nil {
+		return nil, err
 	}
-	return i.newArray(out), nil
+	end, err := i.relativeIndex(ctx, arg(args, 1), length, length)
+	if err != nil {
+		return nil, err
+	}
+	count := end - start
+	if count < 0 {
+		count = 0
+	}
+	a, err := i.arraySpeciesCreate(ctx, o, count)
+	if err != nil {
+		return nil, err
+	}
+	n := 0
+	for k := start; k < end; k++ {
+		kKey := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, o, kKey)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			v, err := i.getV(ctx, o, kKey, o)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(n)), v); err != nil {
+				return nil, err
+			}
+		}
+		n++
+	}
+	ok, err := i.setV(ctx, a, StrKey("length"), Number(float64(count)), a)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "Cannot set length of slice result")
+	}
+	return a, nil
 }
 
+// arraySplice implements Array.prototype.splice (§23.1.3.29) generically over an
+// array-like `this`: it computes the actual start/delete-count against
+// LengthOfArrayLike, returns the removed elements in an ArraySpeciesCreate array
+// (preserving holes), then shifts the surviving elements and inserts the new
+// items through [[Get]]/[[Set]]/[[Delete]], updating "length" at the end.
 func (i *Interpreter) arraySplice(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	n := len(o.elems)
-	start := relIndex(argIntOr(ctx, i, args, 0, 0), n)
-	deleteCount := n - start
-	if len(args) >= 2 {
-		deleteCount = argIntOr(ctx, i, args, 1, 0)
-		if deleteCount < 0 {
-			deleteCount = 0
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	actualStart, err := i.relativeIndex(ctx, arg(args, 0), length, 0)
+	if err != nil {
+		return nil, err
+	}
+	var insertCount, actualDeleteCount int
+	switch {
+	case len(args) == 0:
+		insertCount, actualDeleteCount = 0, 0
+	case len(args) == 1:
+		insertCount, actualDeleteCount = 0, length-actualStart
+	default:
+		insertCount = len(args) - 2
+		dc, err := i.argInteger(ctx, args, 1, 0)
+		if err != nil {
+			return nil, err
 		}
-		if deleteCount > n-start {
-			deleteCount = n - start
+		actualDeleteCount = clampIndexF(dc, length-actualStart)
+	}
+	const maxSafe = float64(1<<53 - 1)
+	if float64(length)+float64(insertCount)-float64(actualDeleteCount) > maxSafe {
+		return nil, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+	}
+	a, err := i.arraySpeciesCreate(ctx, o, actualDeleteCount)
+	if err != nil {
+		return nil, err
+	}
+	for k := 0; k < actualDeleteCount; k++ {
+		from := StrKey(strconv.Itoa(actualStart + k))
+		present, err := i.hasV(ctx, o, from)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			v, err := i.getV(ctx, o, from, o)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(k)), v); err != nil {
+				return nil, err
+			}
 		}
 	}
-	removed := make([]Value, 0, deleteCount)
-	removed = append(removed, o.elems[start:start+deleteCount]...)
-	var inserted []Value
+	if ok, err := i.setV(ctx, a, StrKey("length"), Number(float64(actualDeleteCount)), a); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, i.throwError(ctx, "TypeError", "Cannot set length of splice result")
+	}
+	var items []Value
 	if len(args) > 2 {
-		inserted = args[2:]
+		items = args[2:]
 	}
-	tail := append([]Value{}, o.elems[start+deleteCount:]...)
-	o.elems = append(o.elems[:start], append(append([]Value{}, inserted...), tail...)...)
-	return i.newArray(removed), nil
+	itemCount := len(items)
+	switch {
+	case itemCount < actualDeleteCount:
+		for k := actualStart; k < length-actualDeleteCount; k++ {
+			from := StrKey(strconv.Itoa(k + actualDeleteCount))
+			to := StrKey(strconv.Itoa(k + itemCount))
+			if err := i.spliceMove(ctx, o, from, to); err != nil {
+				return nil, err
+			}
+		}
+		for k := length; k > length-actualDeleteCount+itemCount; k-- {
+			if err := i.deletePropertyOrThrow(ctx, o, StrKey(strconv.Itoa(k-1))); err != nil {
+				return nil, err
+			}
+		}
+	case itemCount > actualDeleteCount:
+		for k := length - actualDeleteCount; k > actualStart; k-- {
+			from := StrKey(strconv.Itoa(k + actualDeleteCount - 1))
+			to := StrKey(strconv.Itoa(k + itemCount - 1))
+			if err := i.spliceMove(ctx, o, from, to); err != nil {
+				return nil, err
+			}
+		}
+	}
+	k := actualStart
+	for _, e := range items {
+		if ok, err := i.setV(ctx, o, StrKey(strconv.Itoa(k)), e, o); err != nil {
+			return nil, err
+		} else if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Cannot set property '"+strconv.Itoa(k)+"'")
+		}
+		k++
+	}
+	newLen := length - actualDeleteCount + itemCount
+	if ok, err := i.setV(ctx, o, StrKey("length"), Number(float64(newLen)), o); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, i.throwError(ctx, "TypeError", "Cannot set length")
+	}
+	return a, nil
+}
+
+// spliceMove copies present index `from` to `to` via [[Get]]/[[Set]], or deletes
+// `to` when `from` is a hole (the element shift performed by splice).
+func (i *Interpreter) spliceMove(ctx context.Context, o *Object, from, to PropertyKey) error {
+	present, err := i.hasV(ctx, o, from)
+	if err != nil {
+		return err
+	}
+	if present {
+		v, err := i.getV(ctx, o, from, o)
+		if err != nil {
+			return err
+		}
+		if ok, err := i.setV(ctx, o, to, v, o); err != nil {
+			return err
+		} else if !ok {
+			return i.throwError(ctx, "TypeError", "Cannot set property '"+to.Str+"'")
+		}
+		return nil
+	}
+	return i.deletePropertyOrThrow(ctx, o, to)
+}
+
+// deletePropertyOrThrow implements DeletePropertyOrThrow (§7.3.9).
+func (i *Interpreter) deletePropertyOrThrow(ctx context.Context, o *Object, key PropertyKey) error {
+	ok, err := i.deleteV(ctx, o, key)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return i.throwError(ctx, "TypeError", "Cannot delete property '"+key.Str+"'")
+	}
+	return nil
 }
 
 // arrayConcat implements Array.prototype.concat (§23.1.3.1) generically: it
@@ -855,34 +1007,107 @@ func (i *Interpreter) arrayReduce(ctx context.Context, this Value, args []Value)
 	return acc, nil
 }
 
+// arrayReverse implements Array.prototype.reverse (§23.1.3.26) generically: it
+// reverses an array-like `this` in place through [[HasProperty]]/[[Get]]/[[Set]]/
+// [[Delete]], preserving hole positions in the mirror image.
 func (i *Interpreter) arrayReverse(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	for a, b := 0, len(o.elems)-1; a < b; a, b = a+1, b-1 {
-		o.elems[a], o.elems[b] = o.elems[b], o.elems[a]
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	middle := length / 2
+	for lower := 0; lower != middle; lower++ {
+		upper := length - lower - 1
+		lowerP := StrKey(strconv.Itoa(lower))
+		upperP := StrKey(strconv.Itoa(upper))
+		lowerExists, err := i.hasV(ctx, o, lowerP)
+		if err != nil {
+			return nil, err
+		}
+		var lowerValue Value
+		if lowerExists {
+			if lowerValue, err = i.getV(ctx, o, lowerP, o); err != nil {
+				return nil, err
+			}
+		}
+		upperExists, err := i.hasV(ctx, o, upperP)
+		if err != nil {
+			return nil, err
+		}
+		var upperValue Value
+		if upperExists {
+			if upperValue, err = i.getV(ctx, o, upperP, o); err != nil {
+				return nil, err
+			}
+		}
+		switch {
+		case lowerExists && upperExists:
+			if err := i.reverseSet(ctx, o, lowerP, upperValue); err != nil {
+				return nil, err
+			}
+			if err := i.reverseSet(ctx, o, upperP, lowerValue); err != nil {
+				return nil, err
+			}
+		case upperExists:
+			if err := i.reverseSet(ctx, o, lowerP, upperValue); err != nil {
+				return nil, err
+			}
+			if err := i.deletePropertyOrThrow(ctx, o, upperP); err != nil {
+				return nil, err
+			}
+		case lowerExists:
+			if err := i.deletePropertyOrThrow(ctx, o, lowerP); err != nil {
+				return nil, err
+			}
+			if err := i.reverseSet(ctx, o, upperP, lowerValue); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return o, nil
 }
 
+// reverseSet performs Set(O, key, v, true), throwing on a failed write.
+func (i *Interpreter) reverseSet(ctx context.Context, o *Object, key PropertyKey, v Value) error {
+	ok, err := i.setV(ctx, o, key, v, o)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return i.throwError(ctx, "TypeError", "Cannot set property '"+key.Str+"'")
+	}
+	return nil
+}
+
+// arrayFill implements Array.prototype.fill (§23.1.3.7) generically: it resolves
+// the relative start/end against LengthOfArrayLike and writes the value into each
+// index in range through [[Set]] (throwing on a failed write).
 func (i *Interpreter) arrayFill(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	val := arg(args, 0)
-	n := len(o.elems)
-	start := 0
-	end := n
-	if !IsUndefined(arg(args, 1)) {
-		start = relIndex(argIntOr(ctx, i, args, 1, 0), n)
+	start, err := i.relativeIndex(ctx, arg(args, 1), length, 0)
+	if err != nil {
+		return nil, err
 	}
-	if !IsUndefined(arg(args, 2)) {
-		end = relIndex(argIntOr(ctx, i, args, 2, n), n)
+	end, err := i.relativeIndex(ctx, arg(args, 2), length, length)
+	if err != nil {
+		return nil, err
 	}
-	for j := start; j < end; j++ {
-		o.elems[j] = val
+	for k := start; k < end; k++ {
+		if err := i.reverseSet(ctx, o, StrKey(strconv.Itoa(k)), val); err != nil {
+			return nil, err
+		}
 	}
 	return o, nil
 }

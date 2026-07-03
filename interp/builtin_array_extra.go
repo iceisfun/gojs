@@ -221,103 +221,270 @@ func (i *Interpreter) arrayFlatMap(ctx context.Context, this Value, args []Value
 	return a, nil
 }
 
-// arrayAt returns the element at a possibly-negative index.
+// arrayAt implements Array.prototype.at (§23.1.3.1) generically: it resolves the
+// relative index against LengthOfArrayLike and returns the element via [[Get]],
+// or undefined when the index is out of range.
 func (i *Interpreter) arrayAt(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	idx, _ := i.argInt(ctx, args, 0)
-	if idx < 0 {
-		idx += len(o.elems)
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	if idx < 0 || idx >= len(o.elems) {
+	rel, err := i.argInteger(ctx, args, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	if rel < 0 {
+		rel += float64(length)
+	}
+	if rel < 0 || rel >= float64(length) {
 		return Undef, nil
 	}
-	return elemAt(o, idx), nil
+	return i.getV(ctx, o, StrKey(strconv.Itoa(int(rel))), o)
 }
 
-// arrayCopyWithin copies a slice of the array to another position within the
-// same array (mutating in place) and returns the array.
+// arrayCopyWithin implements Array.prototype.copyWithin (§23.1.3.4) generically:
+// it resolves target/start/end against LengthOfArrayLike, then copies the source
+// range (choosing a safe direction for overlap) through
+// [[HasProperty]]/[[Get]]/[[Set]]/[[Delete]], preserving holes.
 func (i *Interpreter) arrayCopyWithin(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	n := len(o.elems)
-	target := relIndex(argIntOr(ctx, i, args, 0, 0), n)
-	start := relIndex(argIntOr(ctx, i, args, 1, 0), n)
-	end := n
-	if !IsUndefined(arg(args, 2)) {
-		end = relIndex(argIntOr(ctx, i, args, 2, n), n)
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	// Copy the source range first so overlapping ranges behave correctly.
-	src := append([]Value(nil), o.elems[start:end]...)
-	for k := 0; k < len(src) && target+k < n; k++ {
-		o.elems[target+k] = src[k]
+	to, err := i.relativeIndex(ctx, arg(args, 0), length, 0)
+	if err != nil {
+		return nil, err
+	}
+	from, err := i.relativeIndex(ctx, arg(args, 1), length, 0)
+	if err != nil {
+		return nil, err
+	}
+	final, err := i.relativeIndex(ctx, arg(args, 2), length, length)
+	if err != nil {
+		return nil, err
+	}
+	count := final - from
+	if l := length - to; l < count {
+		count = l
+	}
+	direction := 1
+	if from < to && to < from+count {
+		direction = -1
+		from = from + count - 1
+		to = to + count - 1
+	}
+	for ; count > 0; count-- {
+		fromKey := StrKey(strconv.Itoa(from))
+		toKey := StrKey(strconv.Itoa(to))
+		present, err := i.hasV(ctx, o, fromKey)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			v, err := i.getV(ctx, o, fromKey, o)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.reverseSet(ctx, o, toKey, v); err != nil {
+				return nil, err
+			}
+		} else if err := i.deletePropertyOrThrow(ctx, o, toKey); err != nil {
+			return nil, err
+		}
+		from += direction
+		to += direction
 	}
 	return o, nil
 }
 
-// arrayToReversed returns a reversed copy without mutating the receiver.
+// arrayToReversed implements Array.prototype.toReversed (§23.1.3.33): it builds a
+// fresh dense array whose elements are the receiver's read in reverse via [[Get]]
+// (holes densify to undefined) and never mutates the receiver.
 func (i *Interpreter) arrayToReversed(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	// The to* methods read 0..len via [[Get]], so holes densify to undefined.
-	out := make([]Value, len(o.elems))
-	for k := range o.elems {
-		out[len(o.elems)-1-k] = elemAt(o, k)
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	return i.newArray(out), nil
+	a, err := i.arrayCreate(ctx, length)
+	if err != nil {
+		return nil, err
+	}
+	for k := 0; k < length; k++ {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(length-k-1)), o)
+		if err != nil {
+			return nil, err
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(k)), v); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
-// arrayToSorted returns a sorted copy without mutating the receiver.
+// arrayToSorted implements Array.prototype.toSorted (§23.1.3.34): it validates the
+// comparator, densifies the receiver into a fresh array via [[Get]], then sorts
+// that copy in place with arraySort, leaving the receiver unchanged.
 func (i *Interpreter) arrayToSorted(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// The comparator is validated before any coercion (§23.1.3.34 step 1).
+	if comparefn := arg(args, 0); !IsUndefined(comparefn) {
+		c, ok := comparefn.(*Object)
+		if !ok || !c.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "The comparison function must be either a function or undefined")
+		}
+	}
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	copyArr := i.newArray(o.denseCopy())
-	if _, err := i.arraySort(ctx, copyArr, args); err != nil {
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
 		return nil, err
 	}
-	return copyArr, nil
+	a, err := i.arrayCreate(ctx, length)
+	if err != nil {
+		return nil, err
+	}
+	for k := 0; k < length; k++ {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(k)), o)
+		if err != nil {
+			return nil, err
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(k)), v); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := i.arraySort(ctx, a, args); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
-// arrayToSpliced returns a copy with a splice applied, leaving the receiver
-// unchanged.
+// arrayToSpliced implements Array.prototype.toSpliced (§23.1.3.35): it builds a
+// fresh dense array reflecting the splice, reading the receiver through [[Get]]
+// and never mutating it.
 func (i *Interpreter) arrayToSpliced(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	copyArr := i.newArray(o.denseCopy())
-	if _, err := i.arraySplice(ctx, copyArr, args); err != nil {
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
 		return nil, err
 	}
-	return copyArr, nil
+	actualStart, err := i.relativeIndex(ctx, arg(args, 0), length, 0)
+	if err != nil {
+		return nil, err
+	}
+	var insertCount, actualSkipCount int
+	switch {
+	case len(args) == 0:
+		insertCount, actualSkipCount = 0, 0
+	case len(args) == 1:
+		insertCount, actualSkipCount = 0, length-actualStart
+	default:
+		insertCount = len(args) - 2
+		sc, err := i.argInteger(ctx, args, 1, 0)
+		if err != nil {
+			return nil, err
+		}
+		actualSkipCount = clampIndexF(sc, length-actualStart)
+	}
+	newLen := length + insertCount - actualSkipCount
+	if float64(newLen) > float64(1<<53-1) {
+		return nil, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+	}
+	a, err := i.arrayCreate(ctx, newLen)
+	if err != nil {
+		return nil, err
+	}
+	var items []Value
+	if len(args) > 2 {
+		items = args[2:]
+	}
+	idx := 0
+	for ; idx < actualStart; idx++ {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(idx)), o)
+		if err != nil {
+			return nil, err
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(idx)), v); err != nil {
+			return nil, err
+		}
+	}
+	for _, e := range items {
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(idx)), e); err != nil {
+			return nil, err
+		}
+		idx++
+	}
+	r := actualStart + actualSkipCount
+	for ; idx < newLen; idx++ {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(r)), o)
+		if err != nil {
+			return nil, err
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(idx)), v); err != nil {
+			return nil, err
+		}
+		r++
+	}
+	return a, nil
 }
 
-// arrayWith returns a copy with a single index replaced, throwing RangeError for
-// an out-of-bounds index.
+// arrayWith implements Array.prototype.with (§23.1.3.39): it builds a fresh dense
+// copy with a single index replaced, throwing RangeError for an out-of-range
+// index and reading the rest of the receiver through [[Get]].
 func (i *Interpreter) arrayWith(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	n := len(o.elems)
-	idx, _ := i.argInt(ctx, args, 0)
-	if idx < 0 {
-		idx += n
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	if idx < 0 || idx >= n {
+	rel, err := i.argInteger(ctx, args, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	if rel < 0 {
+		rel += float64(length)
+	}
+	if rel < 0 || rel >= float64(length) {
 		return nil, i.throwError(ctx, "RangeError", "Invalid index")
 	}
-	out := o.denseCopy()
-	out[idx] = arg(args, 1)
-	return i.newArray(out), nil
+	actualIndex := int(rel)
+	value := arg(args, 1)
+	a, err := i.arrayCreate(ctx, length)
+	if err != nil {
+		return nil, err
+	}
+	for k := 0; k < length; k++ {
+		var v Value
+		if k == actualIndex {
+			v = value
+		} else {
+			if v, err = i.getV(ctx, o, StrKey(strconv.Itoa(k)), o); err != nil {
+				return nil, err
+			}
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(k)), v); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 // arrayLastIndexOf finds the last index of a value using strict equality,
