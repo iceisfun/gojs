@@ -417,7 +417,7 @@ func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, 
 		return nil, err
 	}
 	if !isArr {
-		return i.newArrayOfLen(length), nil
+		return i.arrayCreate(ctx, length)
 	}
 	c, err := original.GetStr(ctx, "constructor")
 	if err != nil {
@@ -435,7 +435,7 @@ func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, 
 		}
 	}
 	if IsUndefined(c) {
-		return i.newArrayOfLen(length), nil
+		return i.arrayCreate(ctx, length)
 	}
 	co, ok := c.(*Object)
 	if !ok || !co.IsConstructor() {
@@ -452,11 +452,17 @@ func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, 
 	return ro, nil
 }
 
-// newArrayOfLen implements ArrayCreate(length): a fresh array of `length` holes.
-func (i *Interpreter) newArrayOfLen(n int) *Object {
+// arrayCreate implements ArrayCreate(length): a fresh array of `length` holes.
+// A length above 2^32-1 is a RangeError per spec; gojs additionally rejects a
+// length past its dense backing limit (which it cannot allocate) with the same
+// RangeError rather than exhausting memory.
+func (i *Interpreter) arrayCreate(ctx context.Context, n int) (*Object, error) {
+	if n < 0 || n > maxDenseArrayLen {
+		return nil, i.throwError(ctx, "RangeError", "Invalid array length")
+	}
 	arr := i.newArray(nil)
 	arr.ensureLen(n)
-	return arr
+	return arr, nil
 }
 
 // createDataPropertyOrThrow implements CreateDataPropertyOrThrow (§7.3.7) via
