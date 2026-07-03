@@ -572,9 +572,9 @@ func isHexDigit(ch rune) bool {
 
 // isIdentStart reports whether ch may start an identifier. It implements the
 // ECMAScript IdentifierStartChar production: '$', '_', or any code point with
-// the Unicode ID_Start property. ID_Start is derived from categories L and Nl
-// plus Other_ID_Start, with Pattern_Syntax and Pattern_White_Space code points
-// (such as U+2E2F VERTICAL TILDE, a Lm letter) removed.
+// the Unicode ID_Start property (UnicodeIDStart, ECMA-262 §12.7). The ID_Start
+// set is taken from idStartTable (generated from the Unicode Standard) rather
+// than Go's category tables, which lag the current Unicode version.
 func isIdentStart(ch rune) bool {
 	if ch == '$' || ch == '_' ||
 		(ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
@@ -583,18 +583,17 @@ func isIdentStart(ch rune) bool {
 	if ch <= 0x7F {
 		return false
 	}
-	if unicode.In(ch, unicode.Pattern_Syntax, unicode.Pattern_White_Space) {
-		return false
-	}
-	return unicode.In(ch, unicode.L, unicode.Nl, unicode.Other_ID_Start)
+	return unicode.Is(idStartTable, ch)
 }
 
 // isIdentPart reports whether ch may continue an identifier. It implements the
-// ECMAScript IdentifierPartChar production: ID_Start plus the Unicode
-// ID_Continue additions (Mn, Mc, Nd, Pc, Other_ID_Continue) and the ZWNJ/ZWJ
-// joiners U+200C and U+200D.
+// ECMAScript IdentifierPartChar production: '$', any code point with the
+// Unicode ID_Continue property (UnicodeIDContinue, which subsumes ID_Start),
+// and the ZWNJ/ZWJ joiners U+200C and U+200D (ECMA-262 §12.7). The ID_Continue
+// set is taken from idContinueTable.
 func isIdentPart(ch rune) bool {
-	if isIdentStart(ch) || isDigit(ch) {
+	if ch == '$' || ch == '_' ||
+		(ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || isDigit(ch) {
 		return true
 	}
 	// ZWNJ and ZWJ are permitted in IdentifierPart.
@@ -604,10 +603,7 @@ func isIdentPart(ch rune) bool {
 	if ch <= 0x7F {
 		return false
 	}
-	if unicode.In(ch, unicode.Pattern_Syntax, unicode.Pattern_White_Space) {
-		return false
-	}
-	return unicode.In(ch, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue)
+	return unicode.Is(idContinueTable, ch)
 }
 
 // isLineTerminator reports whether ch is an ECMAScript line terminator.

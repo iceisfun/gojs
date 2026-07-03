@@ -362,10 +362,18 @@ func (p *parser) parseBindingTarget() ast.Expr {
 		p.checkEscapedReserved(id)
 		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 	default:
-		// Contextual keywords are valid binding names.
+		// Only the contextual keywords (let, static, yield, async, await, of,
+		// get, set) may serve as a BindingIdentifier. An always-reserved word
+		// (break, for, if, this, enum, ...) is not an Identifier, so using it
+		// where a binding name is required is an early SyntaxError
+		// (ECMA-262 §12.7.2).
 		if p.cur().Type.IsKeyword() {
 			id := p.next()
 			name := identText(id)
+			if token.IsReservedWord(name) {
+				p.errorAt(id.Pos, "'%s' is a reserved word and may not be used as an identifier", name)
+				return &ast.Ident{NamePos: id.Pos, Name: name}
+			}
 			p.checkReservedIdentifier(name, id.Pos)
 			return &ast.Ident{NamePos: id.Pos, Name: name}
 		}
