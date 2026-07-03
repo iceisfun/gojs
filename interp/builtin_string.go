@@ -507,7 +507,19 @@ func (i *Interpreter) initString() {
 			if err != nil {
 				return nil, err
 			}
-			b.WriteRune(rune(uint16(int64(n))))
+			cu := uint16(int64(n))
+			if cu >= 0xD800 && cu <= 0xDFFF {
+				// A surrogate code unit is not a Unicode scalar value, so
+				// strings.Builder.WriteRune would fold it to U+FFFD and lose
+				// the code unit. Preserve it verbatim using WTF-8 (generalized
+				// UTF-8) so operations that interpret the string as UTF-16 —
+				// notably Encode (encodeURI) — can recover and pair surrogates.
+				b.WriteByte(0xE0 | byte(cu>>12))
+				b.WriteByte(0x80 | byte((cu>>6)&0x3F))
+				b.WriteByte(0x80 | byte(cu&0x3F))
+			} else {
+				b.WriteRune(rune(cu))
+			}
 		}
 		return String(b.String()), nil
 	})

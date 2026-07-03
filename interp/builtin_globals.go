@@ -72,14 +72,22 @@ func (i *Interpreter) initGlobals() {
 		if err != nil {
 			return nil, err
 		}
-		return String(encodeURI(s, uriComponentUnreserved)), nil
+		out, ok := encodeURI(s, uriComponentUnreserved)
+		if !ok {
+			return nil, i.throwError(ctx, "URIError", "URI malformed")
+		}
+		return String(out), nil
 	})
 	i.setGlobalFunc("encodeURI", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
-		return String(encodeURI(s, uriUnreserved)), nil
+		out, ok := encodeURI(s, uriUnreserved)
+		if !ok {
+			return nil, i.throwError(ctx, "URIError", "URI malformed")
+		}
+		return String(out), nil
 	})
 	i.setGlobalFunc("decodeURIComponent", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		s, err := i.argStr(ctx, args, 0)
@@ -211,19 +219,78 @@ const (
 	uriComponentUnreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"
 )
 
-func encodeURI(s, unreserved string) string {
-	var b strings.Builder
-	for _, by := range []byte(s) {
-		if strings.IndexByte(unreserved, by) >= 0 {
-			b.WriteByte(by)
+// stringToCodeUnits interprets a gojs string as a sequence of UTF-16 code
+// units, as the Encode/Decode abstract operations require. gojs stores strings
+// as (WTF-8) bytes and normally indexes by code point, but Encode must iterate
+// code units and detect unpaired surrogates. An astral scalar value is split
+// into its surrogate pair; a WTF-8-encoded surrogate (see String.fromCharCode)
+// is recovered as a single surrogate code unit.
+func stringToCodeUnits(s string) []rune {
+	units := make([]rune, 0, len(s))
+	for i := 0; i < len(s); {
+		b0 := s[i]
+		// A WTF-8-encoded surrogate is 0xED 0xA0-0xBF 0x80-0xBF, denoting a
+		// code unit in U+D800..U+DFFF. Recognize it before utf8.DecodeRune,
+		// which would otherwise report three separate RuneErrors.
+		if b0 == 0xED && i+2 < len(s) && s[i+1] >= 0xA0 && s[i+1] <= 0xBF && s[i+2] >= 0x80 && s[i+2] <= 0xBF {
+			units = append(units, rune(b0&0x0F)<<12|rune(s[i+1]&0x3F)<<6|rune(s[i+2]&0x3F))
+			i += 3
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r >= 0x10000 {
+			r -= 0x10000
+			units = append(units, 0xD800+(r>>10), 0xDC00+(r&0x3FF))
 		} else {
-			const hex = "0123456789ABCDEF"
+			units = append(units, r)
+		}
+		i += size
+	}
+	return units
+}
+
+// encodeURI implements the ECMA-262 Encode abstract operation (§19.2.6.5). It
+// iterates the string as UTF-16 code units: an unescaped ASCII code unit is
+// copied verbatim, an unpaired surrogate raises a URIError (ok=false), and any
+// other code point is emitted as its UTF-8 octets in "%XX" form. unreserved is
+// the concatenation of the always-unescaped set and the operation's extra set.
+func encodeURI(s, unreserved string) (string, bool) {
+	const hex = "0123456789ABCDEF"
+	units := stringToCodeUnits(s)
+	var b strings.Builder
+	for k := 0; k < len(units); {
+		cu := units[k]
+		if cu < 0x80 && strings.IndexByte(unreserved, byte(cu)) >= 0 {
+			b.WriteByte(byte(cu))
+			k++
+			continue
+		}
+		// CodePointAt: pair a high surrogate with a following low surrogate;
+		// any other surrogate is unpaired and must be rejected.
+		var cp rune
+		switch {
+		case cu >= 0xD800 && cu <= 0xDBFF:
+			if k+1 < len(units) && units[k+1] >= 0xDC00 && units[k+1] <= 0xDFFF {
+				cp = 0x10000 + (cu-0xD800)<<10 + (units[k+1] - 0xDC00)
+				k += 2
+			} else {
+				return "", false // unpaired high surrogate
+			}
+		case cu >= 0xDC00 && cu <= 0xDFFF:
+			return "", false // unpaired low surrogate
+		default:
+			cp = cu
+			k++
+		}
+		var buf [utf8.UTFMax]byte
+		n := utf8.EncodeRune(buf[:], cp)
+		for _, by := range buf[:n] {
 			b.WriteByte('%')
 			b.WriteByte(hex[by>>4])
 			b.WriteByte(hex[by&0xF])
 		}
 	}
-	return b.String()
+	return b.String(), true
 }
 
 // uriReserved is the set of characters decodeURI leaves escaped: the URI
@@ -244,8 +311,12 @@ func hexDigit(c rune) int {
 // point, while leaving any single-byte character in preserve escaped verbatim.
 // It returns ok=false on malformed input, letting the caller raise a URIError.
 func decodeURI(s, preserve string) (string, bool) {
-	rs := []rune(s)
-	n := len(rs)
+	// Decode only ever interprets the ASCII code unit "%" and the hex digits
+	// that follow it; every other code unit is passed through verbatim. Working
+	// on bytes (rather than []rune) therefore both simplifies the index math and
+	// preserves any non-UTF-8 bytes — notably the WTF-8 encoding of surrogate
+	// code units produced by String.fromCharCode — exactly as received.
+	n := len(s)
 	var b strings.Builder
 
 	// readByte parses the two hex digits of a "%XX" whose '%' is at index p.
@@ -253,7 +324,7 @@ func decodeURI(s, preserve string) (string, bool) {
 		if p+2 >= n {
 			return 0, false
 		}
-		hi, lo := hexDigit(rs[p+1]), hexDigit(rs[p+2])
+		hi, lo := hexDigit(rune(s[p+1])), hexDigit(rune(s[p+2]))
 		if hi < 0 || lo < 0 {
 			return 0, false
 		}
@@ -262,9 +333,9 @@ func decodeURI(s, preserve string) (string, bool) {
 
 	k := 0
 	for k < n {
-		c := rs[k]
+		c := s[k]
 		if c != '%' {
-			b.WriteRune(c)
+			b.WriteByte(c)
 			k++
 			continue
 		}
@@ -276,7 +347,7 @@ func decodeURI(s, preserve string) (string, bool) {
 		k += 2 // k now indexes the second hex digit
 		if first < 0x80 {
 			if strings.IndexByte(preserve, first) >= 0 {
-				b.WriteString(string(rs[start : k+1])) // keep "%XX" verbatim
+				b.WriteString(s[start : k+1]) // keep "%XX" verbatim
 			} else {
 				b.WriteByte(first)
 			}
@@ -295,7 +366,7 @@ func decodeURI(s, preserve string) (string, bool) {
 		octets[0] = first
 		for j := 1; j < seqLen; j++ {
 			k++ // advance to the expected '%'
-			if k >= n || rs[k] != '%' {
+			if k >= n || s[k] != '%' {
 				return "", false
 			}
 			cont, ok := readByte(k)
