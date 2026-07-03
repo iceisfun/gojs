@@ -575,8 +575,8 @@ func TestMathRoundHalfUp(t *testing.T) {
 		assert.sameValue(Math.round(1.5), 2);
 		assert.sameValue(Math.round(2.5), 3);
 		assert.sameValue(Math.round(3.5), 4);
-		// negative halves round toward zero (i.e. toward +Infinity still)
-		assert.sameValue(Math.round(-0.5), 0);
+		// negative halves round toward +Infinity; -0.5 yields -0 (§21.3.2.28)
+		assert.sameValue(Math.round(-0.5), -0);
 		assert.sameValue(Math.round(-1.5), -1);
 		assert.sameValue(Math.round(-2.5), -2);
 		assert.sameValue(Math.round(-3.5), -3);
@@ -624,8 +624,8 @@ func TestMathMinMax(t *testing.T) {
 		assert.sameValue(Math.min(1, 5, 3), 1);
 		assert.sameValue(Math.max(-1, -5, -3), -1);
 		assert.sameValue(Math.min(-1, -5, -3), -5);
-		assert.sameValue(Math.max(0, -0), 0);
-		assert.sameValue(Math.min(0, -0), 0);   // both 0 per spec comparison
+		assert.sameValue(Math.max(0, -0), 0);    // +0 is larger than -0 (§21.3.2.24)
+		assert.sameValue(Math.min(0, -0), -0);   // -0 is smaller than +0 (§21.3.2.25)
 
 		// single argument
 		assert.sameValue(Math.max(42), 42);
@@ -662,7 +662,7 @@ func TestMathPow(t *testing.T) {
 		assert.sameValue(Math.pow(10, -3), 0.001);
 		assert.sameValue(Math.pow(9, 0.5), 3);    // sqrt(9)
 		assert(Math.abs(Math.pow(8, 1 / 3) - 2) < 1e-10, "cbrt via pow (libm last-ulp; see NOTES-divergences.md)");
-		assert.sameValue(Math.pow(1, Infinity), 1);
+		assert.sameValue(Math.pow(1, Infinity), NaN);   // base magnitude 1, infinite exp => NaN (§6.1.6.1.3)
 		assert.sameValue(Math.pow(Infinity, 0), 1);
 		assert.sameValue(Math.pow(0, 0), 1);
 		assert.sameValue(Math.pow(0, 1), 0);
