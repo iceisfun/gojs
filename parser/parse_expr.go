@@ -124,7 +124,11 @@ func (p *parser) parseYield() ast.Expr {
 		p.errorAt(kw.Pos, "yield is only valid inside a generator")
 	}
 	y := &ast.YieldExpr{Keyword: kw.Pos}
-	if p.accept(token.STAR) {
+	// `yield *` is a single token sequence: no LineTerminator may appear between
+	// `yield` and `*` (the grammar has no [no LineTerminator here] escape, so ASI
+	// after a lone `yield` makes a following `*` a new, invalid statement).
+	if p.at(token.STAR) && !p.cur().NewlineBefore {
+		p.next()
 		y.Delegate = true
 	}
 	// A yield with no argument is legal; an argument follows only if one could
@@ -291,6 +295,7 @@ func (p *parser) parseMemberTail(expr ast.Expr) ast.Expr {
 		case token.DOT:
 			p.next()
 			prop := p.parseMemberName()
+			p.checkSuperPrivate(expr, prop)
 			expr = &ast.MemberExpr{Object: expr, Property: prop, EndPos: prop.End()}
 		case token.LBRACKET:
 			p.next()
@@ -303,6 +308,18 @@ func (p *parser) parseMemberTail(expr ast.Expr) ast.Expr {
 	}
 }
 
+// checkSuperPrivate reports the early error for a SuperProperty whose member is
+// a private name (`super.#x`), which the grammar does not permit (ECMA-262
+// MemberExpression : SuperProperty has no private-name production).
+func (p *parser) checkSuperPrivate(obj, prop ast.Expr) {
+	if _, isSuper := obj.(*ast.SuperExpr); !isSuper {
+		return
+	}
+	if priv, ok := prop.(*ast.PrivateIdent); ok {
+		p.errorAt(priv.Pos(), "Private field '%s' must not be accessed on super", priv.Name)
+	}
+}
+
 // parseCallMemberTail parses the full call/member/optional-chain/tagged-template
 // suffix chain after a primary expression.
 func (p *parser) parseCallMemberTail(expr ast.Expr) ast.Expr {
@@ -311,6 +328,7 @@ func (p *parser) parseCallMemberTail(expr ast.Expr) ast.Expr {
 		case token.DOT:
 			p.next()
 			prop := p.parseMemberName()
+			p.checkSuperPrivate(expr, prop)
 			expr = &ast.MemberExpr{Object: expr, Property: prop, EndPos: prop.End()}
 		case token.OPTIONAL:
 			p.next()

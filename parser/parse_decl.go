@@ -257,6 +257,21 @@ func paramBoundNames(params []ast.Expr) []string {
 	return out
 }
 
+// checkStrictParamNames enforces the strict-mode early error that a formal
+// parameter may not be bound to the name `eval` or `arguments` (ECMA-262
+// BindingIdentifier static semantics in strict code / StrictFormalParameters).
+func (p *parser) checkStrictParamNames(params []ast.Expr, strict bool) {
+	if !strict || p.err != nil {
+		return
+	}
+	for _, name := range paramBoundNames(params) {
+		if name == "eval" || name == "arguments" {
+			p.errorf("'%s' may not be used as a parameter name in strict mode", name)
+			return
+		}
+	}
+}
+
 // checkParamDuplicates enforces the early error for duplicate parameter names.
 // Duplicates are permitted only in a sloppy-mode function whose parameter list
 // is simple (identifiers only); a strict-mode function or any non-simple list
@@ -449,6 +464,7 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	p.inStaticBlock = prevStatic
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
+	p.checkStrictParamNames(def.Params, def.Strict)
 	return def
 }
 
@@ -621,6 +637,7 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
+	p.checkStrictParamNames(def.Params, def.Strict)
 	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
 }
 
