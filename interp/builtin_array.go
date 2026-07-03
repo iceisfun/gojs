@@ -36,56 +36,7 @@ func (i *Interpreter) initArray() {
 		copy(cp, args)
 		return i.newArray(cp), nil
 	})
-	i.defineMethod(ctor, "from", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var out []Value
-		mapFn, _ := arg(args, 1).(*Object)
-		idx := 0
-		thisArg := arg(args, 2)
-		apply := func(v Value) (Value, error) {
-			if mapFn != nil && mapFn.IsCallable() {
-				mv, err := mapFn.fn.call(ctx, thisArg, []Value{v, Number(float64(idx))})
-				if err != nil {
-					return nil, err
-				}
-				v = mv
-			}
-			idx++
-			return v, nil
-		}
-		src := arg(args, 0)
-		// Prefer the iterator protocol; fall back to an array-like object with a
-		// length property (e.g. { length: 3, 0: "a" }).
-		if isIterable(i, src) {
-			err := i.iterate(ctx, src, func(v Value) error {
-				mv, err := apply(v)
-				if err != nil {
-					return err
-				}
-				out = append(out, mv)
-				return nil
-			})
-			if err != nil {
-				return nil, err
-			}
-		} else if o, ok := src.(*Object); ok {
-			lenV, _ := o.GetStr(ctx, "length")
-			n := int(ToInteger(ToNumber(lenV)))
-			if n < 0 {
-				n = 0
-			}
-			for j := 0; j < n; j++ {
-				ev, _ := o.GetStr(ctx, intToStr(j))
-				mv, err := apply(ev)
-				if err != nil {
-					return nil, err
-				}
-				out = append(out, mv)
-			}
-		} else if IsNullish(src) {
-			return nil, i.throwError(ctx, "TypeError", "Cannot convert undefined or null to object")
-		}
-		return i.newArray(out), nil
-	})
+	i.defineMethod(ctor, "from", 1, i.arrayFrom)
 
 	type method struct {
 		name string
@@ -565,6 +516,143 @@ func (i *Interpreter) isConcatSpreadable(ctx context.Context, v Value) (bool, er
 
 // arraySpeciesCreate implements ArraySpeciesCreate (§23.1.3.2.3): allocate a new
 // array of the given length, honoring the original array's constructor @@species.
+// arrayFrom implements Array.from (§23.1.2.1). It is generic: the `this` value
+// C is used as the constructor for the result (Array.from.call(C, ...)), a
+// non-callable mapfn is rejected up front, and the iterator is closed if the
+// mapping function or a property definition throws mid-iteration.
+func (i *Interpreter) arrayFrom(ctx context.Context, this Value, args []Value) (Value, error) {
+	c := this
+	items := arg(args, 0)
+	mapfnV := arg(args, 1)
+	thisArg := arg(args, 2)
+
+	// If mapfn is not undefined it must be callable; validate before touching
+	// the source so a bad mapfn throws even for an empty/non-iterable source.
+	mapping := false
+	var mapfn *Object
+	if !IsUndefined(mapfnV) {
+		mo, ok := mapfnV.(*Object)
+		if !ok || !mo.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Array.from: mapping function is not callable")
+		}
+		mapfn = mo
+		mapping = true
+	}
+
+	// makeTarget builds the result A. When C is a constructor it is used
+	// (Array.from.call(C, ...) yields a C instance), otherwise ArrayCreate is
+	// used. The iterator path passes no constructor argument and ArrayCreate(0);
+	// the array-like path forwards the known length as both the constructor
+	// argument and the ArrayCreate size.
+	makeTarget := func(ctorArgs []Value, arrayLen int) (*Object, error) {
+		if co, ok := c.(*Object); ok && co.IsConstructor() {
+			res, err := co.fn.construct(ctx, co, ctorArgs)
+			if err != nil {
+				return nil, err
+			}
+			ro, ok := res.(*Object)
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "Array.from: constructor did not return an object")
+			}
+			return ro, nil
+		}
+		return i.arrayCreate(ctx, arrayLen)
+	}
+
+	// GetMethod(items, @@iterator). GetMethod is defined via GetV, which boxes a
+	// primitive source (e.g. a string) so its @@iterator resolves on the
+	// prototype and the iterator path is taken.
+	var usingIterator *Object
+	if !IsNullish(items) {
+		lookup := items
+		if _, ok := items.(*Object); !ok {
+			o, err := i.ToObject(ctx, items)
+			if err != nil {
+				return nil, err
+			}
+			lookup = o
+		}
+		m, err := i.getMethod(ctx, lookup, i.symIterator)
+		if err != nil {
+			return nil, err
+		}
+		usingIterator = m
+	}
+
+	if usingIterator != nil {
+		a, err := makeTarget(nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		rec, err := i.getIteratorFromMethod(ctx, items, usingIterator)
+		if err != nil {
+			return nil, err
+		}
+		k := 0
+		for {
+			val, done, err := i.iteratorStepValue(ctx, rec)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				if err := i.setThrow(ctx, a, "length", Number(float64(k))); err != nil {
+					return nil, err
+				}
+				return a, nil
+			}
+			mapped := val
+			if mapping {
+				mv, err := i.call(ctx, mapfn, thisArg, []Value{val, Number(float64(k))})
+				if err != nil {
+					return nil, i.iteratorClose(ctx, rec, err)
+				}
+				mapped = mv
+			}
+			if err := i.createDataPropertyOrThrow(ctx, a, StrKey(intToStr(k)), mapped); err != nil {
+				return nil, i.iteratorClose(ctx, rec, err)
+			}
+			k++
+		}
+	}
+
+	// items has no @@iterator: treat it as an array-like object. Its length is
+	// resolved before the result is constructed and is forwarded to the
+	// constructor (§23.1.2.1: Construct(ctor, « 𝔽(length) »)).
+	arrayLike, err := i.ToObject(ctx, items)
+	if err != nil {
+		return nil, err
+	}
+	n, err := i.lengthOfArrayLike(ctx, arrayLike)
+	if err != nil {
+		return nil, err
+	}
+	a, err := makeTarget([]Value{Number(float64(n))}, n)
+	if err != nil {
+		return nil, err
+	}
+	for k := 0; k < n; k++ {
+		kv, err := arrayLike.GetStr(ctx, intToStr(k))
+		if err != nil {
+			return nil, err
+		}
+		mapped := kv
+		if mapping {
+			mv, err := i.call(ctx, mapfn, thisArg, []Value{kv, Number(float64(k))})
+			if err != nil {
+				return nil, err
+			}
+			mapped = mv
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(intToStr(k)), mapped); err != nil {
+			return nil, err
+		}
+	}
+	if err := i.setThrow(ctx, a, "length", Number(float64(n))); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
 func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, length int) (*Object, error) {
 	isArr, err := i.isArrayV(ctx, original)
 	if err != nil {

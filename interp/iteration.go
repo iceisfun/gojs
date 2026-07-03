@@ -119,23 +119,6 @@ func (i *Interpreter) iterateProtocol(ctx context.Context, obj *Object, fn func(
 	}
 }
 
-// isIterable reports whether v can be driven by the iteration protocol (a
-// string, an array, or an object exposing Symbol.iterator).
-func isIterable(i *Interpreter, v Value) bool {
-	switch x := v.(type) {
-	case String:
-		return true
-	case *Object:
-		if x.isArray {
-			return true
-		}
-		_, ok := i.methodBySymbol(x, i.symIterator)
-		return ok
-	default:
-		return false
-	}
-}
-
 // iterableToSlice collects an iterable into a Go slice (used for spread).
 func (i *Interpreter) iterableToSlice(ctx context.Context, iterable Value) ([]Value, error) {
 	var out []Value
