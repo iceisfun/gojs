@@ -135,8 +135,11 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 	setFuncNameProp(fnObj, name)
 
 	// Ordinary (non-arrow, non-async, non-generator) functions are
-	// constructable and carry a fresh .prototype object.
-	if kind == kindNormal && !def.Async && !def.Generator {
+	// constructable and carry a fresh .prototype object. A concise method or
+	// accessor (homeObj != nil) is never a constructor and has no .prototype
+	// (ECMA-262 MethodDefinitionEvaluation uses OrdinaryFunctionCreate without a
+	// prototype), so it is excluded here.
+	if kind == kindNormal && !def.Async && !def.Generator && homeObj == nil {
 		proto := NewObject(i.objectProto)
 		proto.defineOwn(StrKey("constructor"), &Property{Value: fnObj, Writable: true, Enumerable: false, Configurable: true})
 		fnObj.defineOwn(StrKey("prototype"), &Property{Value: proto, Writable: true, Enumerable: false, Configurable: false})
