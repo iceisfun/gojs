@@ -390,7 +390,7 @@ func runMode(path, src string, m Meta, mode string) Result {
 			res.Reason = "expected " + m.NegType + " but completed"
 			return res
 		}
-		if v, ok := interp.ThrownValue(runErr); ok && strings.Contains(interp.BriefValue(v), m.NegType) {
+		if v, ok := interp.ThrownValue(runErr); ok && negTypeMatches(vm, v, m.NegType) {
 			res.Outcome = Pass
 		} else {
 			res.Outcome = Fail
@@ -471,6 +471,35 @@ func installAsyncDone(vm *interp.Interpreter, sink *asyncSink) {
 		}
 		return interp.Undef, nil
 	}))
+}
+
+// negTypeMatches reports whether a thrown value matches a negative test's
+// expected error constructor (m.NegType).
+//
+// Built-in errors expose a "name" data property on their prototype chain, which
+// BriefValue renders as "Name: message" without needing to run user code — so
+// the fast, side-effect-free substring check identifies them.
+//
+// A user-defined error type may lack a "name" property and instead identify
+// itself through a prototype toString (e.g. Test262Error from harness/sta.js,
+// whose toString returns "Test262Error: <message>"). BriefValue deliberately
+// does not run user toString, so such a value renders as a generic
+// "[object <class>]". Only in that case do we fall back to a full ToString,
+// which invokes the prototype toString and reveals the type name. Scoping the
+// fallback to generic-object renderings keeps built-in error matching strict, so
+// a test that expects e.g. TypeError but throws a differently-named error is
+// still correctly reported as a failure.
+func negTypeMatches(vm *interp.Interpreter, v interp.Value, negType string) bool {
+	brief := interp.BriefValue(v)
+	if strings.Contains(brief, negType) {
+		return true
+	}
+	if strings.HasPrefix(brief, "[object ") {
+		if s, err := vm.ToString(v); err == nil && strings.Contains(s, negType) {
+			return true
+		}
+	}
+	return false
 }
 
 // installT262Host installs the $262 host object that some Test262 tests use.
