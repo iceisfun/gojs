@@ -116,15 +116,32 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		}
 		// The arguments object is created before the parameters are bound so it is
 		// visible to default-value initializers (ECMA-262 FunctionDeclaration-
-		// Instantiation creates it before IteratorBindingInitialization). gojs
-		// uses an unmapped snapshot, so there is no aliasing to defer. A formal
+		// Instantiation creates it before IteratorBindingInitialization). A formal
 		// parameter (or lexical binding) literally named "arguments" shadows it,
 		// so bindParams below overwrites the binding when such a name exists.
+		//
+		// A sloppy-mode function with a simple parameter list gets a *mapped*
+		// arguments object (§10.4.4.6): arguments[i] aliases the i-th named
+		// parameter. The alias is wired only after bindParams has created the
+		// parameter bindings, so the map references the same *binding the body
+		// reads and writes. A strict or non-simple-parameter function gets an
+		// unmapped snapshot (§10.4.4.7) with no aliasing.
+		mapped := kind == kindNormal && !strict && simpleParameterList(def.Params)
+		var argsObj *Object
 		if kind == kindNormal {
-			env.vars["arguments"] = &binding{value: i.makeArguments(args, fnObj, strict || !simpleParameterList(def.Params)), mutable: true, initialized: true}
+			argsObj = i.makeArguments(args, fnObj, !mapped)
+			env.vars["arguments"] = &binding{value: argsObj, mutable: true, initialized: true}
 		}
 		if err := i.bindParams(ctx, def.Params, args, env); err != nil {
 			return nil, err
+		}
+		// Wire the parameter map only if the arguments binding still holds the
+		// object we created (a parameter literally named "arguments" would have
+		// replaced it, in which case no arguments object is observable).
+		if mapped {
+			if b, ok := env.vars["arguments"]; ok && b.value == argsObj {
+				i.mapArguments(argsObj, def.Params, args, env)
+			}
 		}
 		return i.runFunctionBody(ctx, funcFrameName(fnObj, name), def.Body, env)
 	}
@@ -370,19 +387,17 @@ func collectParamNames(params []ast.Expr) []string {
 // friends reach the elements through the length + indexed-property protocol
 // without dense backing.
 //
-// gojs does NOT implement the sloppy-mode "mapped" aliasing between arguments[i]
-// and the corresponding named parameter (writes to one do not appear in the
-// other). See wontfix/function-code.md for the rationale and plan. Unmapped
-// behavior — where no such aliasing exists — is therefore exact.
+// This builds only the object skeleton and its data properties. The sloppy-mode
+// "mapped" aliasing between arguments[i] and the corresponding named parameter
+// (§10.4.4.6) is layered on afterwards by mapArguments, once the parameter
+// bindings exist; see the [[ParameterMap]] handling in getOwn / setStatus /
+// Delete / argumentsDefineOwn.
 //
 // The "callee" property distinguishes unmapped from mapped arguments objects
 // (§10.4.4.6/§10.4.4.7). An unmapped object — created whenever the function is
 // strict OR its parameter list is not simple — exposes "callee" as a poison-pill
 // accessor whose get and set are both %ThrowTypeError%; a mapped object exposes
-// it as a plain data property referring to the enclosing function. gojs treats
-// every arguments object as unmapped for element aliasing, but still models
-// "callee" per the unmapped flag so accessing it on a strict/non-simple function
-// yields %ThrowTypeError% (the canonical way test262 reaches that intrinsic).
+// it as a plain data property referring to the enclosing function.
 func (i *Interpreter) makeArguments(args []Value, callee Value, unmapped bool) *Object {
 	o := NewObject(i.objectProto)
 	o.class = "Arguments"
@@ -401,6 +416,40 @@ func (i *Interpreter) makeArguments(args []Value, callee Value, unmapped bool) *
 		o.defineOwn(StrKey("callee"), &Property{Value: callee, Writable: true, Enumerable: false, Configurable: true})
 	}
 	return o
+}
+
+// mapArguments installs the [[ParameterMap]] of a mapped arguments object
+// (CreateMappedArgumentsObject, §10.4.4.6 steps 19–22): scanning the simple
+// formal parameter list from last to first, it links each index that has a
+// corresponding argument to the *binding of its parameter name. A duplicated
+// name (legal in sloppy mode) maps only its last occurrence, since an earlier
+// index with the same name is skipped once the name has been seen. The bindings
+// are the very ones bindParams installed, so arguments[i] and the named
+// parameter alias each other through shared pointer identity.
+func (i *Interpreter) mapArguments(o *Object, params []ast.Expr, args []Value, env *Environment) {
+	seen := make(map[string]bool)
+	for idx := len(params) - 1; idx >= 0; idx-- {
+		id, ok := params[idx].(*ast.Ident)
+		if !ok {
+			continue // a non-simple list never reaches here; guard defensively
+		}
+		name := id.Name
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if idx >= len(args) {
+			continue // no corresponding argument: index is unmapped
+		}
+		b, ok := env.vars[name]
+		if !ok {
+			continue
+		}
+		if o.paramMap == nil {
+			o.paramMap = make(map[string]*binding, len(params))
+		}
+		o.paramMap[intToStr(idx)] = b
+	}
 }
 
 // simpleParameterList reports whether every formal is a plain BindingIdentifier

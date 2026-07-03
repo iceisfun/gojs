@@ -181,6 +181,27 @@ type Object struct {
 	// properties: they are invisible to property enumeration, [[Get]]/[[Set]],
 	// hasOwnProperty, and JSON, and are guarded by a brand check on access.
 	private map[*PrivateName]*Property
+
+	// paramMap is the [[ParameterMap]] of a mapped arguments exotic object
+	// (§10.4.4): it links an integer-index string key ("0", "1", ...) to the
+	// *binding of the correspondingly-named formal parameter, so writes to
+	// arguments[i] and to the named parameter alias each other in sloppy mode
+	// with a simple parameter list. A key is present only while the index stays
+	// "mapped"; deleting the index, redefining it as an accessor, or making it
+	// non-writable removes the entry (breaking the alias). nil for every other
+	// object, including strict / non-simple-parameter arguments objects.
+	paramMap map[string]*binding
+}
+
+// mappedBinding returns the aliased formal-parameter binding for the property
+// key on a mapped arguments object, or (nil, false) when the key is not a
+// currently-mapped integer index.
+func (o *Object) mappedBinding(key PropertyKey) (*binding, bool) {
+	if o.paramMap == nil || key.IsSymbol() {
+		return nil, false
+	}
+	b, ok := o.paramMap[key.Str]
+	return b, ok
 }
 
 // PrivateName is the unique identity of a private class element (#x). Each
@@ -338,6 +359,18 @@ func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
 				return &Property{Value: o.elems[idx], Writable: !o.elemsNonWritable, Enumerable: true, Configurable: !o.elemsNonConfigurable}, true
 			}
 			return nil, false
+		}
+	}
+	// A mapped arguments object serves a currently-mapped integer index's value
+	// from the live parameter binding (§10.4.4.1 [[GetOwnProperty]] step 5), so a
+	// write to the named parameter is observable through arguments[i]. A copy is
+	// returned (never the stored descriptor pointer) so the freshly-read value
+	// does not corrupt the stored slot.
+	if b, ok := o.mappedBinding(key); ok {
+		if p, ok := o.props[key]; ok {
+			cp := *p
+			cp.Value = b.value
+			return &cp, true
 		}
 	}
 	p, ok := o.props[key]

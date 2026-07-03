@@ -884,6 +884,13 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 			return true, nil
 		}
 	}
+	// A mapped arguments object's [[DefineOwnProperty]] (§10.4.4.2) applies the
+	// descriptor ordinarily, then reconciles the parameter map: redefining a
+	// mapped index as an accessor or as non-writable breaks the alias, while a
+	// new [[Value]] flows through to the aliased parameter binding.
+	if _, ok := o.mappedBinding(key); ok {
+		return i.argumentsDefineOwn(ctx, o, key, desc)
+	}
 	// An Array is an exotic object (§10.4.2): "length" and array-index keys are
 	// backed by the dense element store rather than ordinary property slots, so
 	// they need [[DefineOwnProperty]] specialization (ArraySetLength and the
@@ -905,6 +912,47 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 	// (non-default attributes or an accessor) into the ordinary props map while
 	// extending the array's length to cover the index (§10.4.2.1).
 	return i.ordinaryDefineOwn(ctx, o, key, desc)
+}
+
+// argumentsDefineOwn implements the mapped-arguments [[DefineOwnProperty]]
+// specialization (§10.4.4.2) for a currently-mapped integer index. The ordinary
+// definition is applied first; because getOwn already reports the live binding
+// value as the property's current [[Value]], an attribute-only redefinition
+// (e.g. {writable:false} with no value) freezes the property at that live value
+// with no extra work (step 3). Afterwards the parameter map is reconciled:
+//   - an accessor redefinition breaks the alias (step 8.a);
+//   - a supplied [[Value]] flows through to the aliased parameter binding
+//     (step 8.b.i, Set(map, P, Desc.[[Value]]));
+//   - {writable:false} breaks the alias (step 8.b.ii).
+func (i *Interpreter) argumentsDefineOwn(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
+	b := o.paramMap[key.Str]
+	// Descriptor shape via HasProperty (matching ordinaryDefineOwn's
+	// ToPropertyDescriptor), which never invokes user getters.
+	isAccessor := desc.Has(StrKey("get")) || desc.Has(StrKey("set"))
+	hasValue := desc.Has(StrKey("value"))
+	hasWritable := desc.Has(StrKey("writable"))
+
+	allowed, err := i.ordinaryDefineOwn(ctx, o, key, desc)
+	if err != nil || !allowed {
+		return allowed, err
+	}
+	// The index is (still) stored in the props map after a successful define; its
+	// applied descriptor drives the reconciliation.
+	p, ok := o.props[key]
+	switch {
+	case isAccessor:
+		delete(o.paramMap, key.Str)
+	case ok && !p.Accessor:
+		if hasValue {
+			b.value = p.Value
+		}
+		if hasWritable && !p.Writable {
+			delete(o.paramMap, key.Str)
+		}
+	default:
+		delete(o.paramMap, key.Str)
+	}
+	return true, nil
 }
 
 // ordinaryDefineOwn implements OrdinaryDefineOwnProperty /

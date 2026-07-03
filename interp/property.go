@@ -98,6 +98,15 @@ func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool,
 			return o.typedArray.i.typedArraySetElement(ctx, o.typedArray, n, v)
 		}
 	}
+	// A mapped arguments object's [[Set]] (§10.4.4.4) writes a currently-mapped
+	// integer index through to the aliased formal-parameter binding (only when the
+	// arguments object is itself the receiver, which it is here — setStatus starts
+	// the write at the receiver). The stored data slot is still updated by the
+	// ordinary path below; a mapped index is always a writable data property, so
+	// that write cannot be blocked.
+	if b, ok := o.mappedBinding(key); ok {
+		b.value = v
+	}
 	// An Array's own "length" [[Set]] routes through ArraySetLength, which
 	// coerces and validates the value (throwing RangeError for a non-uint32
 	// length) rather than silently clamping. It is always an own data property.
@@ -209,6 +218,12 @@ func (o *Object) Delete(key PropertyKey) bool {
 		return false
 	}
 	o.deleteOwn(key)
+	// A mapped arguments object breaks the alias when the index is deleted
+	// (§10.4.4.5 [[Delete]] step 3): the parameter binding survives but is no
+	// longer reachable through arguments[i].
+	if o.paramMap != nil && !key.IsSymbol() {
+		delete(o.paramMap, key.Str)
+	}
 	return true
 }
 
