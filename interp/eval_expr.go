@@ -137,7 +137,7 @@ func (i *Interpreter) resolveIdent(ctx context.Context, name string, env *Enviro
 				return nil, err
 			}
 			if ok {
-				return i.getV(ctx, obj, StrKey(name), obj)
+				return i.withGetBindingValue(ctx, obj, name, env.isStrict())
 			}
 		}
 		if b, ok := e.vars[name]; ok {

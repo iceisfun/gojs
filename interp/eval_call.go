@@ -310,6 +310,27 @@ func (i *Interpreter) evalAssign(ctx context.Context, e *ast.AssignExpr, env *En
 		}
 	}
 
+	// Plain assignment to a simple identifier resolves the target Reference
+	// before evaluating the right-hand side (§13.15.2): a `with` object's
+	// HasBinding is captured up front, so an RHS that deletes the bound property
+	// still writes through the same (now strict-erroring) reference.
+	if e.Op == token.ASSIGN {
+		if id, ok := e.Target.(*ast.Ident); ok {
+			ref, err := i.resolveIdentRef(ctx, id.Name, env)
+			if err != nil {
+				return nil, err
+			}
+			val, err := i.evalExprNamed(ctx, e.Value, env, id.Name)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.putRefValue(ctx, ref, val); err != nil {
+				return nil, err
+			}
+			return val, nil
+		}
+	}
+
 	// Plain assignment keeps the existing target path.
 	if e.Op == token.ASSIGN {
 		val, err := i.evalExprNamed(ctx, e.Value, env, bindingName(e.Target))
@@ -436,14 +457,7 @@ func (i *Interpreter) assignIdent(ctx context.Context, name string, value Value,
 				return err
 			}
 			if ok {
-				wrote, err := obj.setStatus(ctx, StrKey(name), value)
-				if err != nil {
-					return err
-				}
-				if !wrote && env.isStrict() {
-					return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+keyName(StrKey(name)))
-				}
-				return nil
+				return i.withSetMutableBinding(ctx, obj, name, value, env.isStrict())
 			}
 		}
 		if _, ok := e.vars[name]; ok {

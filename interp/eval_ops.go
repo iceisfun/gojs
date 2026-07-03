@@ -98,8 +98,31 @@ func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Env
 	// flag (a var-created global is non-configurable, so delete returns false);
 	// an unresolved name yields true.
 	if id, ok := operand.(*ast.Ident); ok {
-		if b := env.lookup(id.Name); b != nil {
-			return False, nil
+		// Walk the scope chain, interleaving `with` object environment records
+		// with declarative bindings so the innermost binder decides the result
+		// (§13.5.1.2 / §9.1.1.2.7 DeleteBinding). Deleting an identifier bound by
+		// a with-object performs [[Delete]] on that object.
+		for e := env; e != nil; e = e.parent {
+			if e.withObj != nil {
+				obj, ok, err := i.withHasBinding(ctx, e.withObj, id.Name)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					deleted, err := i.deleteV(ctx, obj, StrKey(id.Name))
+					if err != nil {
+						return nil, err
+					}
+					if !deleted && env.isStrict() {
+						return nil, i.throwError(ctx, "TypeError", "Cannot delete property "+id.Name)
+					}
+					return Bool(deleted), nil
+				}
+			}
+			if _, ok := e.vars[id.Name]; ok {
+				// A declarative binding cannot be deleted.
+				return False, nil
+			}
 		}
 		key := StrKey(id.Name)
 		if i.global.HasOwn(key) {
@@ -137,7 +160,14 @@ func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Env
 
 // evalUpdate implements prefix/postfix ++ and --.
 func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *Environment) (Value, error) {
-	old, err := i.evalExpr(ctx, e.Operand, env)
+	// Resolve the target to a single Reference so its binding — and, for a `with`
+	// object environment record, its HasBinding/@@unscopables lookup — is
+	// consulted exactly once, shared by the read and the write-back (§13.4).
+	ref, err := i.evalRef(ctx, e.Operand, env)
+	if err != nil {
+		return nil, err
+	}
+	old, err := i.getRefValue(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +181,7 @@ func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *En
 			nv.Sub(b.Int, delta)
 		}
 		res := &BigInt{Int: nv}
-		if err := i.assignTo(ctx, e.Operand, res, env); err != nil {
+		if err := i.putRefValue(ctx, ref, res); err != nil {
 			return nil, err
 		}
 		if e.Prefix {
@@ -169,7 +199,7 @@ func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *En
 	} else {
 		updated = n - 1
 	}
-	if err := i.assignTo(ctx, e.Operand, Number(updated), env); err != nil {
+	if err := i.putRefValue(ctx, ref, Number(updated)); err != nil {
 		return nil, err
 	}
 	if e.Prefix {

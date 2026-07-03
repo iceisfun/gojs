@@ -112,6 +112,18 @@ func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool,
 		if cur.proxy != nil {
 			return cur.proxy.set(ctx, key, v, o)
 		}
+		// An integer-indexed exotic object reached as a *prototype* (its own
+		// [[Set]] with O != Receiver, §10.4.5.5 step 1.b.ii): a canonical numeric
+		// index that is not a valid in-bounds index silently blocks the write, so
+		// no property is created on the receiver.
+		if cur != o && cur.typedArray != nil && !key.IsSymbol() {
+			if n, ok := canonicalNumericIndex(key.Str); ok {
+				if _, valid := cur.typedArray.validIndex(n); !valid {
+					return true, nil
+				}
+				break // a valid index falls through to an ordinary create on o
+			}
+		}
 		p, ok := cur.getOwn(key)
 		if !ok {
 			continue

@@ -167,7 +167,7 @@ func (i *Interpreter) getRefValue(ctx context.Context, ref *reference) (Value, e
 		}
 		return b.value, nil
 	case refIdentWith:
-		return i.getV(ctx, ref.obj, StrKey(ref.name), ref.obj)
+		return i.withGetBindingValue(ctx, ref.obj, ref.name, ref.strict)
 	case refIdentGlobal:
 		return i.global.GetStr(ctx, ref.name)
 	case refIdentUnresolved:

@@ -35,6 +35,13 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 	}
 
 	env := i.globalEnv
+	// Indirect eval is never strict on account of its caller: its strictness comes
+	// solely from its own Directive Prologue (§19.2.1.1). The global environment is
+	// shared, so save and restore the flag around this synchronous run — mirroring
+	// evalProgram — rather than letting a strict enclosing program leak in.
+	savedStrict := env.strict
+	env.strict = prog.Strict
+	defer func() { env.strict = savedStrict }()
 	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
 		return nil, err
 	}
@@ -60,6 +67,9 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 	}
 
 	prog, err := parser.ParseEval("<eval>", string(str), parser.EvalContext{
+		// A direct eval inherits the strictness of the calling context, so
+		// strict-only early errors (e.g. a `with` statement) fire on its code.
+		Strict:             env.isStrict(),
 		AllowSuperCall:     env.inDerivedConstructor(),
 		AllowSuperProperty: env.homeObject() != nil,
 		AllowNewTarget:     env.functionScope() != i.globalEnv,
@@ -71,8 +81,10 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 
 	// A fresh declarative scope holds the eval's own lexical (let/const)
 	// bindings; var/function declarations hoist to the caller's variable scope,
-	// and this/super/#private resolve up the parent chain.
+	// and this/super/#private resolve up the parent chain. Direct-eval code is
+	// strict when its caller is strict or its own Directive Prologue opts in.
 	evalEnv := NewEnvironment(env, false)
+	evalEnv.strict = env.isStrict() || prog.Strict
 	if err := i.hoistDeclarations(ctx, prog.Body, evalEnv, true); err != nil {
 		return nil, err
 	}

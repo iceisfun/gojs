@@ -268,6 +268,49 @@ func (i *Interpreter) withHasBinding(ctx context.Context, obj *Object, name stri
 	return obj, true, nil
 }
 
+// withGetBindingValue implements the object environment record GetBindingValue
+// (§9.1.1.2.6). HasBinding has already matched, but GetBindingValue performs its
+// own [[HasProperty]] re-check first: a Proxy binding object, or a side effect
+// during the @@unscopables lookup, may have removed the property in between. If
+// it is gone, a strict reference throws a ReferenceError and a non-strict one
+// yields undefined; otherwise the value is read via [[Get]].
+func (i *Interpreter) withGetBindingValue(ctx context.Context, obj *Object, name string, strict bool) (Value, error) {
+	key := StrKey(name)
+	has, err := i.hasV(ctx, obj, key)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		if strict {
+			return nil, i.throwError(ctx, "ReferenceError", name+" is not defined")
+		}
+		return Undef, nil
+	}
+	return i.getV(ctx, obj, key, obj)
+}
+
+// withSetMutableBinding implements the object environment record
+// SetMutableBinding (§9.1.1.2.5): re-check [[HasProperty]] (a strict reference to
+// a binding that vanished throws a ReferenceError) before writing via [[Set]].
+func (i *Interpreter) withSetMutableBinding(ctx context.Context, obj *Object, name string, value Value, strict bool) error {
+	key := StrKey(name)
+	has, err := i.hasV(ctx, obj, key)
+	if err != nil {
+		return err
+	}
+	if !has && strict {
+		return i.throwError(ctx, "ReferenceError", name+" is not defined")
+	}
+	wrote, err := obj.setStatus(ctx, key, value)
+	if err != nil {
+		return err
+	}
+	if !wrote && strict {
+		return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+name)
+	}
+	return nil
+}
+
 // evalVarDecl evaluates a var/let/const declaration, assigning initializers.
 func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *Environment) error {
 	for _, d := range decl.Decls {
@@ -307,6 +350,16 @@ func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *E
 			// live binding initialized to undefined.
 			if decl.Kind != token.VAR {
 				forEachPatternName(d.Target, func(n string) { bind(n, Undef) })
+			}
+			continue
+		}
+		// A `var x = init` with a simple BindingIdentifier target assigns via
+		// PutValue(ResolveBinding(x), value) (§14.3.2.1), so an enclosing `with`
+		// object that has an own `x` property receives the write instead of the
+		// hoisted var binding.
+		if id, ok := d.Target.(*ast.Ident); ok && decl.Kind == token.VAR {
+			if err := i.assignIdent(ctx, id.Name, value, env); err != nil {
+				return err
 			}
 			continue
 		}

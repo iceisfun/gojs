@@ -473,7 +473,10 @@ func (p *parser) parseWith() ast.Stmt {
 	p.expect(token.LPAREN)
 	obj := p.parseExpression()
 	p.expect(token.RPAREN)
-	body := p.parseSubStatement(true)
+	// The body is a Statement: no Annex B relaxation applies to a `with` (B.3.4
+	// covers only IfStatement clauses, B.3.2 only StatementList positions), so a
+	// plain or labelled FunctionDeclaration here is a SyntaxError (§14.11.1).
+	body := p.parseSubStatement(false)
 	return &ast.WithStmt{Keyword: kw.Pos, Object: obj, Body: body}
 }
 
