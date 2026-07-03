@@ -241,15 +241,32 @@ func (i *Interpreter) initObject() {
 			if err != nil {
 				return nil, err
 			}
-			for _, name := range so.OwnKeys() {
-				if p, ok := so.getOwn(StrKey(name)); ok && p.Enumerable {
-					v, err := so.GetStr(ctx, name)
-					if err != nil {
-						return nil, err
-					}
-					if err := target.SetStr(ctx, name, v); err != nil {
-						return nil, err
-					}
+			// CopyDataProperties (§7.3.25): copy every own *enumerable* property —
+			// string- and symbol-keyed, in [[OwnPropertyKeys]] order — reading each
+			// value with [[Get]] and writing it with [[Set]] so getters/setters and
+			// Proxy traps run.
+			keys, err := i.ownKeysV(ctx, so)
+			if err != nil {
+				return nil, err
+			}
+			for _, k := range keys {
+				p, ok, err := i.getOwnPropertyV(ctx, so, k)
+				if err != nil {
+					return nil, err
+				}
+				if !ok || !p.Enumerable {
+					continue
+				}
+				v, err := i.getV(ctx, so, k, so)
+				if err != nil {
+					return nil, err
+				}
+				ok, err = i.setV(ctx, target, k, v, target)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					return nil, i.throwError(ctx, "TypeError", "Cannot assign to read only property '"+keyName(k)+"'")
 				}
 			}
 		}
@@ -257,17 +274,13 @@ func (i *Interpreter) initObject() {
 	})
 	i.defineMethod(ctor, "freeze", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if o, ok := arg(args, 0).(*Object); ok {
-			o.extensible = false
-			for _, p := range o.props {
-				p.Writable = false
-				p.Configurable = false
-			}
+			o.setIntegrityLevel(true)
 		}
 		return arg(args, 0), nil
 	})
 	i.defineMethod(ctor, "isFrozen", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if o, ok := arg(args, 0).(*Object); ok {
-			return Bool(!o.extensible), nil
+			return Bool(o.testIntegrityLevel(true)), nil
 		}
 		return True, nil
 	})
@@ -424,10 +437,22 @@ func (i *Interpreter) initObject() {
 			return nil, err
 		}
 		out := NewObject(i.objectProto)
-		for _, name := range o.OwnKeys() {
-			if p, ok := o.getOwn(StrKey(name)); ok {
-				out.SetData(name, i.descriptorToObject(p))
+		// §20.1.2.9: iterate every own key (string then symbol) through
+		// [[OwnPropertyKeys]]/[[GetOwnProperty]] and CreateDataProperty each
+		// descriptor onto the result under its original (possibly symbol) key.
+		keys, err := i.ownKeysV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			p, ok, err := i.getOwnPropertyV(ctx, o, k)
+			if err != nil {
+				return nil, err
 			}
+			if !ok {
+				continue
+			}
+			out.writeData(k, i.descriptorToObject(p))
 		}
 		return out, nil
 	})
@@ -475,10 +500,7 @@ func (i *Interpreter) initObject() {
 	})
 	i.defineMethod(ctor, "seal", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if o, ok := arg(args, 0).(*Object); ok {
-			o.extensible = false
-			for _, p := range o.props {
-				p.Configurable = false
-			}
+			o.setIntegrityLevel(false)
 		}
 		return arg(args, 0), nil
 	})
@@ -487,15 +509,7 @@ func (i *Interpreter) initObject() {
 		if !ok {
 			return True, nil
 		}
-		if o.extensible {
-			return False, nil
-		}
-		for _, p := range o.props {
-			if p.Configurable {
-				return False, nil
-			}
-		}
-		return True, nil
+		return Bool(o.testIntegrityLevel(false)), nil
 	})
 	i.defineMethod(ctor, "is", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return Bool(sameValue(arg(args, 0), arg(args, 1))), nil

@@ -130,15 +130,23 @@ type Object struct {
 	extensible bool
 	class      string
 
-	fn        *functionData // non-nil for callable objects
-	elems     []Value       // dense element storage for arrays
-	isArray   bool
+	fn      *functionData // non-nil for callable objects
+	elems   []Value       // dense element storage for arrays
+	isArray bool
 	// lengthNonWritable records that an Array's "length" property has had its
 	// [[Writable]] attribute set to false (via defineProperty). Length is
 	// otherwise a writable, non-enumerable, non-configurable data property.
 	lengthNonWritable bool
-	primitive Value          // wrapped primitive (String/Number/Boolean/Date)
-	internal  map[string]any // misc internal slots (RegExp source, Map data, ...)
+	// elemsNonWritable / elemsNonConfigurable strip the corresponding attribute
+	// from every dense array element served out of elems. They are set by
+	// Object.freeze (both) and Object.seal (configurable only), which would
+	// otherwise be unable to affect elements that never carry an explicit
+	// descriptor. A per-index descriptor de-optimized into props still overrides
+	// these defaults, since getOwn consults props first.
+	elemsNonWritable     bool
+	elemsNonConfigurable bool
+	primitive            Value          // wrapped primitive (String/Number/Boolean/Date)
+	internal             map[string]any // misc internal slots (RegExp source, Map data, ...)
 
 	// proxy is non-nil for a Proxy exotic object; it routes every essential
 	// internal method through the handler's traps (see builtin_proxy.go).
@@ -309,7 +317,7 @@ func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
 				if isHole(o.elems[idx]) {
 					return nil, false // hole: not an own property
 				}
-				return &Property{Value: o.elems[idx], Writable: true, Enumerable: true, Configurable: true}, true
+				return &Property{Value: o.elems[idx], Writable: !o.elemsNonWritable, Enumerable: true, Configurable: !o.elemsNonConfigurable}, true
 			}
 			return nil, false
 		}
@@ -475,6 +483,80 @@ func (o *Object) OwnKeys() []string {
 	}
 	out = append(out, strs...)
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Integrity levels (Object.freeze / seal / isFrozen / isSealed)
+// ---------------------------------------------------------------------------
+
+// hasDenseElem reports whether the array holds at least one present (non-hole)
+// dense element — i.e. a key served out of elems rather than props.
+func (o *Object) hasDenseElem() bool {
+	if !o.isArray {
+		return false
+	}
+	for _, v := range o.elems {
+		if v != nil && !isHole(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// setIntegrityLevel implements SetIntegrityLevel (§7.3.15) for ordinary and
+// array objects: it makes the object non-extensible and strips [[Configurable]]
+// from every own property (and [[Writable]] too when frozen). Array dense
+// elements are handled via elemsNonWritable/elemsNonConfigurable and, when
+// frozen, the "length" property is made non-writable.
+func (o *Object) setIntegrityLevel(frozen bool) {
+	o.extensible = false
+	for _, p := range o.props {
+		p.Configurable = false
+		if frozen && !p.Accessor {
+			p.Writable = false
+		}
+	}
+	if o.isArray {
+		o.elemsNonConfigurable = true
+		if frozen {
+			o.elemsNonWritable = true
+			o.lengthNonWritable = true
+		}
+	}
+}
+
+// testIntegrityLevel implements TestIntegrityLevel (§7.3.16): it reports whether
+// the object is at the requested integrity level, considering array dense
+// elements and (for frozen) the array "length" property.
+func (o *Object) testIntegrityLevel(frozen bool) bool {
+	if o.extensible {
+		return false
+	}
+	for _, p := range o.props {
+		if p.Configurable {
+			return false
+		}
+		if frozen && !p.Accessor && p.Writable {
+			return false
+		}
+	}
+	if o.isArray {
+		if o.hasDenseElem() {
+			if !o.elemsNonConfigurable {
+				return false
+			}
+			if frozen && !o.elemsNonWritable {
+				return false
+			}
+		}
+		// The "length" data property is writable by default; a frozen array must
+		// have made it non-writable. (It is always non-configurable, so seal needs
+		// no length check.)
+		if frozen && !o.lengthNonWritable {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
