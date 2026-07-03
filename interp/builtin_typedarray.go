@@ -337,25 +337,34 @@ func (i *Interpreter) typedArrayConstruct(ctx context.Context, kind taKind, newT
 	if IsUndefined(newTarget) || newTarget == nil {
 		return nil, i.throwError(ctx, "TypeError", "Constructor "+taKinds[kind].name+" requires 'new'")
 	}
-	proto, err := i.protoFromCtor(ctx, newTarget, i.typedArrayKindProtos[kind])
-	if err != nil {
-		return nil, err
-	}
-	o := i.allocateTypedArray(kind, proto)
-
 	first := arg(args, 0)
 	fo, isObj := first.(*Object)
 	if !isObj {
-		// new T(length): a non-object first argument is a length.
+		// new T(length): a non-object first argument is a length. Per
+		// %TypedArray% ( ...args ) the element length is computed with ToIndex
+		// *before* AllocateTypedArray reaches GetPrototypeFromConstructor, so a
+		// throwing ToIndex (e.g. a Symbol argument) must not evaluate the
+		// newTarget "prototype" getter.
 		length, err := i.toIndex(ctx, first)
 		if err != nil {
 			return nil, err
 		}
+		proto, err := i.protoFromCtor(ctx, newTarget, i.typedArrayKindProtos[kind])
+		if err != nil {
+			return nil, err
+		}
+		o := i.allocateTypedArray(kind, proto)
 		if err := i.allocateTypedArrayBuffer(ctx, o, length); err != nil {
 			return nil, err
 		}
 		return o, nil
 	}
+
+	proto, err := i.protoFromCtor(ctx, newTarget, i.typedArrayKindProtos[kind])
+	if err != nil {
+		return nil, err
+	}
+	o := i.allocateTypedArray(kind, proto)
 
 	switch {
 	case fo.typedArray != nil:

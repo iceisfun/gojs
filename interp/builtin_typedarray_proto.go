@@ -919,6 +919,12 @@ func (i *Interpreter) taWith(ctx context.Context, this Value, args []Value) (Val
 	if relative < 0 {
 		actual = float64(length) + relative
 	}
+	// actualIndex is a mathematical integer, so 𝔽(actualIndex) is never -0.
+	// Normalize a negative zero (e.g. from ToIntegerOrInfinity(-0) or a small
+	// negative fraction) to +0 so that IsValidIntegerIndex does not reject it.
+	if actual == 0 {
+		actual = 0
+	}
 	// Coerce the value to the content type (which may throw TypeError).
 	value := arg(args, 1)
 	var conv Value

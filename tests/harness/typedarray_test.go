@@ -185,3 +185,45 @@ func TestTypedArrayConstructorErrors(t *testing.T) {
 	ExpectError(t, `new Int32Array(new ArrayBuffer(6))`, "RangeError")
 	ExpectError(t, `new Int32Array(new ArrayBuffer(16), 6)`, "RangeError")
 }
+
+// TestTypedArrayWithNegativeZeroIndex guards against a regression where
+// %TypedArray%.prototype.with rejected a -0 actualIndex (produced by
+// ToIntegerOrInfinity(-0) or a small negative fraction) as an "invalid index".
+// Per spec the index is a mathematical integer, so 𝔽(actualIndex) is never -0
+// and index 0 must be written.
+func TestTypedArrayWithNegativeZeroIndex(t *testing.T) {
+	Expect(t, `
+		var kinds = [Int32Array, Float32Array, Float64Array, Uint8Array];
+		for (var i = 0; i < kinds.length; i++) {
+			var TA = kinds[i];
+			var a = new TA([0, 1, 2]);
+			// -0 is not negative: it addresses index 0.
+			assert.sameValue(a.with(-0, 4).join(","), "4,1,2");
+			// A small negative fraction truncates toward zero (-0), still index 0.
+			assert.sameValue(a.with(-0.5, 4).join(","), "4,1,2");
+			// Ordinary negative indices still count from the end.
+			assert.sameValue(a.with(-1, 4).join(","), "0,1,4");
+			assert.sameValue(a.with(-3, 4).join(","), "4,1,2");
+		}
+		var b = new Float64Array([9]);
+		assert.sameValue(b.with(-0.5, 123)[0], 123);
+	`)
+}
+
+// TestTypedArrayConstructNonObjectToIndexBeforeProto guards against a
+// regression where the constructor read newTarget's "prototype" before running
+// ToIndex on a non-object first argument. A throwing ToIndex (e.g. a Symbol)
+// must surface before the prototype getter is evaluated.
+func TestTypedArrayConstructNonObjectToIndexBeforeProto(t *testing.T) {
+	Expect(t, `
+		var newTarget = function () {}.bind(null);
+		var protoAccessed = false;
+		Object.defineProperty(newTarget, "prototype", {
+			get: function () { protoAccessed = true; return Float64Array.prototype; },
+		});
+		assert.throws(TypeError, function () {
+			Reflect.construct(Float64Array, [Symbol()], newTarget);
+		});
+		assert.sameValue(protoAccessed, false);
+	`)
+}
