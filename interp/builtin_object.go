@@ -2,6 +2,66 @@ package interp
 
 import "context"
 
+// objectProtoToString implements %Object.prototype.toString% (§20.1.3.6). It is
+// exposed as a named method so Array.prototype.toString can fall back to the
+// intrinsic directly (§23.1.3.36 step 3) even when the user has deleted
+// Object.prototype.toString from the prototype chain.
+func (i *Interpreter) objectProtoToString(ctx context.Context, this Value) (Value, error) {
+	switch this.(type) {
+	case Undefined:
+		return String("[object Undefined]"), nil
+	case Null:
+		return String("[object Null]"), nil
+	}
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	// Determine builtinTag from the object's kind. IsArray is proxy-aware and
+	// throws for a revoked proxy; the remaining slots are recognized by the
+	// object's internal class. A callable object (including a callable Proxy)
+	// is "Function" regardless of its class, so the more specific generator/
+	// async tags come only from @@toStringTag on the prototype chain.
+	isArr, err := i.isArrayV(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	var builtinTag string
+	switch {
+	case isArr:
+		builtinTag = "Array"
+	case o.class == "Arguments":
+		builtinTag = "Arguments"
+	case o.IsCallable():
+		builtinTag = "Function"
+	case o.class == "Error":
+		builtinTag = "Error"
+	case o.class == "Boolean":
+		builtinTag = "Boolean"
+	case o.class == "Number":
+		builtinTag = "Number"
+	case o.class == "String":
+		builtinTag = "String"
+	case o.class == "Date":
+		builtinTag = "Date"
+	case o.class == "RegExp":
+		builtinTag = "RegExp"
+	default:
+		builtinTag = "Object"
+	}
+	// tag = Get(O, @@toStringTag); a String result overrides builtinTag, and an
+	// abrupt getter propagates. Any non-string tag is ignored.
+	tagVal, err := i.getV(ctx, o, SymKey(i.symToStringTag), o)
+	if err != nil {
+		return nil, err
+	}
+	tag := builtinTag
+	if s, ok := tagVal.(String); ok {
+		tag = string(s)
+	}
+	return String("[object " + tag + "]"), nil
+}
+
 // initObject installs the Object constructor and Object.prototype methods.
 func (i *Interpreter) initObject() {
 	proto := i.objectProto
@@ -74,60 +134,7 @@ func (i *Interpreter) initObject() {
 		return False, nil
 	})
 	i.defineMethod(proto, "toString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		// §20.1.3.6 Object.prototype.toString.
-		switch this.(type) {
-		case Undefined:
-			return String("[object Undefined]"), nil
-		case Null:
-			return String("[object Null]"), nil
-		}
-		o, err := i.ToObject(ctx, this)
-		if err != nil {
-			return nil, err
-		}
-		// Determine builtinTag from the object's kind. IsArray is proxy-aware and
-		// throws for a revoked proxy; the remaining slots are recognized by the
-		// object's internal class. A callable object (including a callable Proxy)
-		// is "Function" regardless of its class, so the more specific generator/
-		// async tags come only from @@toStringTag on the prototype chain.
-		isArr, err := i.isArrayV(ctx, o)
-		if err != nil {
-			return nil, err
-		}
-		var builtinTag string
-		switch {
-		case isArr:
-			builtinTag = "Array"
-		case o.class == "Arguments":
-			builtinTag = "Arguments"
-		case o.IsCallable():
-			builtinTag = "Function"
-		case o.class == "Error":
-			builtinTag = "Error"
-		case o.class == "Boolean":
-			builtinTag = "Boolean"
-		case o.class == "Number":
-			builtinTag = "Number"
-		case o.class == "String":
-			builtinTag = "String"
-		case o.class == "Date":
-			builtinTag = "Date"
-		case o.class == "RegExp":
-			builtinTag = "RegExp"
-		default:
-			builtinTag = "Object"
-		}
-		// tag = Get(O, @@toStringTag); a String result overrides builtinTag, and an
-		// abrupt getter propagates. Any non-string tag is ignored.
-		tagVal, err := i.getV(ctx, o, SymKey(i.symToStringTag), o)
-		if err != nil {
-			return nil, err
-		}
-		tag := builtinTag
-		if s, ok := tagVal.(String); ok {
-			tag = string(s)
-		}
-		return String("[object " + tag + "]"), nil
+		return i.objectProtoToString(ctx, this)
 	})
 	i.defineMethod(proto, "toLocaleString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		// Invoke(this, "toString"): getProperty boxes a primitive receiver so

@@ -93,6 +93,20 @@ func (i *Interpreter) initArray() {
 		proto.defineOwn(SymKey(i.symIterator), &Property{Value: vp.Value, Writable: true, Configurable: true})
 	}
 
+	// Array.prototype[Symbol.unscopables] (§23.1.3.35): a null-prototype object
+	// whose own enumerable data properties (all true) name the methods excluded
+	// from `with`-statement scope resolution. The property itself is
+	// {writable:false, enumerable:false, configurable:true}.
+	unscopables := NewObject(nil)
+	for _, name := range []string{
+		"at", "copyWithin", "entries", "fill", "find", "findIndex",
+		"findLast", "findLastIndex", "flat", "flatMap", "includes",
+		"keys", "toReversed", "toSorted", "toSpliced", "values",
+	} {
+		unscopables.defineOwn(StrKey(name), &Property{Value: Bool(true), Writable: true, Enumerable: true, Configurable: true})
+	}
+	proto.defineOwn(SymKey(i.symUnscopables), &Property{Value: unscopables, Writable: false, Enumerable: false, Configurable: true})
+
 	i.arrayCtor = ctor
 	i.setGlobalHidden("Array", ctor)
 }
@@ -175,48 +189,158 @@ func (i *Interpreter) thisArray(ctx context.Context, this Value) (*Object, error
 	return o, nil
 }
 
+// setOrThrow implements Set(O, key, v, true) (§7.3.4 with Throw=true): it
+// performs the ordinary [[Set]] and raises a TypeError when the write is
+// rejected (a non-writable/non-configurable property, a frozen or
+// non-extensible receiver, or a Proxy trap returning false).
+func (i *Interpreter) setOrThrow(ctx context.Context, o *Object, key PropertyKey, v Value) error {
+	ok, err := i.setV(ctx, o, key, v, o)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return i.throwError(ctx, "TypeError", "Cannot assign to read only property '"+key.Str+"' of object")
+	}
+	return nil
+}
+
+// idxKey returns the canonical string PropertyKey ! ToString(𝔽(n)) for a
+// non-negative array index, which for a safe-integer n is its decimal spelling.
+func idxKey(n int) PropertyKey { return StrKey(strconv.Itoa(n)) }
+
+// arrayPush implements Array.prototype.push (§23.1.3.23) generically over an
+// array-like `this`: it appends each argument at index len via [[Set]],
+// throwing a TypeError if the resulting length would exceed 2^53-1, and
+// updates "length" at the end.
 func (i *Interpreter) arrayPush(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	o.elems = append(o.elems, args...)
-	return Number(float64(len(o.elems))), nil
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	const maxSafe = 1<<53 - 1
+	if float64(length)+float64(len(args)) > maxSafe {
+		return nil, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+	}
+	for _, e := range args {
+		if err := i.setOrThrow(ctx, o, idxKey(length), e); err != nil {
+			return nil, err
+		}
+		length++
+	}
+	if err := i.setOrThrow(ctx, o, StrKey("length"), Number(float64(length))); err != nil {
+		return nil, err
+	}
+	return Number(float64(length)), nil
 }
 
+// arrayPop implements Array.prototype.pop (§23.1.3.21) generically: it reads
+// and deletes the final index via [[Get]]/[[Delete]] and lowers "length",
+// propagating any TypeError from those operations (e.g. a frozen array).
 func (i *Interpreter) arrayPop(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	if len(o.elems) == 0 {
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		if err := i.setOrThrow(ctx, o, StrKey("length"), Number(0)); err != nil {
+			return nil, err
+		}
 		return Undef, nil
 	}
-	v := o.elems[len(o.elems)-1]
-	o.elems = o.elems[:len(o.elems)-1]
-	return undefIfHole(v), nil
+	newLen := length - 1
+	idx := idxKey(newLen)
+	element, err := i.getV(ctx, o, idx, o)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.deletePropertyOrThrow(ctx, o, idx); err != nil {
+		return nil, err
+	}
+	if err := i.setOrThrow(ctx, o, StrKey("length"), Number(float64(newLen))); err != nil {
+		return nil, err
+	}
+	return element, nil
 }
 
+// arrayShift implements Array.prototype.shift (§23.1.3.25) generically: it
+// removes index 0, shifts every surviving element down by one via
+// [[Get]]/[[Set]]/[[Delete]] (preserving holes), then lowers "length".
 func (i *Interpreter) arrayShift(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	if len(o.elems) == 0 {
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		if err := i.setOrThrow(ctx, o, StrKey("length"), Number(0)); err != nil {
+			return nil, err
+		}
 		return Undef, nil
 	}
-	v := o.elems[0]
-	o.elems = o.elems[1:]
-	return undefIfHole(v), nil
-}
-
-func (i *Interpreter) arrayUnshift(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	first, err := i.getV(ctx, o, StrKey("0"), o)
 	if err != nil {
 		return nil, err
 	}
-	o.elems = append(append([]Value{}, args...), o.elems...)
-	return Number(float64(len(o.elems))), nil
+	for k := 1; k < length; k++ {
+		if err := i.spliceMove(ctx, o, idxKey(k), idxKey(k-1)); err != nil {
+			return nil, err
+		}
+	}
+	if err := i.deletePropertyOrThrow(ctx, o, idxKey(length-1)); err != nil {
+		return nil, err
+	}
+	if err := i.setOrThrow(ctx, o, StrKey("length"), Number(float64(length-1))); err != nil {
+		return nil, err
+	}
+	return first, nil
+}
+
+// arrayUnshift implements Array.prototype.unshift (§23.1.3.32) generically: it
+// shifts existing elements up by argCount via [[Get]]/[[Set]]/[[Delete]],
+// writes the new items at the front, and raises the length, throwing a
+// TypeError when the resulting length would exceed 2^53-1.
+func (i *Interpreter) arrayUnshift(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	argCount := len(args)
+	if argCount > 0 {
+		const maxSafe = 1<<53 - 1
+		if float64(length)+float64(argCount) > maxSafe {
+			return nil, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+		}
+		for k := length; k > 0; k-- {
+			if err := i.spliceMove(ctx, o, idxKey(k-1), idxKey(k+argCount-1)); err != nil {
+				return nil, err
+			}
+		}
+		for j, e := range args {
+			if err := i.setOrThrow(ctx, o, idxKey(j), e); err != nil {
+				return nil, err
+			}
+		}
+	}
+	newLen := length + argCount
+	if err := i.setOrThrow(ctx, o, StrKey("length"), Number(float64(newLen))); err != nil {
+		return nil, err
+	}
+	return Number(float64(newLen)), nil
 }
 
 // arraySlice implements Array.prototype.slice (§23.1.3.25) generically: it
@@ -791,14 +915,10 @@ func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Valu
 	if jo, ok := joinV.(*Object); ok && jo.IsCallable() {
 		return jo.fn.call(ctx, o, nil)
 	}
-	toStr, err := i.objectProto.GetStr(ctx, "toString")
-	if err != nil {
-		return nil, err
-	}
-	if to, ok := toStr.(*Object); ok && to.IsCallable() {
-		return to.fn.call(ctx, o, nil)
-	}
-	return i.arrayJoin(ctx, this, nil)
+	// join is not callable: fall back to the intrinsic %Object.prototype.toString%
+	// (§23.1.3.36 step 3), not a re-lookup of the possibly-deleted prototype
+	// method.
+	return i.objectProtoToString(ctx, o)
 }
 
 // arrayToLocaleString implements Array.prototype.toLocaleString (§23.1.3.32),
@@ -1474,9 +1594,22 @@ func (i *Interpreter) newArrayIterator(ctx context.Context, this Value, kind arr
 	i.defineMethod(it, "next", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
 		res := NewObject(i.objectProto)
 		if !done {
-			length, err := i.lengthOfArrayLike(ctx, o)
-			if err != nil {
-				return nil, err
+			var length int
+			if o.typedArray != nil {
+				// §23.1.5.1: for a TypedArray receiver the iterator throws when the
+				// view is detached or out of bounds (a resizable buffer shrank), and
+				// otherwise uses the live TypedArrayLength rather than Get("length").
+				oob, n := o.typedArray.outOfBounds()
+				if oob {
+					return nil, i.throwError(ctx, "TypeError", "TypedArray is out of bounds")
+				}
+				length = n
+			} else {
+				l, err := i.lengthOfArrayLike(ctx, o)
+				if err != nil {
+					return nil, err
+				}
+				length = l
 			}
 			if idx < length {
 				cur := idx
