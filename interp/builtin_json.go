@@ -20,12 +20,19 @@ func (i *Interpreter) initJSON() {
 		if ro, ok := replacer.(*Object); ok {
 			if ro.IsCallable() {
 				st.replacerFn = ro
-			} else if ro.isArray {
-				list, err := i.jsonPropertyList(ctx, ro)
+			} else {
+				// IsArray recurses through a Proxy and throws for a revoked one.
+				isArr, err := i.isArrayV(ctx, ro)
 				if err != nil {
 					return nil, err
 				}
-				st.propList = list
+				if isArr {
+					list, err := i.jsonPropertyList(ctx, ro)
+					if err != nil {
+						return nil, err
+					}
+					st.propList = list
+				}
 			}
 		}
 
@@ -158,9 +165,16 @@ type jsonState struct {
 func (i *Interpreter) jsonPropertyList(ctx context.Context, arr *Object) ([]string, error) {
 	list := []string{} // non-nil: an array replacer is an allow-list even if empty
 	seen := map[string]bool{}
-	n := len(arr.elems)
+	// LengthOfArrayLike + [[Get]] so a Proxy replacer's traps run (§25.5.2).
+	n, err := i.lengthOfArrayLike(ctx, arr)
+	if err != nil {
+		return nil, err
+	}
 	for idx := 0; idx < n; idx++ {
-		v := undefIfHole(arr.elems[idx])
+		v, err := arr.GetStr(ctx, intToStr(idx))
+		if err != nil {
+			return nil, err
+		}
 		var item string
 		var ok bool
 		switch x := v.(type) {
@@ -328,7 +342,13 @@ func (st *jsonState) serializeProperty(ctx context.Context, b *strings.Builder, 
 		}
 		st.seen[x] = true
 		defer delete(st.seen, x)
-		if x.isArray {
+		// IsArray recurses through a Proxy so an array behind a proxy is
+		// serialized as an array (§25.5.2.1 step 10).
+		isArr, err := i.isArrayV(ctx, x)
+		if err != nil {
+			return false, err
+		}
+		if isArr {
 			return true, st.serializeArray(ctx, b, x, cur)
 		}
 		return true, st.serializeObject(ctx, b, x, cur)
@@ -345,13 +365,18 @@ func isBigIntValue(value Value) bool {
 
 // serializeArray implements SerializeJSONArray (§25.5.2.4).
 func (st *jsonState) serializeArray(ctx context.Context, b *strings.Builder, o *Object, cur string) error {
-	if len(o.elems) == 0 {
+	// LengthOfArrayLike + [[Get]] per index so a Proxy array's traps run.
+	length, err := st.i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return err
+	}
+	if length == 0 {
 		b.WriteString("[]")
 		return nil
 	}
 	next := cur + st.gap
 	b.WriteByte('[')
-	for idx := range o.elems {
+	for idx := 0; idx < length; idx++ {
 		if idx > 0 {
 			b.WriteByte(',')
 		}
@@ -376,18 +401,18 @@ func (st *jsonState) serializeArray(ctx context.Context, b *strings.Builder, o *
 func (st *jsonState) serializeObject(ctx context.Context, b *strings.Builder, o *Object, cur string) error {
 	next := cur + st.gap
 
-	// K = PropertyList (array replacer) or the object's own enumerable keys.
+	// K = PropertyList (array replacer) or EnumerableOwnPropertyNames(value, key),
+	// which routes through [[OwnPropertyKeys]]/[[GetOwnProperty]] so a Proxy's
+	// traps run (§25.5.2.5 step 5).
 	var keys []string
 	if st.propList != nil {
 		keys = st.propList
 	} else {
-		for _, name := range o.OwnKeys() {
-			p, ok := o.getOwn(StrKey(name))
-			if !ok || !p.Enumerable {
-				continue
-			}
-			keys = append(keys, name)
+		names, err := st.i.jsonEnumerableOwnNames(ctx, o)
+		if err != nil {
+			return err
 		}
+		keys = names
 	}
 
 	b.WriteByte('{')
@@ -733,8 +758,19 @@ func (i *Interpreter) internalizeJSONProperty(ctx context.Context, holder *Objec
 	}
 
 	if o, ok := value.(*Object); ok {
-		if o.isArray {
-			length := len(o.elems)
+		// IsArray recurses through a Proxy and throws for a revoked one; the
+		// child keys and mutations then go through the object internal methods
+		// (LengthOfArrayLike/[[Get]]/[[Delete]]/[[DefineOwnProperty]]) so a
+		// Proxy value installed by the reviver has its traps invoked (§25.5.1.1).
+		isArr, err := i.isArrayV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+		if isArr {
+			length, err := i.lengthOfArrayLike(ctx, o)
+			if err != nil {
+				return nil, err
+			}
 			for idx := 0; idx < length; idx++ {
 				key := intToStr(idx)
 				var er *jsonNode
@@ -746,15 +782,21 @@ func (i *Interpreter) internalizeJSONProperty(ctx context.Context, holder *Objec
 					return nil, err
 				}
 				if IsUndefined(newEl) {
-					if idx < len(o.elems) {
-						o.elems[idx] = theHole
+					if _, err := i.deleteV(ctx, o, StrKey(key)); err != nil {
+						return nil, err
 					}
-				} else if idx < len(o.elems) {
-					o.elems[idx] = newEl
+				} else {
+					if _, err := i.definePropertyV(ctx, o, StrKey(key), i.dataDescriptorObject(newEl)); err != nil {
+						return nil, err
+					}
 				}
 			}
 		} else {
-			for _, key := range i.jsonOwnEnumKeys(o) {
+			keys, err := i.jsonEnumerableOwnNames(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			for _, key := range keys {
 				var er *jsonNode
 				for _, e := range entryRecs {
 					if e.key == key {
@@ -767,9 +809,13 @@ func (i *Interpreter) internalizeJSONProperty(ctx context.Context, holder *Objec
 					return nil, err
 				}
 				if IsUndefined(newEl) {
-					o.Delete(StrKey(key)) // ignore failure per spec note
+					if _, err := i.deleteV(ctx, o, StrKey(key)); err != nil {
+						return nil, err
+					}
 				} else {
-					o.createDataProperty(StrKey(key), newEl)
+					if _, err := i.definePropertyV(ctx, o, StrKey(key), i.dataDescriptorObject(newEl)); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -778,13 +824,29 @@ func (i *Interpreter) internalizeJSONProperty(ctx context.Context, holder *Objec
 	return reviver.fn.call(ctx, holder, []Value{String(name), value, context})
 }
 
-// jsonOwnEnumKeys snapshots o's own enumerable string-keyed property names.
-func (i *Interpreter) jsonOwnEnumKeys(o *Object) []string {
-	var keys []string
-	for _, name := range o.OwnKeys() {
-		if p, ok := o.getOwn(StrKey(name)); ok && p.Enumerable {
-			keys = append(keys, name)
-		}
+// jsonEnumerableOwnNames implements EnumerableOwnPropertyNames(o, key) for
+// string keys (§7.3.23): each own string key from [[OwnPropertyKeys]] whose
+// [[GetOwnProperty]] descriptor is enumerable, in order. Routing through the
+// object internal methods lets a Proxy's ownKeys/getOwnPropertyDescriptor traps
+// run.
+func (i *Interpreter) jsonEnumerableOwnNames(ctx context.Context, o *Object) ([]string, error) {
+	ownKeys, err := i.ownKeysV(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	return keys
+	var keys []string
+	for _, k := range ownKeys {
+		if k.IsSymbol() {
+			continue
+		}
+		desc, ok, err := i.getOwnPropertyV(ctx, o, k)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !desc.Enumerable {
+			continue
+		}
+		keys = append(keys, k.Str)
+	}
+	return keys, nil
 }

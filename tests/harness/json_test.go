@@ -403,3 +403,129 @@ func TestJSONParseReviver(t *testing.T) {
 		assert.sameValue(omit.hasOwnProperty('secret'), false);
 	`)
 }
+
+// TestJSONStringifyProxyValue checks that JSON.stringify serializes a Proxy by
+// routing through the object internal methods: IsArray recurses through the
+// proxy, arrays use LengthOfArrayLike + [[Get]], and objects enumerate via
+// [[OwnPropertyKeys]]/[[GetOwnProperty]] so the traps run (§25.5.2).
+func TestJSONStringifyProxyValue(t *testing.T) {
+	Expect(t, `
+		var objectProxy = new Proxy({}, {
+			getOwnPropertyDescriptor: function() {
+				return {value: 1, writable: true, enumerable: true, configurable: true};
+			},
+			get: function() { return 1; },
+			ownKeys: function() { return ['a', 'b']; },
+		});
+		assert.sameValue(JSON.stringify(objectProxy), '{"a":1,"b":1}');
+		assert.sameValue(JSON.stringify({l1: {l2: objectProxy}}), '{"l1":{"l2":{"a":1,"b":1}}}');
+		assert.sameValue(JSON.stringify({l1: new Proxy(objectProxy, {})}), '{"l1":{"a":1,"b":1}}');
+
+		var arrayProxy = new Proxy([], {
+			get: function(_t, key) {
+				if (key === 'length') return 2;
+				return Number(key);
+			},
+		});
+		assert.sameValue(JSON.stringify(arrayProxy), '[0,1]');
+		assert.sameValue(JSON.stringify([[arrayProxy]]), '[[[0,1]]]');
+		assert.sameValue(JSON.stringify([new Proxy(arrayProxy, {})]), '[[0,1]]');
+	`)
+}
+
+// TestJSONStringifyReplacerProxyArray checks that an array replacer behind a
+// Proxy is treated as a PropertyList (IsArray recurses) and its members are
+// read via LengthOfArrayLike + [[Get]] (§25.5.2 step 4).
+func TestJSONStringifyReplacerProxyArray(t *testing.T) {
+	Expect(t, `
+		var replacer = new Proxy(['b'], {});
+		assert.sameValue(JSON.stringify({a: 1, b: 2}, replacer), '{"b":2}');
+		assert.sameValue(JSON.stringify({b: {a: 3, b: 4}}, replacer), '{"b":{"b":4}}');
+	`)
+}
+
+// TestJSONStringifyProxyErrors checks that abrupt completions from an array's
+// length/index reads and from a revoked replacer proxy propagate out of
+// JSON.stringify.
+func TestJSONStringifyProxyErrors(t *testing.T) {
+	// A revoked array replacer throws TypeError from IsArray.
+	ExpectError(t, `
+		var handle = Proxy.revocable([], {});
+		handle.revoke();
+		JSON.stringify({}, handle.proxy);
+	`, "TypeError")
+
+	// An abrupt "length" get on a proxied array value propagates.
+	ExpectError(t, `
+		var abruptLength = new Proxy([], {
+			get: function(_t, key) { if (key === 'length') throw new TypeError('boom'); },
+		});
+		JSON.stringify(abruptLength);
+	`, "TypeError")
+
+	// An accessor array index that throws propagates when the array is a replacer.
+	ExpectError(t, `
+		var a = new Array(1);
+		Object.defineProperty(a, '0', { get: function() { throw new TypeError('boom'); } });
+		JSON.stringify({}, a);
+	`, "TypeError")
+}
+
+// TestJSONParseReviverProxyObject checks that when the reviver installs a Proxy
+// for an ordinary object, the child keys are enumerated through the proxy's
+// ownKeys trap (§25.5.1.1: EnumerableOwnProperties via [[OwnPropertyKeys]]).
+func TestJSONParseReviverProxyObject(t *testing.T) {
+	Expect(t, `
+		var objectProxy = new Proxy({length: 0, other: 0}, {});
+		var visitedOther = false;
+		JSON.parse('[null, null]', function(name, val) {
+			if (name === 'other') visitedOther = true;
+			this[1] = objectProxy;
+			return val;
+		});
+		assert.sameValue(visitedOther, true, 'proxy for ordinary object');
+
+		// A Proxy for an array is iterated by index, so "other" is never visited.
+		var arrayProxy = new Proxy([], {});
+		arrayProxy.other = 0;
+		var visitedArr = false;
+		JSON.parse('[null, null]', function(name, val) {
+			if (name === 'other') visitedArr = true;
+			this[1] = arrayProxy;
+			return val;
+		});
+		assert.sameValue(visitedArr, false, 'proxy for array');
+	`)
+}
+
+// TestJSONParseReviverProxyErrors checks that abrupt completions from the
+// object internal methods invoked while reviving a Proxy value propagate.
+func TestJSONParseReviverProxyErrors(t *testing.T) {
+	// A revoked proxy installed by the reviver throws TypeError from IsArray.
+	ExpectError(t, `
+		var handle = Proxy.revocable([], {});
+		handle.revoke();
+		JSON.parse('[null, null]', function() { this[1] = handle.proxy; });
+	`, "TypeError")
+
+	// An ownKeys trap that throws propagates during EnumerableOwnProperties.
+	ExpectError(t, `
+		var badKeys = new Proxy({}, { ownKeys: function() { throw new TypeError('boom'); } });
+		JSON.parse('[0,0]', function() { this[1] = badKeys; });
+	`, "TypeError")
+
+	// A deleteProperty trap that throws propagates when an element revives to undefined.
+	ExpectError(t, `
+		var badDelete = new Proxy([0], { deleteProperty: function() { throw new TypeError('boom'); } });
+		JSON.parse('[0,0]', function() { this[1] = badDelete; });
+	`, "TypeError")
+
+	// A defineProperty trap that throws propagates when reviving redefines a member.
+	ExpectError(t, `
+		var badDefine = new Proxy([null], { defineProperty: function() { throw new TypeError('boom'); } });
+		JSON.parse('["first", null]', function(_k, value) {
+			if (value === 'first') this[1] = badDefine;
+			return value;
+		});
+	`, "TypeError")
+}
