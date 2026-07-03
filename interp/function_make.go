@@ -349,17 +349,32 @@ func collectParamNames(params []ast.Expr) []string {
 }
 
 // makeArguments builds the arguments object for a function invocation: an
-// array-like snapshot of the actual arguments.
+// ordinary object holding a snapshot of the actual arguments.
 //
-// gojs backs the arguments object with an Array so the ubiquitous generic
-// idioms (Array.prototype.slice.call(arguments), for-of, spread) work directly.
-// It does NOT implement the sloppy-mode "mapped" aliasing between arguments[i]
+// It is deliberately NOT an Array exotic object: assigning an out-of-range index
+// must not grow "length" (§10.4.4 — the arguments object has an ordinary "length"
+// data property, not the Array length-coupling), and Array.isArray(arguments) is
+// false. "length" is {W:true, E:false, C:true}, the indices are {W,E,C:true}, and
+// @@iterator is %Array.prototype.values% so for-of and spread still work; the
+// "Arguments" class drives Object.prototype.toString's [object Arguments] tag.
+// Every Array.prototype method is generic over array-likes, so slice.call and
+// friends reach the elements through the length + indexed-property protocol
+// without dense backing.
+//
+// gojs does NOT implement the sloppy-mode "mapped" aliasing between arguments[i]
 // and the corresponding named parameter (writes to one do not appear in the
-// other). See wontfix/function-code.md for the rationale and plan. Strict-mode
-// (unmapped) behavior — where no such aliasing exists — is therefore exact.
+// other). See wontfix/function-code.md for the rationale and plan. Unmapped
+// behavior — where no such aliasing exists — is therefore exact.
 func (i *Interpreter) makeArguments(args []Value) *Object {
-	o := i.newArray(append([]Value{}, args...))
+	o := NewObject(i.objectProto)
 	o.class = "Arguments"
+	for idx, v := range args {
+		o.defineOwn(StrKey(intToStr(idx)), &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
+	}
+	o.defineOwn(StrKey("length"), &Property{Value: Number(float64(len(args))), Writable: true, Enumerable: false, Configurable: true})
+	if it, ok := i.arrayProto.getOwn(StrKey("values")); ok {
+		o.defineOwn(SymKey(i.symIterator), &Property{Value: it.Value, Writable: true, Enumerable: false, Configurable: true})
+	}
 	return o
 }
 

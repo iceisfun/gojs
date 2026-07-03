@@ -67,10 +67,10 @@ func (i *Interpreter) initObject() {
 			return nil, err
 		}
 		tag := o.class
-		// An Arguments object is backed by an Array in this engine, but its
-		// builtin tag is "Arguments" (§20.1.3.6 checks [[ParameterMap]] before
-		// falling back to the ordinary class), so it must not report "Array".
-		if o.isArray && o.class != "Arguments" {
+		// The builtin tag is derived from the class; an Arguments object carries
+		// class "Arguments" (§20.1.3.6 checks [[ParameterMap]] before falling back
+		// to the ordinary class) and reports it verbatim.
+		if o.isArray {
 			tag = "Array"
 		} else if o.IsCallable() {
 			tag = "Function"

@@ -134,9 +134,11 @@ func (i *Interpreter) initArray() {
 	for _, m := range methods {
 		i.defineMethod(proto, m.name, m.n, m.fn)
 	}
-	// Array.prototype[Symbol.iterator] === values
-	valuesFn := i.newNativeFunc("values", 0, i.arrayValues)
-	proto.defineOwn(SymKey(i.symIterator), &Property{Value: valuesFn, Writable: true, Configurable: true})
+	// Array.prototype[Symbol.iterator] is the very same function object as
+	// Array.prototype.values (§23.1.3.40), not a distinct copy.
+	if vp, ok := proto.getOwn(StrKey("values")); ok {
+		proto.defineOwn(SymKey(i.symIterator), &Property{Value: vp.Value, Writable: true, Configurable: true})
+	}
 
 	i.arrayCtor = ctor
 	i.setGlobalHidden("Array", ctor)
