@@ -2,12 +2,21 @@ package interp
 
 import (
 	"context"
+	"math"
 	"strings"
 )
 
 // initFunction installs Function.prototype methods (call/apply/bind/toString).
 func (i *Interpreter) initFunction() {
 	proto := i.functionProto
+
+	// %Function.prototype% is itself a built-in function object, so it owns
+	// "length" (0) and "name" ("") data properties with the standard
+	// { writable:false, enumerable:false, configurable:true } attributes.
+	// "length" is defined before "name" so their observable insertion order
+	// matches every other built-in function (sec-createbuiltinfunction).
+	proto.defineOwn(StrKey("length"), &Property{Value: Number(0), Writable: false, Enumerable: false, Configurable: true})
+	proto.defineOwn(StrKey("name"), &Property{Value: String(""), Writable: false, Enumerable: false, Configurable: true})
 
 	i.defineMethod(proto, "call", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		fn, ok := this.(*Object)
@@ -41,10 +50,22 @@ func (i *Interpreter) initFunction() {
 			if arr.isArray {
 				callArgs = append(callArgs, arr.denseCopy()...)
 			} else {
-				lenV, _ := arr.GetStr(ctx, "length")
-				n := int(ToInteger(ToNumber(lenV)))
+				// CreateListFromArrayLike: len = ToLength(Get(obj,"length")),
+				// then Get each index. Any abrupt completion propagates.
+				lenV, err := arr.GetStr(ctx, "length")
+				if err != nil {
+					return nil, err
+				}
+				n, err := i.toLength(ctx, lenV)
+				if err != nil {
+					return nil, err
+				}
+				callArgs = make([]Value, 0, n)
 				for j := 0; j < n; j++ {
-					v, _ := arr.GetStr(ctx, intToStr(j))
+					v, err := arr.GetStr(ctx, intToStr(j))
+					if err != nil {
+						return nil, err
+					}
 					callArgs = append(callArgs, v)
 				}
 			}
@@ -63,18 +84,55 @@ func (i *Interpreter) initFunction() {
 			boundThis = args[0]
 			boundArgs = append(boundArgs, args[1:]...)
 		}
-		name := "bound " + fn.fn.name
-		// The bound function's length is the target's length minus the number of
-		// pre-bound arguments, floored at zero (per Function.prototype.bind).
-		boundLen := 0
-		if lenV, err := fn.GetStr(ctx, "length"); err == nil {
-			if n := int(ToInteger(ToNumber(lenV))) - len(boundArgs); n > 0 {
-				boundLen = n
+
+		// SetFunctionLength (§20.2.3.2 steps 5-7): L defaults to 0. If Target has
+		// an OWN "length" property whose value is a Number, L is that length
+		// (ToInteger) minus the bound-argument count, floored at 0; +∞ stays +∞
+		// and -∞ becomes 0. A non-own or non-Number "length" is ignored.
+		boundLen := 0.0
+		if _, hasLen, err := i.getOwnPropertyV(ctx, fn, StrKey("length")); err != nil {
+			return nil, err
+		} else if hasLen {
+			lenV, err := fn.GetStr(ctx, "length")
+			if err != nil {
+				return nil, err
+			}
+			if num, ok := lenV.(Number); ok {
+				f := float64(num)
+				switch {
+				case math.IsInf(f, 1):
+					boundLen = math.Inf(1)
+				case math.IsInf(f, -1):
+					boundLen = 0
+				default:
+					if n := ToInteger(f) - float64(len(boundArgs)); n > 0 {
+						boundLen = n
+					}
+				}
 			}
 		}
-		bound := i.newNativeFunc(name, boundLen, func(ctx context.Context, _ Value, callArgs []Value) (Value, error) {
+
+		// SetFunctionName (§20.2.3.2 steps 12-15): targetName = Get(Target,"name"),
+		// coerced to the empty string when it is not a String; the bound name is
+		// "bound " + targetName. Reading the target's "name" may throw.
+		targetNameV, err := fn.GetStr(ctx, "name")
+		if err != nil {
+			return nil, err
+		}
+		targetName := ""
+		if s, ok := targetNameV.(String); ok {
+			targetName = string(s)
+		}
+		name := "bound " + targetName
+
+		bound := i.newNativeFunc(name, 0, func(ctx context.Context, _ Value, callArgs []Value) (Value, error) {
 			return fn.fn.call(ctx, boundThis, append(append([]Value{}, boundArgs...), callArgs...))
 		})
+		// Record [[BoundTargetFunction]] so OrdinaryHasInstance delegates to the
+		// target, and set the correct "length" (which may be +∞). Redefining the
+		// existing "length" property keeps its insertion position (before "name").
+		bound.fn.boundTarget = fn
+		bound.defineOwn(StrKey("length"), &Property{Value: Number(boundLen), Writable: false, Enumerable: false, Configurable: true})
 		// A bound constructor stays constructable, ignoring boundThis on `new`.
 		if fn.fn.construct != nil {
 			bound.fn.construct = func(ctx context.Context, newTarget Value, callArgs []Value) (Value, error) {
@@ -153,6 +211,13 @@ func (i *Interpreter) initFunction() {
 func (i *Interpreter) ordinaryHasInstance(ctx context.Context, ctor *Object, v Value) (bool, error) {
 	if !ctor.IsCallable() {
 		return false, nil
+	}
+	// OrdinaryHasInstance step 2: a bound function delegates to its
+	// [[BoundTargetFunction]] (which itself may be bound), so `instanceof`
+	// consults the target's prototype chain rather than the prototype-less
+	// bound wrapper.
+	if ctor.fn != nil && ctor.fn.boundTarget != nil {
+		return i.ordinaryHasInstance(ctx, ctor.fn.boundTarget, v)
 	}
 	obj, ok := v.(*Object)
 	if !ok {

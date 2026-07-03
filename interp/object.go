@@ -113,6 +113,10 @@ type functionData struct {
 	name      string
 	length    int  // declared parameter count (arity)
 	ctor      bool // whether the function can be used with `new`
+	// boundTarget is the [[BoundTargetFunction]] of a function produced by
+	// Function.prototype.bind; nil for every other callable. It lets
+	// OrdinaryHasInstance delegate `instanceof` to the wrapped target.
+	boundTarget *Object
 }
 
 // ---------------------------------------------------------------------------
