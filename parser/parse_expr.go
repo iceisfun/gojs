@@ -290,6 +290,12 @@ func (p *parser) parseNew() ast.Expr {
 	} else {
 		callee = p.parsePrimary()
 	}
+	// ImportCall is a CallExpression, not a MemberExpression, so it may not be the
+	// callee of a `new` expression: `new import(x)` and `new import(x).p` are both
+	// SyntaxErrors (ECMA-262 sec-import-calls; NewExpression takes a MemberExpression).
+	if ic, isImportCall := callee.(*ast.ImportCall); isImportCall {
+		p.errorAt(ic.Pos(), "import() is not a valid callee for a new expression")
+	}
 	callee = p.parseMemberTail(callee)
 
 	ne := &ast.NewExpr{Keyword: kw.Pos, Callee: callee, EndPos: callee.End()}
@@ -522,14 +528,24 @@ func (p *parser) parsePrimary() ast.Expr {
 		p.next()
 		return &ast.Ident{NamePos: tk.Pos, Name: "async"}
 	case token.IMPORT:
-		// import(specifier) — dynamic import (ES2020). It is a valid expression in
-		// both script and module code. `import.meta` and import declarations are
-		// handled elsewhere; only the call form is a primary expression here. A
-		// non-call `import` falls through to the identifier fallback so `import.meta`
-		// still parses as a member access.
+		// `import` is a reserved word. In expression position the ONLY valid forms
+		// are the dynamic ImportCall `import ( … )` (ES2020) and the `import.meta`
+		// meta-property (module code; the runtime enforces the module restriction).
+		// A bare `import`, or `import.` followed by anything other than `meta`
+		// (e.g. import.source / import.defer / import.UNKNOWN — unsupported proposals
+		// or typos), is a SyntaxError (ECMA-262 sec-imports, sec-import-calls).
 		if p.peek(1).Type == token.LPAREN {
 			return p.parseImportCall()
 		}
+		// import.meta: return the bare `import` identifier and let the member tail
+		// consume `.meta`, preserving the existing AST shape (MemberExpr). The
+		// `meta` contextual keyword is a fixed token and may not be escaped.
+		if p.peek(1).Type == token.DOT && p.peek(2).Type == token.IDENT &&
+			p.peek(2).Literal == "meta" && !p.peek(2).Escaped {
+			p.next() // import
+			return &ast.Ident{NamePos: tk.Pos, Name: "import"}
+		}
+		p.errorAt(tk.Pos, "'import' is only valid as import(...) or import.meta")
 		p.next()
 		return &ast.Ident{NamePos: tk.Pos, Name: "import"}
 	case token.PRIVATE:
