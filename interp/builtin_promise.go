@@ -654,3 +654,19 @@ func (i *Interpreter) promiseResolveValue(v Value) *Object {
 	resolve(v)
 	return pObj
 }
+
+// awaitResolve implements PromiseResolve(%Promise%, v) for the Await abstract
+// operation (§27.2.4.7 / §6.2.4): when v is already a native promise whose
+// constructor is the intrinsic %Promise%, it is returned unchanged; otherwise v
+// is wrapped in a freshly resolved promise. The short-circuit is what makes
+// `await p` cost a single microtask tick — re-wrapping a native promise would
+// interpose an extra thenable-adoption tick — and it also means the internal
+// PerformPromiseThen (not a monkey-patched p.then) drives the resumption.
+func (i *Interpreter) awaitResolve(v Value) *Object {
+	if p, ok := v.(*Object); ok && p.class == "Promise" {
+		if ctor, err := p.GetStr(i.ctx, "constructor"); err == nil && ctor == Value(i.promiseCtor) {
+			return p
+		}
+	}
+	return i.promiseResolveValue(v)
+}

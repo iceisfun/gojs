@@ -54,8 +54,10 @@ func (i *Interpreter) asyncRun(def *ast.FuncDef, closure *Environment, homeObj *
 
 		// res.value is the awaited operand. Resolve it to a promise and schedule
 		// resumption when it settles. Promise reactions already run as
-		// microtasks, so this preserves async ordering.
-		awaited := i.promiseResolveValue(res.value)
+		// microtasks, so this preserves async ordering. awaitResolve short-
+		// circuits a native promise (returning it unchanged) so `await p` costs
+		// exactly one microtask tick, matching Await's PromiseResolve step.
+		awaited := i.awaitResolve(res.value)
 		onFulfilled := i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
 			drive(resumeMsg{value: arg(a, 0), mode: resumeNext})
 			return Undef, nil

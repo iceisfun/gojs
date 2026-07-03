@@ -98,7 +98,7 @@ func (d *asyncGenDriver) step(msg resumeMsg) {
 		// An `await` inside the body: resolve the operand and resume when it
 		// settles, without delivering anything to the consumer. The request
 		// stays at the front of the queue.
-		awaited := d.i.promiseResolveValue(res.value)
+		awaited := d.i.awaitResolve(res.value)
 		onFulfilled := d.i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
 			d.step(resumeMsg{value: arg(a, 0), mode: resumeNext})
 			return Undef, nil
