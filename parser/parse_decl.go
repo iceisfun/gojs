@@ -442,6 +442,16 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	if requireName && def.Name == nil {
 		p.errorf("function declaration requires a name")
 	}
+	// A function *declaration*'s BindingIdentifier is evaluated with the
+	// enclosing [Yield]/[Await] parameters (still in effect here, before the new
+	// function scope overrides p.inGenerator/p.inAsync below). So `function
+	// await(){}` nested inside async code, or `function yield(){}` inside a
+	// generator, is an early error — while the same name is legal at the top
+	// level of a script (`async function await(){}`). A function *expression*'s
+	// name binds in its own scope under different parameters, so it is excluded.
+	if requireName && def.Name != nil {
+		p.checkReservedIdentifier(def.Name.Name, def.Name.NamePos)
+	}
 	// A regular function establishes its own arguments/super scope (so a field
 	// initializer's restrictions do not reach in) and its own yield/await
 	// reservation determined by whether it is a generator or async.

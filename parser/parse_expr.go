@@ -208,19 +208,33 @@ func (p *parser) parseUnary() ast.Expr {
 		p.checkSimpleAssignmentTarget(operand)
 		return &ast.UpdateExpr{OpPos: op.Pos, Op: op.Type, Operand: operand, Prefix: true}
 	case token.AWAIT:
-		op := p.next()
-		// An AwaitExpression may not appear in an async function's formal parameter
-		// list (ECMA-262 CreateDynamicFunction, step for "async"/"async generator").
-		if p.inParams && p.inAsync {
-			p.errorAt(op.Pos, "await expression is not allowed in formal parameters")
-		}
-		// `await` is a reserved word in a class static initialization block and may
-		// not appear there (ECMA-262 ClassStaticBlockBody early error).
+		// `await` is reserved inside a class static initialization block: it is
+		// neither a valid AwaitExpression (a static block is not async) nor a
+		// valid identifier there (ECMA-262 ClassStaticBlockBody is parsed with
+		// [+Await]), so its use is an early error regardless of the outer context.
 		if p.inStaticBlock {
+			op := p.next()
 			p.errorAt(op.Pos, "await is not allowed in a class static initialization block")
+			operand := p.parseUnary()
+			return &ast.AwaitExpr{Keyword: op.Pos, Argument: operand}
 		}
-		operand := p.parseUnary()
-		return &ast.AwaitExpr{Keyword: op.Pos, Argument: operand}
+		// `await` is the AwaitExpression operator only where the [Await] grammar
+		// parameter holds: inside an async function or async arrow (p.inAsync), or
+		// at the top level of a module (top-level await). Everywhere else — sync
+		// functions and generators, script global code, and any function nested
+		// inside an async one — `await` is a plain IdentifierReference, so fall
+		// through to parsePrimary, which yields an Ident.
+		if p.inAsync || (p.moduleMode && p.inFunction == 0) {
+			op := p.next()
+			// An AwaitExpression may not appear in an async function's formal
+			// parameter list (ECMA-262 CreateDynamicFunction, step for
+			// "async"/"async generator").
+			if p.inParams && p.inAsync {
+				p.errorAt(op.Pos, "await expression is not allowed in formal parameters")
+			}
+			operand := p.parseUnary()
+			return &ast.AwaitExpr{Keyword: op.Pos, Argument: operand}
+		}
 	}
 	return p.parsePostfix()
 }
