@@ -50,6 +50,12 @@ func (i *Interpreter) evalProgram(ctx context.Context, prog *ast.Program) (Value
 	savedStrict := env.strict
 	env.strict = prog.Strict || i.forceStrict()
 	defer func() { env.strict = savedStrict }()
+	// GlobalDeclarationInstantiation early errors (§16.1.7): validate every
+	// top-level declaration before any binding is created, so a rejected script
+	// leaves the global environment untouched.
+	if err := i.checkGlobalDeclarations(ctx, prog.Body); err != nil {
+		return nil, err
+	}
 	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
 		return nil, err
 	}

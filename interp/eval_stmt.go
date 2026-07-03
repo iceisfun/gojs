@@ -65,7 +65,7 @@ func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, e
 			}
 			// A global-scope function declaration becomes a globalThis property.
 			if env == i.globalEnv {
-				i.defineGlobalVar(name, fn)
+				i.defineGlobalFunction(name, fn)
 			} else {
 				env.vars[name] = &binding{value: fn, mutable: true, initialized: true}
 			}
@@ -123,6 +123,134 @@ func (i *Interpreter) defineGlobalVar(name string, v Value) {
 		init = v
 	}
 	i.global.defineOwn(key, &Property{Value: init, Writable: true, Enumerable: true, Configurable: false})
+}
+
+// defineGlobalFunction implements CreateGlobalFunctionBinding (§9.1.1.4.18) for a
+// top-level global function declaration. Unlike a plain var, an absent or
+// *configurable* existing property is redefined to a fresh {writable,
+// enumerable, non-configurable} data property; a non-configurable existing
+// property (a prior global function/var) keeps its descriptor and only takes the
+// new value. The name joins the global [[VarNames]] list.
+func (i *Interpreter) defineGlobalFunction(name string, fn Value) {
+	key := StrKey(name)
+	if p, ok := i.global.getOwn(key); ok && !p.Configurable {
+		if !p.Accessor {
+			p.Value = fn
+		}
+		return
+	}
+	i.global.defineOwn(key, &Property{Value: fn, Writable: true, Enumerable: true, Configurable: false})
+}
+
+// checkGlobalDeclarations performs the early-error phase of
+// GlobalDeclarationInstantiation (§16.1.7) for a Script about to run at global
+// scope. Every top-level declaration is validated BEFORE any binding is created,
+// so a rejected script (e.g. one passed to $262.evalScript) leaves the global
+// environment untouched. It raises a SyntaxError when a lexical name collides
+// with an existing var/lexical/restricted-global binding (or a var name collides
+// with an existing lexical), and a TypeError when the global object cannot accept
+// a new function/var (an incompatible non-configurable property, or a fresh name
+// on a non-extensible global).
+func (i *Interpreter) checkGlobalDeclarations(ctx context.Context, stmts []ast.Stmt) error {
+	varDeclNames := map[string]bool{} // VariableDeclaration/ForBinding names (excludes functions)
+	collectVarNames(stmts, varDeclNames)
+	lexNames := map[string]bool{}
+	funcNames := map[string]bool{}
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case *ast.FuncDecl:
+			if st.Def.Name != nil {
+				funcNames[st.Def.Name.Name] = true
+			}
+		case *ast.VarDecl:
+			if st.Kind == token.LET || st.Kind == token.CONST {
+				for _, d := range st.Decls {
+					forEachPatternName(d.Target, func(n string) { lexNames[n] = true })
+				}
+			}
+		case *ast.ClassDecl:
+			if st.Def.Name != nil {
+				lexNames[st.Def.Name.Name] = true
+			}
+		}
+	}
+
+	dup := func(name string) error {
+		return i.throwError(ctx, "SyntaxError", "Identifier '"+name+"' has already been declared")
+	}
+	// A lexical name must not clash with an existing lexical declaration or a
+	// non-configurable ("restricted") global property. Note the spec relies on
+	// HasRestrictedGlobalProperty rather than HasVarDeclaration here: ordinary
+	// global var/function bindings are non-configurable (hence restricted, and
+	// blocked), but a var introduced by a non-strict direct eval is configurable
+	// — so a later lexical declaration is permitted to shadow it.
+	for name := range lexNames {
+		if i.hasLexicalDeclaration(name) || i.hasRestrictedGlobalProperty(name) {
+			return dup(name)
+		}
+	}
+	// A var-declared name (including a function) must not clash with an existing
+	// lexical declaration.
+	for name := range varDeclNames {
+		if i.hasLexicalDeclaration(name) {
+			return dup(name)
+		}
+	}
+	for name := range funcNames {
+		if i.hasLexicalDeclaration(name) {
+			return dup(name)
+		}
+	}
+	// The global object must be able to accept each new function/var binding.
+	for name := range funcNames {
+		if !i.canDeclareGlobalFunction(name) {
+			return i.throwError(ctx, "TypeError", "Cannot declare global function '"+name+"'")
+		}
+	}
+	for name := range varDeclNames {
+		if funcNames[name] {
+			continue
+		}
+		if !i.canDeclareGlobalVar(name) {
+			return i.throwError(ctx, "TypeError", "Cannot declare global variable '"+name+"'")
+		}
+	}
+	return nil
+}
+
+// hasLexicalDeclaration reports whether the global lexical environment already
+// binds name (a let/const/class binding lives in globalEnv, whereas var and
+// function bindings live on the global object).
+func (i *Interpreter) hasLexicalDeclaration(name string) bool {
+	b, ok := i.globalEnv.vars[name]
+	return ok && b != nil && b.lexical
+}
+
+// hasRestrictedGlobalProperty implements HasRestrictedGlobalProperty
+// (§9.1.1.4.14): name is a non-configurable own property of the global object.
+func (i *Interpreter) hasRestrictedGlobalProperty(name string) bool {
+	p, ok := i.global.getOwn(StrKey(name))
+	return ok && !p.Configurable
+}
+
+// canDeclareGlobalVar implements CanDeclareGlobalVar (§9.1.1.4.15).
+func (i *Interpreter) canDeclareGlobalVar(name string) bool {
+	if i.global.HasOwn(StrKey(name)) {
+		return true
+	}
+	return i.global.extensible
+}
+
+// canDeclareGlobalFunction implements CanDeclareGlobalFunction (§9.1.1.4.16).
+func (i *Interpreter) canDeclareGlobalFunction(name string) bool {
+	p, ok := i.global.getOwn(StrKey(name))
+	if !ok {
+		return i.global.extensible
+	}
+	if p.Configurable {
+		return true
+	}
+	return !p.Accessor && p.Writable && p.Enumerable
 }
 
 // evalStmt evaluates a single statement.

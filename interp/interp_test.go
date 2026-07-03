@@ -23,7 +23,7 @@ func TestSmoke(t *testing.T) {
 		{`Math.max(1,5,3) + Math.min(2,8)`, "7"},
 		{`(a=>b=>a+b)(3)(4)`, "7"},
 		{`let {a, b=9} = {a:1}; a+b`, "10"},
-		{`let [x,,z] = [1,2,3]; x+z`, "4"},
+		{`let [dx,,dz] = [1,2,3]; dx+dz`, "4"},
 		{"`sum=${1+2}`", "sum=3"},
 		{`typeof undefined + " " + typeof 5 + " " + typeof "s"`, "undefined number string"},
 		{`10 > 5 ? "yes" : "no"`, "yes"},

@@ -104,6 +104,11 @@ type binding struct {
 	// no-op — unlike const, whose immutable binding is strict (always throws).
 	weakImmutable bool
 	initialized   bool // false while in the Temporal Dead Zone
+	// lexical marks a let/const/class binding (a LexicallyDeclaredName), as
+	// opposed to a hoisted `var`/function binding. At global scope both kinds
+	// share the environment's binding map, so GlobalDeclarationInstantiation's
+	// HasLexicalDeclaration relies on this flag to tell them apart.
+	lexical bool
 }
 
 // NewEnvironment creates a child environment of parent. If fnScope is true, the
@@ -130,7 +135,7 @@ func (e *Environment) isStrict() bool { return e != nil && e.strict }
 // initially in the TDZ. It overwrites any existing binding of the same name in
 // this scope.
 func (e *Environment) declareLexical(name string, mutable bool) *binding {
-	b := &binding{mutable: mutable, initialized: false}
+	b := &binding{mutable: mutable, initialized: false, lexical: true}
 	e.vars[name] = b
 	return b
 }
