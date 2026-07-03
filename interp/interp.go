@@ -159,6 +159,7 @@ type intrinsics struct {
 	generatorProto            *Object
 	asyncIteratorProto        *Object // %AsyncIteratorPrototype%
 	asyncGeneratorProto       *Object // %AsyncGeneratorPrototype%
+	asyncFromSyncIterProto    *Object // %AsyncFromSyncIteratorPrototype%
 
 	// The generator/async function-family intrinsics. These constructors are not
 	// global bindings; they are reachable only through the prototype chains of

@@ -373,6 +373,9 @@ func (i *Interpreter) evalYieldDelegate(ctx context.Context, e *ast.YieldExpr, e
 	if err != nil {
 		return nil, err
 	}
+	if gs.asyncGen {
+		return i.evalYieldDelegateAsync(ctx, iterable, gs)
+	}
 	var last Value = Undef
 	err = i.iterate(ctx, iterable, func(v Value) error {
 		last = v
@@ -383,6 +386,116 @@ func (i *Interpreter) evalYieldDelegate(ctx context.Context, e *ast.YieldExpr, e
 		return nil, err
 	}
 	return last, nil
+}
+
+// evalYieldDelegateAsync implements `yield* value` inside an async generator
+// (ECMA-262 §14.4.14, YieldExpression : yield * with generatorKind async). It
+// obtains an async iterator (GetIterator(value, async)), awaits each step, and
+// forwards the consumer's next/return/throw resumptions to the inner iterator.
+func (i *Interpreter) evalYieldDelegateAsync(ctx context.Context, iterable Value, gs *generatorState) (Value, error) {
+	rec, err := i.getAsyncIterator(ctx, iterable)
+	if err != nil {
+		return nil, err
+	}
+	iter := rec.iterator
+
+	// received models the resumption completion driving each turn: nil = normal
+	// (next), *genReturn = return(), *Throw = throw(). recVal is the normal value.
+	var recVal Value = Undef
+	var received error
+
+	// step calls an inner iterator method, awaits the result, and returns its
+	// { done, value } — matching the async yield* loop's IteratorNext/Await shape.
+	step := func(method Value, argVal Value) (done bool, value Value, err error) {
+		res, err := i.call(ctx, method, iter, []Value{argVal})
+		if err != nil {
+			return false, nil, err
+		}
+		settled, err := i.doAwait(gs, res)
+		if err != nil {
+			return false, nil, err
+		}
+		ro, ok := settled.(*Object)
+		if !ok {
+			return false, nil, i.throwError(ctx, "TypeError", "iterator result is not an object")
+		}
+		doneV, err := ro.GetStr(ctx, "done")
+		if err != nil {
+			return false, nil, err
+		}
+		value, err = ro.GetStr(ctx, "value")
+		if err != nil {
+			return false, nil, err
+		}
+		return ToBoolean(doneV), value, nil
+	}
+
+	// asyncYield performs AsyncGeneratorYield: await the value, then deliver it to
+	// the consumer, returning the resumption completion.
+	asyncYield := func(v Value) {
+		awaited, aerr := i.doAwait(gs, v)
+		if aerr != nil {
+			recVal, received = nil, aerr
+			return
+		}
+		recVal, received = i.doYield(gs, awaited)
+	}
+
+	for {
+		switch rc := received.(type) {
+		case nil:
+			done, value, err := step(rec.nextMethod, recVal)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				return value, nil
+			}
+			asyncYield(value)
+		case *genReturn:
+			retMethod, err := i.getMethodStr(ctx, iter, "return")
+			if err != nil {
+				return nil, err
+			}
+			if retMethod == nil {
+				awaited, aerr := i.doAwait(gs, rc.value)
+				if aerr != nil {
+					return nil, aerr
+				}
+				return nil, &genReturn{value: awaited}
+			}
+			done, value, err := step(retMethod, rc.value)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				return nil, &genReturn{value: value}
+			}
+			asyncYield(value)
+		case *Throw:
+			throwMethod, err := i.getMethodStr(ctx, iter, "throw")
+			if err != nil {
+				return nil, err
+			}
+			if throwMethod == nil {
+				// The iterator has no throw: close it, then report the protocol
+				// violation as a TypeError (§14.4.14 step for throw completions).
+				i.asyncIteratorClose(ctx, gs, iter)
+				return nil, i.throwError(ctx, "TypeError", "The iterator does not provide a throw method")
+			}
+			done, value, err := step(throwMethod, rc.Value)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				return value, nil
+			}
+			asyncYield(value)
+		default:
+			// A host error (e.g. context cancellation) from a prior suspension.
+			return nil, received
+		}
+	}
 }
 
 // genReturn unwinds a generator body when the consumer calls generator.return().
