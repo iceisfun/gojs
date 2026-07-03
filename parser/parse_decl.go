@@ -44,7 +44,13 @@ func parseNumber(raw string) float64 {
 			return parseRadix(s[1:], 8)
 		}
 	}
-	if v, err := strconv.ParseFloat(s, 64); err == nil {
+	v, err := strconv.ParseFloat(s, 64)
+	if err == nil {
+		return v
+	}
+	// A DecimalLiteral whose magnitude overflows float64 (e.g. 10e10000) is not a
+	// syntax error: it rounds to +Infinity (and a tiny magnitude rounds to 0).
+	if ne, ok := err.(*strconv.NumError); ok && ne.Err == strconv.ErrRange {
 		return v
 	}
 	return math.NaN()

@@ -187,10 +187,22 @@ func stringToNumber(s string) float64 {
 			return math.NaN()
 		}
 	}
-	if f, err := strconv.ParseFloat(t, 64); err == nil {
-		return f
+	f, err := strconv.ParseFloat(t, 64)
+	if err != nil {
+		// An out-of-range magnitude ("1e400", "1e-400") is not an error in the
+		// StringNumericLiteral grammar: it rounds to ±Infinity or ±0.
+		if ne, ok := err.(*strconv.NumError); ok && ne.Err == strconv.ErrRange {
+			return f
+		}
+		return math.NaN()
 	}
-	return math.NaN()
+	// Go's ParseFloat also accepts "inf", "infinity", and "nan" (case-
+	// insensitively), which the StringNumericLiteral grammar does not: the only
+	// non-finite spellings are the exact "Infinity" forms handled above.
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return math.NaN()
+	}
+	return f
 }
 
 // ToInteger truncates a number toward zero, mapping NaN to 0 (§7.1.5).

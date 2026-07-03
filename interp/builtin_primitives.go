@@ -172,13 +172,20 @@ func (i *Interpreter) initNumber() {
 	proto.class = "Number"
 	proto.primitive = Number(0)
 
+	// num extracts thisNumberValue (§21.1.3.1): the [[NumberData]] slot of a
+	// Number, either a primitive or a Number wrapper object. A wrapper is
+	// identified by its [[Class]] being "Number"; other exotic objects that store
+	// a Number primitive (e.g. Date, whose [[DateValue]] is a Number) are not
+	// Number objects and must be rejected with a TypeError by the caller.
 	num := func(this Value) (float64, bool) {
 		switch x := this.(type) {
 		case Number:
 			return float64(x), true
 		case *Object:
-			if n, ok := x.primitive.(Number); ok {
-				return float64(n), true
+			if x.class == "Number" {
+				if n, ok := x.primitive.(Number); ok {
+					return float64(n), true
+				}
 			}
 		}
 		return 0, false
@@ -189,15 +196,23 @@ func (i *Interpreter) initNumber() {
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Number.prototype.toString called on non-number")
 		}
-		radix := 10
+		// Per §21.1.3.6 the radix is converted (ToIntegerOrInfinity) before the
+		// range check, and both precede the radix-10 shortcut, so a poisoned
+		// radix argument throws even for NaN/Infinity receivers.
+		radixF := 10.0
 		if !IsUndefined(arg(args, 0)) {
-			radix, _ = i.argInt(ctx, args, 0)
+			rf, err := i.argNum(ctx, args, 0)
+			if err != nil {
+				return nil, err
+			}
+			radixF = ToInteger(rf)
 		}
+		if radixF < 2 || radixF > 36 {
+			return nil, i.throwError(ctx, "RangeError", "toString() radix must be between 2 and 36")
+		}
+		radix := int(radixF)
 		if radix == 10 {
 			return String(NumberToString(f)), nil
-		}
-		if radix < 2 || radix > 36 {
-			return nil, i.throwError(ctx, "RangeError", "toString() radix must be between 2 and 36")
 		}
 		if f == math.Trunc(f) && !math.IsInf(f, 0) &&
 			f >= math.MinInt64 && f <= math.MaxInt64 {
@@ -216,11 +231,21 @@ func (i *Interpreter) initNumber() {
 		return Number(f), nil
 	})
 	i.defineMethod(proto, "toFixed", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		f, _ := num(this)
-		digits, _ := i.argInt(ctx, args, 0)
-		if digits < 0 || digits > 100 {
+		f, ok := num(this)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Number.prototype.toFixed called on non-number")
+		}
+		// §21.1.3.3: convert fractionDigits (may throw for a Symbol/BigInt or a
+		// poisoned valueOf) before the range check; ±Infinity is out of range.
+		fdF, err := i.argNum(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		fd := ToInteger(fdF)
+		if fd < 0 || fd > 100 {
 			return nil, i.throwError(ctx, "RangeError", "toFixed() digits argument must be between 0 and 100")
 		}
+		digits := int(fd)
 		if math.IsNaN(f) {
 			return String("NaN"), nil
 		}
@@ -230,11 +255,22 @@ func (i *Interpreter) initNumber() {
 		return String(toFixedString(f, digits)), nil
 	})
 	i.defineMethod(proto, "toPrecision", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		f, _ := num(this)
+		f, ok := num(this)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Number.prototype.toPrecision called on non-number")
+		}
+		// §21.1.3.5: if precision is undefined, return ToString(x). Otherwise
+		// ToIntegerOrInfinity(precision) is evaluated (and may throw for a
+		// Symbol/BigInt or a poisoned valueOf) before the NaN/Infinity handling
+		// and the range check.
 		if IsUndefined(arg(args, 0)) {
 			return String(NumberToString(f)), nil
 		}
-		p, _ := i.argInt(ctx, args, 0)
+		pF, err := i.argNum(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		p := int(ToInteger(pF))
 		if math.IsNaN(f) {
 			return String("NaN"), nil
 		}
@@ -245,6 +281,43 @@ func (i *Interpreter) initNumber() {
 			return nil, i.throwError(ctx, "RangeError", "toPrecision() argument must be between 1 and 100")
 		}
 		return String(toPrecisionString(f, p)), nil
+	})
+	i.defineMethod(proto, "toExponential", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		f, ok := num(this)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Number.prototype.toExponential called on non-number")
+		}
+		// §21.1.3.2: ToIntegerOrInfinity(fractionDigits) is evaluated (and may
+		// throw) before the non-finite check, so a poisoned argument throws even
+		// for a NaN/Infinity receiver.
+		fdUndefined := IsUndefined(arg(args, 0))
+		fdF, err := i.argNum(ctx, args, 0)
+		if err != nil {
+			return nil, err
+		}
+		fc := ToInteger(fdF)
+		if math.IsNaN(f) {
+			return String("NaN"), nil
+		}
+		if math.IsInf(f, 0) {
+			if f < 0 {
+				return String("-Infinity"), nil
+			}
+			return String("Infinity"), nil
+		}
+		if fc < 0 || fc > 100 {
+			return nil, i.throwError(ctx, "RangeError", "toExponential() argument must be between 0 and 100")
+		}
+		return String(toExponentialString(f, int(fc), fdUndefined)), nil
+	})
+	i.defineMethod(proto, "toLocaleString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		// Without an Intl implementation, Number.prototype.toLocaleString returns
+		// the same String as Number.prototype.toString with no radix (§19).
+		f, ok := num(this)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Number.prototype.toLocaleString called on non-number")
+		}
+		return String(NumberToString(f)), nil
 	})
 
 	ctor := i.newNativeCtor("Number", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -272,14 +345,19 @@ func (i *Interpreter) initNumber() {
 	})
 	linkCtor(ctor, proto)
 
-	ctor.SetHidden("MAX_SAFE_INTEGER", Number(9007199254740991))
-	ctor.SetHidden("MIN_SAFE_INTEGER", Number(-9007199254740991))
-	ctor.SetHidden("MAX_VALUE", Number(math.MaxFloat64))
-	ctor.SetHidden("MIN_VALUE", Number(math.SmallestNonzeroFloat64))
-	ctor.SetHidden("EPSILON", Number(2.220446049250313e-16))
-	ctor.SetHidden("POSITIVE_INFINITY", Number(math.Inf(1)))
-	ctor.SetHidden("NEGATIVE_INFINITY", Number(math.Inf(-1)))
-	ctor.SetHidden("NaN", Number(math.NaN()))
+	// The Number "value properties" (§21.1.2) are all
+	// { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: false }.
+	numConst := func(name string, v float64) {
+		ctor.defineOwn(StrKey(name), &Property{Value: Number(v), Writable: false, Enumerable: false, Configurable: false})
+	}
+	numConst("MAX_SAFE_INTEGER", 9007199254740991)
+	numConst("MIN_SAFE_INTEGER", -9007199254740991)
+	numConst("MAX_VALUE", math.MaxFloat64)
+	numConst("MIN_VALUE", math.SmallestNonzeroFloat64)
+	numConst("EPSILON", 2.220446049250313e-16)
+	numConst("POSITIVE_INFINITY", math.Inf(1))
+	numConst("NEGATIVE_INFINITY", math.Inf(-1))
+	numConst("NaN", math.NaN())
 
 	i.defineMethod(ctor, "isInteger", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		n, ok := arg(args, 0).(Number)
@@ -340,6 +418,82 @@ func toPrecisionString(f float64, p int) string {
 		frac = 0
 	}
 	return strconv.FormatFloat(f, 'f', frac, 64)
+}
+
+// toExponentialString formats a finite float64 in decimal exponential notation
+// per Number.prototype.toExponential (§21.1.3.2): one digit before the point and
+// `frac` digits after it, with the exponent written as e±d (no leading zeros).
+// When shortest is true (fractionDigits was undefined) it emits the fewest
+// significand digits that round-trip. Callers handle NaN, ±Infinity, and the
+// RangeError on frac before reaching here.
+func toExponentialString(f float64, frac int, shortest bool) string {
+	sign := ""
+	// ℝ(-0) is 0, so only a genuinely negative value gets a "-" sign.
+	if f < 0 {
+		sign = "-"
+		f = -f
+	}
+	if f == 0 {
+		if shortest || frac == 0 {
+			return sign + "0e+0"
+		}
+		return sign + "0." + strings.Repeat("0", frac) + "e+0"
+	}
+	if shortest {
+		// The shortest round-tripping significand is unique; Go's 'e' with prec
+		// -1 produces exactly it. Only the exponent needs reformatting (e+02 →
+		// e+2) to match the spec's no-leading-zero rule.
+		return sign + normalizeExponent(strconv.FormatFloat(f, 'e', -1, 64))
+	}
+	// Exact rounding: work with the value's exact rational form so the spec's
+	// round-half-up ("pick the larger intSignificand") is honored, unlike Go's
+	// round-half-to-even. So (25).toExponential(0) === "3e+1".
+	xr := new(big.Rat).SetFloat64(f)
+	// Normalize the decimal exponent so that 10^e <= f < 10^(e+1), starting from
+	// a float estimate and correcting any off-by-one from log10 rounding.
+	e := int(math.Floor(math.Log10(f)))
+	for xr.Cmp(pow10Rat(e)) < 0 {
+		e--
+	}
+	for xr.Cmp(pow10Rat(e+1)) >= 0 {
+		e++
+	}
+	// scaled = f * 10^(frac-e) lies in [10^frac, 10^(frac+1)); round half up.
+	scaled := new(big.Rat).Mul(xr, pow10Rat(frac-e))
+	scaled.Add(scaled, big.NewRat(1, 2))
+	n := new(big.Int).Quo(scaled.Num(), scaled.Denom()) // floor, scaled > 0
+	// A carry across the power-of-ten boundary bumps the exponent.
+	tenFracP1 := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(frac+1)), nil)
+	if n.Cmp(tenFracP1) >= 0 {
+		n.Div(n, big.NewInt(10))
+		e++
+	}
+	sig := n.String() // exactly frac+1 digits, no leading zero
+	if frac != 0 {
+		sig = sig[:1] + "." + sig[1:]
+	}
+	expSign := "+"
+	if e < 0 {
+		expSign = "-"
+		e = -e
+	}
+	return sign + sig + "e" + expSign + strconv.Itoa(e)
+}
+
+// pow10Rat returns 10^k as an exact rational for any (possibly negative) k.
+func pow10Rat(k int) *big.Rat {
+	n := k
+	if n < 0 {
+		n = -n
+	}
+	p := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
+	r := new(big.Rat)
+	if k >= 0 {
+		r.SetInt(p)
+	} else {
+		r.SetFrac(big.NewInt(1), p)
+	}
+	return r
 }
 
 // toFixedString formats f with exactly `digits` fractional digits, rounding
