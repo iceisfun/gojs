@@ -352,7 +352,13 @@ func (l *Lexer) regexAllowed() bool {
 		token.REGEX, token.TEMPLATE_NOSUB, token.TEMPLATE_TAIL,
 		token.RPAREN, token.RBRACKET,
 		token.THIS, token.SUPER, token.TRUE, token.FALSE, token.NULL,
-		token.INC, token.DEC:
+		token.INC, token.DEC,
+		// Contextual keywords that are also IdentifierReferences: when one is used
+		// as a value (e.g. `instance/of/g`, `let/2`), a following '/' is division.
+		// Their keyword forms are never immediately followed by a regex literal —
+		// unlike `yield`/`await`, whose operand may be a regex (`yield /re/`), so
+		// those are deliberately excluded and keep starting a regex.
+		token.OF, token.LET, token.STATIC, token.GET, token.SET, token.ASYNC:
 		return false
 	default:
 		return true
