@@ -38,6 +38,7 @@ func (i *Interpreter) initArray() {
 		return i.newArray(cp), nil
 	})
 	i.defineMethod(ctor, "from", 1, i.arrayFrom)
+	i.defineMethod(ctor, "fromAsync", 1, i.arrayFromAsync)
 
 	type method struct {
 		name string
@@ -783,6 +784,195 @@ func (i *Interpreter) arrayFrom(ctx context.Context, this Value, args []Value) (
 		return nil, err
 	}
 	return a, nil
+}
+
+// arrayFromAsync implements Array.fromAsync (ES2024 §23.1.2.1). It returns a
+// Promise and runs its whole body in a native async context (runNativeAsync) so
+// every error rejects the promise rather than throwing synchronously. It mirrors
+// arrayFrom's constructor/mapfn/iterator handling but: prefers @@asyncIterator,
+// wraps a sync @@iterator via %AsyncFromSyncIteratorPrototype%, and awaits each
+// iterator step, each array-like element, and each mapfn result.
+func (i *Interpreter) arrayFromAsync(_ context.Context, this Value, args []Value) (Value, error) {
+	c := this
+	asyncItems := arg(args, 0)
+	mapfnV := arg(args, 1)
+	thisArg := arg(args, 2)
+
+	return i.runNativeAsync(func(ctx context.Context, await func(Value) (Value, error)) (Value, error) {
+		// mapfn must be callable when provided; validated inside the async body so
+		// a bad mapfn rejects (rather than throwing synchronously).
+		mapping := false
+		var mapfn *Object
+		if !IsUndefined(mapfnV) {
+			mo, ok := mapfnV.(*Object)
+			if !ok || !mo.IsCallable() {
+				return nil, i.throwError(ctx, "TypeError", "Array.fromAsync: mapping function is not callable")
+			}
+			mapfn = mo
+			mapping = true
+		}
+
+		// makeTarget builds the result A: Construct(C) when C is a constructor,
+		// else ArrayCreate. The array-like path forwards the known length.
+		makeTarget := func(ctorArgs []Value, arrayLen int) (*Object, error) {
+			if co, ok := c.(*Object); ok && co.IsConstructor() {
+				res, err := co.fn.construct(ctx, co, ctorArgs)
+				if err != nil {
+					return nil, err
+				}
+				ro, ok := res.(*Object)
+				if !ok {
+					return nil, i.throwError(ctx, "TypeError", "Array.fromAsync: constructor did not return an object")
+				}
+				return ro, nil
+			}
+			return i.arrayCreate(ctx, arrayLen)
+		}
+
+		// Resolve the iterator record: prefer @@asyncIterator, else wrap a sync
+		// @@iterator. GetMethod boxes a primitive source; a nullish source has no
+		// object to box, so ToObject throws a TypeError (matching the spec).
+		var rec *iterRecord
+		lookup := asyncItems
+		if _, ok := asyncItems.(*Object); !ok {
+			o, err := i.ToObject(ctx, asyncItems)
+			if err != nil {
+				return nil, err
+			}
+			lookup = o
+		}
+		asyncMethod, err := i.getMethod(ctx, lookup, i.symAsyncIterator)
+		if err != nil {
+			return nil, err
+		}
+		if asyncMethod != nil {
+			rec, err = i.getIteratorFromMethod(ctx, asyncItems, asyncMethod)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			syncMethod, err := i.getMethod(ctx, lookup, i.symIterator)
+			if err != nil {
+				return nil, err
+			}
+			if syncMethod != nil {
+				syncRec, err := i.getIteratorFromMethod(ctx, asyncItems, syncMethod)
+				if err != nil {
+					return nil, err
+				}
+				rec = i.createAsyncFromSyncIterator(syncRec)
+			}
+		}
+
+		// closeAsync implements AsyncIteratorClose with a throw completion: it
+		// best-effort calls return(), awaits it, and rejects with the original
+		// cause regardless of the close's own outcome.
+		closeAsync := func(rec *iterRecord, cause error) error {
+			retMethod, gerr := i.getMethodStr(ctx, rec.iterator, "return")
+			if gerr == nil && retMethod != nil {
+				if res, cerr := i.call(ctx, retMethod, rec.iterator, nil); cerr == nil {
+					_, _ = await(res)
+				}
+			}
+			return cause
+		}
+
+		if rec != nil {
+			a, err := makeTarget(nil, 0)
+			if err != nil {
+				return nil, err
+			}
+			for k := 0; ; k++ {
+				if float64(k) >= maxSafeInteger {
+					return nil, closeAsync(rec, NewThrow(i.newError("TypeError", "Array.fromAsync: too many elements")))
+				}
+				nextResultV, err := i.call(ctx, rec.nextMethod, rec.iterator, nil)
+				if err != nil {
+					return nil, err
+				}
+				awaited, err := await(nextResultV)
+				if err != nil {
+					return nil, err
+				}
+				ro, ok := awaited.(*Object)
+				if !ok {
+					return nil, i.throwError(ctx, "TypeError", "Array.fromAsync: iterator result is not an object")
+				}
+				done, err := iterResultDone(ctx, ro)
+				if err != nil {
+					return nil, err
+				}
+				if done {
+					if err := i.setThrow(ctx, a, "length", Number(float64(k))); err != nil {
+						return nil, err
+					}
+					return a, nil
+				}
+				val, err := ro.GetStr(ctx, "value")
+				if err != nil {
+					return nil, err
+				}
+				mapped := val
+				if mapping {
+					mv, err := i.call(ctx, mapfn, thisArg, []Value{val, Number(float64(k))})
+					if err != nil {
+						return nil, closeAsync(rec, err)
+					}
+					mv, err = await(mv)
+					if err != nil {
+						return nil, closeAsync(rec, err)
+					}
+					mapped = mv
+				}
+				if err := i.createDataPropertyOrThrow(ctx, a, StrKey(intToStr(k)), mapped); err != nil {
+					return nil, closeAsync(rec, err)
+				}
+			}
+		}
+
+		// Array-like path: asyncItems is neither async- nor sync-iterable.
+		arrayLike, err := i.ToObject(ctx, asyncItems)
+		if err != nil {
+			return nil, err
+		}
+		n, err := i.lengthOfArrayLike(ctx, arrayLike)
+		if err != nil {
+			return nil, err
+		}
+		a, err := makeTarget([]Value{Number(float64(n))}, n)
+		if err != nil {
+			return nil, err
+		}
+		for k := 0; k < n; k++ {
+			kv, err := arrayLike.GetStr(ctx, intToStr(k))
+			if err != nil {
+				return nil, err
+			}
+			kv, err = await(kv)
+			if err != nil {
+				return nil, err
+			}
+			mapped := kv
+			if mapping {
+				mv, err := i.call(ctx, mapfn, thisArg, []Value{kv, Number(float64(k))})
+				if err != nil {
+					return nil, err
+				}
+				mv, err = await(mv)
+				if err != nil {
+					return nil, err
+				}
+				mapped = mv
+			}
+			if err := i.createDataPropertyOrThrow(ctx, a, StrKey(intToStr(k)), mapped); err != nil {
+				return nil, err
+			}
+		}
+		if err := i.setThrow(ctx, a, "length", Number(float64(n))); err != nil {
+			return nil, err
+		}
+		return a, nil
+	}), nil
 }
 
 func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, length int) (*Object, error) {

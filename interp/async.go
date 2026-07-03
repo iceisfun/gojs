@@ -85,6 +85,109 @@ func (i *Interpreter) asyncRun(fnObj *Object, def *ast.FuncDef, closure *Environ
 	return promise, nil
 }
 
+// runNativeAsync runs body as an async function whose body is implemented in Go
+// rather than as a JS FuncDef. body receives an `await` callback it can invoke to
+// suspend on a value and resume with the settled result (or a thrown JS value on
+// rejection), exactly as the `await` operator does inside a JS async function. It
+// returns a Promise that settles when body returns (fulfil) or errors (reject).
+//
+// It mirrors asyncRun + startCoroutine: the body runs on a dedicated coroutine
+// goroutine and each await suspension is driven through the microtask queue, so
+// the single-threaded interpreter invariant holds (the driver and the body never
+// run simultaneously). This backs native async builtins such as Array.fromAsync.
+func (i *Interpreter) runNativeAsync(body func(ctx context.Context, await func(Value) (Value, error)) (Value, error)) Value {
+	gs := &generatorState{
+		resume: make(chan resumeMsg),
+		out:    make(chan yieldMsg),
+		ctx:    i.ctx,
+	}
+	await := func(v Value) (Value, error) { return i.doAwait(gs, v) }
+
+	started := false
+	start := func() {
+		started = true
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			select {
+			case <-gs.resume: // first resume value is ignored, per spec
+			case <-gs.ctx.Done():
+				return
+			}
+			val, err := body(gs.ctx, await)
+			var final yieldMsg
+			if err != nil {
+				final = yieldMsg{err: err, done: true}
+			} else {
+				final = yieldMsg{value: val, done: true}
+			}
+			select {
+			case gs.out <- final:
+			case <-gs.ctx.Done():
+			}
+		}()
+	}
+
+	advance := func(msg resumeMsg) yieldMsg {
+		if gs.done {
+			return yieldMsg{value: Undef, done: true}
+		}
+		if !started {
+			start()
+		}
+		gs.executing = true
+		select {
+		case gs.resume <- msg:
+		case <-gs.ctx.Done():
+			gs.executing = false
+			gs.done = true
+			return yieldMsg{done: true, err: gs.ctx.Err()}
+		}
+		select {
+		case res := <-gs.out:
+			gs.executing = false
+			if res.done {
+				gs.done = true
+			}
+			return res
+		case <-gs.ctx.Done():
+			gs.executing = false
+			gs.done = true
+			return yieldMsg{done: true, err: gs.ctx.Err()}
+		}
+	}
+
+	promise, resolve, reject := i.newPromise()
+	var drive func(resumeMsg)
+	drive = func(msg resumeMsg) {
+		res := advance(msg)
+		if res.done {
+			if res.err != nil {
+				if tv, ok := ThrownValue(res.err); ok {
+					reject(tv)
+				} else {
+					reject(String(res.err.Error()))
+				}
+			} else {
+				resolve(res.value)
+			}
+			return
+		}
+		awaited := i.awaitResolve(res.value)
+		onFulfilled := i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
+			drive(resumeMsg{value: arg(a, 0), mode: resumeNext})
+			return Undef, nil
+		})
+		onRejected := i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
+			drive(resumeMsg{value: arg(a, 0), mode: resumeThrow})
+			return Undef, nil
+		})
+		i.promiseThen(awaited, onFulfilled, onRejected)
+	}
+	drive(resumeMsg{mode: resumeNext})
+	return promise
+}
+
 // evalAwait implements the await operator. Inside an async function body it
 // suspends the coroutine (handing the operand to the async driver) and resumes
 // with the settled value, or throws the rejection reason. Outside any coroutine
