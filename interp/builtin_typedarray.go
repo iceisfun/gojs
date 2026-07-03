@@ -107,6 +107,19 @@ func (td *typedArrayData) outOfBounds() (bool, int) {
 	return false, td.arrayLength
 }
 
+// isFixedLength implements IsTypedArrayFixedLength (§10.4.5.10): a length-
+// tracking view, or one backed by a resizable ArrayBuffer, is not fixed-length.
+func (td *typedArrayData) isFixedLength() bool {
+	if td.autoLength {
+		return false
+	}
+	ab, ok := arrayBufferOf(td.buffer)
+	if !ok || ab.resizable {
+		return false
+	}
+	return true
+}
+
 // length returns the current element length, or 0 when out of bounds.
 func (td *typedArrayData) length() int {
 	_, n := td.outOfBounds()

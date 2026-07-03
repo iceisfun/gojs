@@ -5,13 +5,18 @@ import "context"
 // initObject installs the Object constructor and Object.prototype methods.
 func (i *Interpreter) initObject() {
 	proto := i.objectProto
+	// %Object.prototype% is an immutable-prototype exotic object (§10.4.7):
+	// setting its prototype to anything but its current [[Prototype]] (null)
+	// throws.
+	proto.immutableProto = true
 
 	i.defineMethod(proto, "hasOwnProperty", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		o, err := i.ToObject(ctx, this)
+		// §20.1.3.2: ToPropertyKey(P) runs before ToObject(this value).
+		key, err := i.ToPropertyKey(ctx, arg(args, 0))
 		if err != nil {
 			return nil, err
 		}
-		key, err := i.ToPropertyKey(ctx, arg(args, 0))
+		o, err := i.ToObject(ctx, this)
 		if err != nil {
 			return nil, err
 		}
@@ -22,27 +27,40 @@ func (i *Interpreter) initObject() {
 		return Bool(ok), nil
 	})
 	i.defineMethod(proto, "isPrototypeOf", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		// §20.1.3.4: if V is not an object, return false; otherwise ToObject(this)
+		// (throwing for a nullish receiver) and walk V's prototype chain via
+		// [[GetPrototypeOf]] so a Proxy's getPrototypeOf trap is observed.
 		target, ok := arg(args, 0).(*Object)
 		if !ok {
 			return False, nil
 		}
-		self, ok := this.(*Object)
-		if !ok {
-			return False, nil
-		}
-		for p := target.proto; p != nil; p = p.proto {
-			if p == self {
-				return True, nil
-			}
-		}
-		return False, nil
-	})
-	i.defineMethod(proto, "propertyIsEnumerable", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, err := i.ToObject(ctx, this)
 		if err != nil {
 			return nil, err
 		}
+		cur := target
+		for {
+			p, err := i.getProtoV(ctx, cur)
+			if err != nil {
+				return nil, err
+			}
+			po, ok := p.(*Object)
+			if !ok {
+				return False, nil
+			}
+			if po == o {
+				return True, nil
+			}
+			cur = po
+		}
+	})
+	i.defineMethod(proto, "propertyIsEnumerable", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		// §20.1.3.5: ToPropertyKey(V) runs before ToObject(this value).
 		key, err := i.ToPropertyKey(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		o, err := i.ToObject(ctx, this)
 		if err != nil {
 			return nil, err
 		}
@@ -56,6 +74,7 @@ func (i *Interpreter) initObject() {
 		return False, nil
 	})
 	i.defineMethod(proto, "toString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		// §20.1.3.6 Object.prototype.toString.
 		switch this.(type) {
 		case Undefined:
 			return String("[object Undefined]"), nil
@@ -66,14 +85,47 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		tag := o.class
-		// The builtin tag is derived from the class; an Arguments object carries
-		// class "Arguments" (§20.1.3.6 checks [[ParameterMap]] before falling back
-		// to the ordinary class) and reports it verbatim.
-		if o.isArray {
-			tag = "Array"
-		} else if o.IsCallable() {
-			tag = "Function"
+		// Determine builtinTag from the object's kind. IsArray is proxy-aware and
+		// throws for a revoked proxy; the remaining slots are recognized by the
+		// object's internal class. A callable object (including a callable Proxy)
+		// is "Function" regardless of its class, so the more specific generator/
+		// async tags come only from @@toStringTag on the prototype chain.
+		isArr, err := i.isArrayV(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+		var builtinTag string
+		switch {
+		case isArr:
+			builtinTag = "Array"
+		case o.class == "Arguments":
+			builtinTag = "Arguments"
+		case o.IsCallable():
+			builtinTag = "Function"
+		case o.class == "Error":
+			builtinTag = "Error"
+		case o.class == "Boolean":
+			builtinTag = "Boolean"
+		case o.class == "Number":
+			builtinTag = "Number"
+		case o.class == "String":
+			builtinTag = "String"
+		case o.class == "Date":
+			builtinTag = "Date"
+		case o.class == "RegExp":
+			builtinTag = "RegExp"
+		default:
+			builtinTag = "Object"
+		}
+		// tag = Get(O, @@toStringTag); a String result overrides builtinTag, and an
+		// abrupt getter propagates. Any non-string tag is ignored.
+		tagVal, err := i.getV(ctx, o, SymKey(i.symToStringTag), o)
+		if err != nil {
+			return nil, err
+		}
+		tag := builtinTag
+		if s, ok := tagVal.(String); ok {
+			tag = string(s)
 		}
 		return String("[object " + tag + "]"), nil
 	})
@@ -93,6 +145,11 @@ func (i *Interpreter) initObject() {
 	// Annex B accessor helpers. __defineGetter__/__defineSetter__ install an
 	// accessor half (merging with an existing accessor); __lookupGetter__/
 	// __lookupSetter__ walk the prototype chain for the accessor half.
+	// §B.2.2.2/3: build the accessor half descriptor { [[Get]]/[[Set]]: fn,
+	// [[Enumerable]]: true, [[Configurable]]: true } and DefinePropertyOrThrow it,
+	// so an existing configurable property is merged, a non-configurable one (or a
+	// non-extensible/Proxy-rejected target) throws a TypeError, and a Proxy's
+	// defineProperty trap runs.
 	defineAccessorHalf := func(ctx context.Context, this Value, args []Value, isGet bool) (Value, error) {
 		o, err := i.ToObject(ctx, this)
 		if err != nil {
@@ -106,24 +163,22 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		existing, had := o.getOwn(key)
-		if had && existing.Accessor {
-			if isGet {
-				existing.Get = fn
-			} else {
-				existing.Set = fn
-			}
-			return Undef, nil
-		}
-		p := &Property{Accessor: true, Enumerable: true, Configurable: true}
+		desc := NewObject(i.objectProto)
 		if isGet {
-			p.Get = fn
+			desc.SetData("get", fn)
 		} else {
-			p.Set = fn
+			desc.SetData("set", fn)
 		}
-		o.defineOwn(key, p)
+		desc.SetData("enumerable", True)
+		desc.SetData("configurable", True)
+		if err := i.applyDescriptor(ctx, o, key, desc); err != nil {
+			return nil, err
+		}
 		return Undef, nil
 	}
+	// §B.2.2.4/5: walk the prototype chain via [[GetOwnProperty]]/[[GetPrototypeOf]]
+	// (so a Proxy's traps run and can propagate an abrupt completion), returning
+	// the accessor half of the first own property found.
 	lookupAccessorHalf := func(ctx context.Context, this Value, args []Value, isGet bool) (Value, error) {
 		o, err := i.ToObject(ctx, this)
 		if err != nil {
@@ -133,22 +188,33 @@ func (i *Interpreter) initObject() {
 		if err != nil {
 			return nil, err
 		}
-		for cur := o; cur != nil; cur = cur.proto {
-			p, ok := cur.getOwn(key)
+		for cur := o; cur != nil; {
+			p, ok, err := i.getOwnPropertyV(ctx, cur, key)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				if p.Accessor {
+					fn := p.Get
+					if !isGet {
+						fn = p.Set
+					}
+					if fn == nil {
+						return Undef, nil
+					}
+					return fn, nil
+				}
+				return Undef, nil // a data property shadows any inherited accessor
+			}
+			next, err := i.getProtoV(ctx, cur)
+			if err != nil {
+				return nil, err
+			}
+			no, ok := next.(*Object)
 			if !ok {
-				continue
+				break
 			}
-			if p.Accessor {
-				fn := p.Get
-				if !isGet {
-					fn = p.Set
-				}
-				if fn == nil {
-					return Undef, nil
-				}
-				return fn, nil
-			}
-			return Undef, nil // a data property shadows any inherited accessor
+			cur = no
 		}
 		return Undef, nil
 	}
@@ -165,19 +231,66 @@ func (i *Interpreter) initObject() {
 		return lookupAccessorHalf(ctx, this, args, false)
 	})
 
+	// §B.2.2.1: Object.prototype.__proto__ is an accessor property
+	// { enumerable: false, configurable: true } whose get/set expose
+	// [[GetPrototypeOf]]/[[SetPrototypeOf]].
+	protoGet := i.newNativeFunc("get __proto__", 0, func(ctx context.Context, this Value, _ []Value) (Value, error) {
+		o, err := i.ToObject(ctx, this)
+		if err != nil {
+			return nil, err
+		}
+		return i.getProtoV(ctx, o)
+	})
+	protoSet := i.newNativeFunc("set __proto__", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		if IsNullish(this) {
+			return nil, i.throwError(ctx, "TypeError", "Object.prototype.__proto__ called on null or undefined")
+		}
+		v := arg(args, 0)
+		// Silently ignore a value that is neither an Object nor null.
+		if _, isObj := v.(*Object); !isObj {
+			if _, isNull := v.(Null); !isNull {
+				return Undef, nil
+			}
+		}
+		// A primitive receiver has no observable prototype slot to set: no-op.
+		o, ok := this.(*Object)
+		if !ok {
+			return Undef, nil
+		}
+		status, err := i.setProtoV(ctx, o, v)
+		if err != nil {
+			return nil, err
+		}
+		if !status {
+			return nil, i.throwError(ctx, "TypeError", "Object.prototype.__proto__: cannot set prototype")
+		}
+		return Undef, nil
+	})
+	proto.defineOwn(StrKey("__proto__"), &Property{
+		Accessor: true, Get: protoGet, Set: protoSet, Enumerable: false, Configurable: true,
+	})
+
 	// Object constructor.
-	ctor := i.newNativeCtor("Object", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	var ctor *Object
+	objectCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		v := arg(args, 0)
 		if IsNullish(v) {
 			return NewObject(i.objectProto), nil
 		}
 		return i.ToObject(ctx, v)
-	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		v := arg(args, 0)
-		if IsNullish(v) {
-			return NewObject(i.objectProto), nil
+	}
+	ctor = i.newNativeCtor("Object", 1, objectCall, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		// §20.1.1.1: when Object is subclassed (NewTarget is neither the Object
+		// constructor itself nor undefined), ignore the argument and create a fresh
+		// ordinary object using NewTarget's "prototype".
+		if nt, ok := newTarget.(*Object); ok && nt != ctor {
+			p, err := i.protoFromNewTarget(ctx, nt, i.objectProto)
+			if err != nil {
+				return nil, err
+			}
+			return NewObject(p), nil
 		}
-		return i.ToObject(ctx, v)
+		return objectCall(ctx, newTarget, args)
 	})
 	linkCtor(ctor, i.objectProto)
 
@@ -273,16 +386,29 @@ func (i *Interpreter) initObject() {
 		return target, nil
 	})
 	i.defineMethod(ctor, "freeze", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if o, ok := arg(args, 0).(*Object); ok {
-			o.setIntegrityLevel(true)
+		o, ok := arg(args, 0).(*Object)
+		if !ok {
+			return arg(args, 0), nil
 		}
-		return arg(args, 0), nil
+		status, err := i.integritySet(ctx, o, true)
+		if err != nil {
+			return nil, err
+		}
+		if !status {
+			return nil, i.throwError(ctx, "TypeError", "Object.freeze: unable to freeze object")
+		}
+		return o, nil
 	})
 	i.defineMethod(ctor, "isFrozen", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if o, ok := arg(args, 0).(*Object); ok {
-			return Bool(o.testIntegrityLevel(true)), nil
+		o, ok := arg(args, 0).(*Object)
+		if !ok {
+			return True, nil
 		}
-		return True, nil
+		frozen, err := i.integrityTest(ctx, o, true)
+		if err != nil {
+			return nil, err
+		}
+		return Bool(frozen), nil
 	})
 	i.defineMethod(ctor, "create", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		var proto *Object
@@ -386,11 +512,18 @@ func (i *Interpreter) initObject() {
 		return i.newArray(out), nil
 	})
 	i.defineMethod(ctor, "fromEntries", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		// §20.1.2.7: RequireObjectCoercible(iterable), then AddEntriesFromIterable
+		// (§7.1.16) — for each iterator value, require an Object entry, read its
+		// "0"/"1", and CreateDataPropertyOrThrow. Any abrupt completion closes the
+		// iterator.
+		if IsNullish(arg(args, 0)) {
+			return nil, i.throwError(ctx, "TypeError", "Object.fromEntries called on null or undefined")
+		}
 		o := NewObject(i.objectProto)
-		err := i.iterate(ctx, arg(args, 0), func(entry Value) error {
-			eo, err := i.ToObject(ctx, entry)
-			if err != nil {
-				return err
+		err := i.addFromIterable(ctx, arg(args, 0), func(entry Value) error {
+			eo, ok := entry.(*Object)
+			if !ok {
+				return i.throwError(ctx, "TypeError", "Object.fromEntries: iterator value "+briefValue(entry)+" is not an entry object")
 			}
 			k, err := eo.GetStr(ctx, "0")
 			if err != nil {
@@ -499,17 +632,29 @@ func (i *Interpreter) initObject() {
 		return arg(args, 0), nil
 	})
 	i.defineMethod(ctor, "seal", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if o, ok := arg(args, 0).(*Object); ok {
-			o.setIntegrityLevel(false)
+		o, ok := arg(args, 0).(*Object)
+		if !ok {
+			return arg(args, 0), nil
 		}
-		return arg(args, 0), nil
+		status, err := i.integritySet(ctx, o, false)
+		if err != nil {
+			return nil, err
+		}
+		if !status {
+			return nil, i.throwError(ctx, "TypeError", "Object.seal: unable to seal object")
+		}
+		return o, nil
 	})
 	i.defineMethod(ctor, "isSealed", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, ok := arg(args, 0).(*Object)
 		if !ok {
 			return True, nil
 		}
-		return Bool(o.testIntegrityLevel(false)), nil
+		sealed, err := i.integrityTest(ctx, o, false)
+		if err != nil {
+			return nil, err
+		}
+		return Bool(sealed), nil
 	})
 	i.defineMethod(ctor, "is", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return Bool(sameValue(arg(args, 0), arg(args, 1))), nil
@@ -552,6 +697,88 @@ func (i *Interpreter) initObject() {
 
 	i.objectCtor = ctor
 	i.setGlobalHidden("Object", ctor)
+}
+
+// integritySet implements SetIntegrityLevel (§7.3.15). Ordinary objects use the
+// in-place fast path; a Proxy or TypedArray routes through [[PreventExtensions]]
+// and [[DefineOwnProperty]] so handler traps run and any refusal (a rejected
+// preventExtensions, a non-writable TypedArray element, ...) surfaces as false —
+// which Object.freeze/seal turn into a TypeError.
+func (i *Interpreter) integritySet(ctx context.Context, o *Object, frozen bool) (bool, error) {
+	if o.proxy == nil && o.typedArray == nil {
+		o.setIntegrityLevel(frozen)
+		return true, nil
+	}
+	ok, err := i.preventExtensionsV(ctx, o)
+	if err != nil || !ok {
+		return ok, err
+	}
+	keys, err := i.ownKeysV(ctx, o)
+	if err != nil {
+		return false, err
+	}
+	for _, k := range keys {
+		desc := NewObject(i.objectProto)
+		if frozen {
+			// Freezing reads the current descriptor to decide whether the property
+			// is an accessor (only [[Configurable]] cleared) or data (also
+			// [[Writable]] cleared).
+			cur, ok, err := i.getOwnPropertyV(ctx, o, k)
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				continue
+			}
+			desc.SetData("configurable", False)
+			if !cur.Accessor {
+				desc.SetData("writable", False)
+			}
+		} else {
+			// Sealing only makes properties non-configurable.
+			desc.SetData("configurable", False)
+		}
+		if err := i.applyDescriptor(ctx, o, k, desc); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// integrityTest implements TestIntegrityLevel (§7.3.16). Ordinary objects use
+// the fast path; a Proxy routes through [[IsExtensible]], [[OwnPropertyKeys]]
+// and [[GetOwnProperty]] so its traps are observed.
+func (i *Interpreter) integrityTest(ctx context.Context, o *Object, frozen bool) (bool, error) {
+	if o.proxy == nil {
+		return o.testIntegrityLevel(frozen), nil
+	}
+	ext, err := i.isExtensibleV(ctx, o)
+	if err != nil {
+		return false, err
+	}
+	if ext {
+		return false, nil
+	}
+	keys, err := i.ownKeysV(ctx, o)
+	if err != nil {
+		return false, err
+	}
+	for _, k := range keys {
+		cur, ok, err := i.getOwnPropertyV(ctx, o, k)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
+		if cur.Configurable {
+			return false, nil
+		}
+		if frozen && !cur.Accessor && cur.Writable {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // descriptorToObject renders a property descriptor as a plain object, matching

@@ -121,6 +121,12 @@ func (i *Interpreter) preventExtensionsV(ctx context.Context, o *Object) (bool, 
 	if o.proxy != nil {
 		return o.proxy.preventExtensions(ctx)
 	}
+	// A TypedArray can only be made non-extensible when it is fixed-length
+	// (§10.4.5.5 IntegerIndexed [[PreventExtensions]]); a length-tracking view or
+	// one backed by a resizable buffer refuses.
+	if o.typedArray != nil && !o.typedArray.isFixedLength() {
+		return false, nil
+	}
 	o.extensible = false
 	return true, nil
 }
@@ -219,6 +225,11 @@ func (i *Interpreter) ordinarySetPrototypeOf(o *Object, proto Value) bool {
 	}
 	if o.proto == np {
 		return true
+	}
+	// An immutable-prototype exotic object rejects any change to a different
+	// prototype (§10.4.7.1 SetImmutablePrototype).
+	if o.immutableProto {
+		return false
 	}
 	if !o.extensible {
 		return false

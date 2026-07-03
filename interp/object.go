@@ -137,6 +137,10 @@ type Object struct {
 	fn      *functionData // non-nil for callable objects
 	elems   []Value       // dense element storage for arrays
 	isArray bool
+	// immutableProto marks an immutable-prototype exotic object (§10.4.7), e.g.
+	// %Object.prototype%: [[SetPrototypeOf]] succeeds only when the new prototype
+	// equals the current one, and otherwise returns false.
+	immutableProto bool
 	// lengthNonWritable records that an Array's "length" property has had its
 	// [[Writable]] attribute set to false (via defineProperty). Length is
 	// otherwise a writable, non-enumerable, non-configurable data property.
@@ -613,6 +617,11 @@ func arrayIndex(s string) (int, bool) {
 			return 0, false
 		}
 		n = n*10 + int(c-'0')
+	}
+	// A valid array index is an integer in [0, 2^32-1); 2^32-1 (4294967295) and
+	// above are ordinary string-keyed properties, not indices.
+	if n >= 1<<32-1 {
+		return 0, false
 	}
 	return n, true
 }

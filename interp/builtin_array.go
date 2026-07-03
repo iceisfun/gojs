@@ -81,6 +81,7 @@ func (i *Interpreter) initArray() {
 		{"values", 0, i.arrayValues},
 		{"entries", 0, i.arrayEntries},
 		{"toString", 0, i.arrayToString},
+		{"toLocaleString", 0, i.arrayToLocaleString},
 	}
 	for _, m := range methods {
 		i.defineMethod(proto, m.name, m.n, m.fn)
@@ -794,6 +795,48 @@ func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Valu
 		return to.fn.call(ctx, o, nil)
 	}
 	return i.arrayJoin(ctx, this, nil)
+}
+
+// arrayToLocaleString implements Array.prototype.toLocaleString (§23.1.3.32),
+// also serving as %TypedArray.prototype.toLocaleString%. It is generic over the
+// array-like receiver: each present element's own "toLocaleString" is invoked
+// and the results are joined with ",". A nullish element contributes "".
+func (i *Interpreter) arrayToLocaleString(ctx context.Context, this Value, args []Value) (Value, error) {
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	var sb []byte
+	for k := 0; k < length; k++ {
+		if k > 0 {
+			sb = append(sb, ',')
+		}
+		el, err := o.GetStr(ctx, intToStr(k))
+		if err != nil {
+			return nil, err
+		}
+		if IsNullish(el) {
+			continue
+		}
+		m, err := i.getProperty(ctx, el, StrKey("toLocaleString"))
+		if err != nil {
+			return nil, err
+		}
+		res, err := i.call(ctx, m, el, nil)
+		if err != nil {
+			return nil, err
+		}
+		s, err := i.ToStringV(ctx, res)
+		if err != nil {
+			return nil, err
+		}
+		sb = append(sb, s...)
+	}
+	return String(string(sb)), nil
 }
 
 func (i *Interpreter) arrayIndexOf(ctx context.Context, this Value, args []Value) (Value, error) {

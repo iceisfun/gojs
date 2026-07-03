@@ -161,6 +161,8 @@ type intrinsics struct {
 	aggregateErrorProto       *Object // %AggregateError.prototype%, for Promise.any
 	iteratorProto             *Object
 	arrayIteratorProto        *Object // %ArrayIteratorPrototype%
+	mapIteratorProto          *Object // %MapIteratorPrototype%
+	setIteratorProto          *Object // %SetIteratorPrototype%
 	iteratorHelperProto       *Object // %IteratorHelperPrototype%
 	wrapForValidIterProto     *Object // %WrapForValidIteratorPrototype%
 	stringIteratorProto       *Object // %StringIteratorPrototype%

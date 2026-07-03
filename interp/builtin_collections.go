@@ -236,6 +236,13 @@ func (i *Interpreter) initMap() {
 	proto := i.mapProto
 	proto.class = "Map"
 
+	// %MapIteratorPrototype% (§24.1.5.2): inherits %Iterator.prototype% and
+	// carries @@toStringTag "Map Iterator".
+	i.mapIteratorProto = NewObject(i.iteratorProto)
+	i.mapIteratorProto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value: String("Map Iterator"), Writable: false, Enumerable: false, Configurable: true,
+	})
+
 	// Constructor: new Map(iterable?). §24.1.1.1
 	// The iterable (if supplied) must produce [key, value] pairs.
 	//
@@ -459,7 +466,7 @@ func (i *Interpreter) initMap() {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.keys called on incompatible receiver")
 		}
 		idx, done := 0, false
-		return i.newIterator(func() (Value, bool) {
+		return i.newIteratorProto(i.mapIteratorProto, "Map Iterator", func() (Value, bool) {
 			e, next, ok := m.nextLive(idx)
 			if done || !ok {
 				done = true
@@ -478,7 +485,7 @@ func (i *Interpreter) initMap() {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.values called on incompatible receiver")
 		}
 		idx, done := 0, false
-		return i.newIterator(func() (Value, bool) {
+		return i.newIteratorProto(i.mapIteratorProto, "Map Iterator", func() (Value, bool) {
 			e, next, ok := m.nextLive(idx)
 			if done || !ok {
 				done = true
@@ -497,7 +504,7 @@ func (i *Interpreter) initMap() {
 			return nil, i.throwError(ctx, "TypeError", "Map.prototype.entries called on incompatible receiver")
 		}
 		idx, done := 0, false
-		return i.newIterator(func() (Value, bool) {
+		return i.newIteratorProto(i.mapIteratorProto, "Map Iterator", func() (Value, bool) {
 			e, next, ok := m.nextLive(idx)
 			if done || !ok {
 				done = true
@@ -537,6 +544,13 @@ func (i *Interpreter) initMap() {
 func (i *Interpreter) initSet() {
 	proto := i.setProto
 	proto.class = "Set"
+
+	// %SetIteratorPrototype% (§24.2.5.2): inherits %Iterator.prototype% and
+	// carries @@toStringTag "Set Iterator".
+	i.setIteratorProto = NewObject(i.iteratorProto)
+	i.setIteratorProto.defineOwn(SymKey(i.symToStringTag), &Property{
+		Value: String("Set Iterator"), Writable: false, Enumerable: false, Configurable: true,
+	})
 
 	// Constructor: new Set(iterable?). §24.2.1.1
 	//
@@ -665,7 +679,7 @@ func (i *Interpreter) initSet() {
 			return nil, i.throwError(ctx, "TypeError", "Set.prototype.values called on incompatible receiver")
 		}
 		idx, done := 0, false
-		return i.newIterator(func() (Value, bool) {
+		return i.newIteratorProto(i.setIteratorProto, "Set Iterator", func() (Value, bool) {
 			e, next, ok := s.m.nextLive(idx)
 			if done || !ok {
 				done = true // once exhausted, the iterator stays done (§24.2.5.1)
@@ -687,7 +701,7 @@ func (i *Interpreter) initSet() {
 			return nil, i.throwError(ctx, "TypeError", "Set.prototype.entries called on incompatible receiver")
 		}
 		idx, done := 0, false
-		return i.newIterator(func() (Value, bool) {
+		return i.newIteratorProto(i.setIteratorProto, "Set Iterator", func() (Value, bool) {
 			e, next, ok := s.m.nextLive(idx)
 			if done || !ok {
 				done = true // once exhausted, the iterator stays done (§24.2.5.1)

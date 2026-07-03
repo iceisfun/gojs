@@ -171,13 +171,19 @@ func (i *Interpreter) newStringObject(s String) *Object {
 	return o
 }
 
-// ToPropertyKey converts a value to a property key per §7.1.19: symbols pass
-// through; everything else becomes a string key.
+// ToPropertyKey converts a value to a property key per §7.1.19: it first reduces
+// the argument to a primitive with a string hint (so an object whose
+// @@toPrimitive/toString yields a Symbol produces a symbol key), then passes a
+// Symbol result through and coerces anything else to a string key.
 func (i *Interpreter) ToPropertyKey(ctx context.Context, v Value) (PropertyKey, error) {
-	if sym, ok := v.(*Symbol); ok {
+	key, err := i.ToPrimitive(ctx, v, "string")
+	if err != nil {
+		return PropertyKey{}, err
+	}
+	if sym, ok := key.(*Symbol); ok {
 		return SymKey(sym), nil
 	}
-	s, err := i.ToStringV(ctx, v)
+	s, err := i.ToStringV(ctx, key)
 	if err != nil {
 		return PropertyKey{}, err
 	}
