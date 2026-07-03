@@ -509,17 +509,35 @@ func bigIntCmpFloat(b *big.Int, f float64) int {
 }
 
 // parseStringToBigInt implements StringToBigInt (§7.1.14): whitespace is
-// trimmed, "" is 0, and a well-formed integer literal (decimal or 0x/0o/0b) is
-// parsed. It returns ok=false for a value that cannot be converted (yielding an
-// "undefined" comparison result), never a syntax error.
+// trimmed, "" is 0, and a well-formed integer literal (a signed decimal, or an
+// unsigned 0x/0o/0b non-decimal literal) is parsed. It returns ok=false for a
+// value that cannot be converted (yielding an "undefined" comparison result),
+// never a syntax error. Unlike math/big's base-0 parsing, a bare leading zero
+// is decimal (StringToBigInt has no legacy octal) and numeric separators ('_')
+// are rejected.
 func parseStringToBigInt(s string) (*big.Int, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return big.NewInt(0), true
 	}
+	if strings.IndexByte(s, '_') >= 0 {
+		return nil, false
+	}
 	n := new(big.Int)
-	if _, ok := n.SetString(s, 0); ok {
-		return n, true
+	// A non-decimal literal (0x/0o/0b) is unsigned; a decimal literal may carry a
+	// sign. Select the base explicitly so a leading zero is not read as octal.
+	if len(s) >= 2 && s[0] == '0' {
+		switch s[1] {
+		case 'x', 'X':
+			_, ok := n.SetString(s[2:], 16)
+			return n, ok
+		case 'o', 'O':
+			_, ok := n.SetString(s[2:], 8)
+			return n, ok
+		case 'b', 'B':
+			_, ok := n.SetString(s[2:], 2)
+			return n, ok
+		}
 	}
 	if _, ok := n.SetString(s, 10); ok {
 		return n, true

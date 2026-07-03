@@ -88,22 +88,30 @@ func (i *Interpreter) looseEquals(ctx context.Context, a, b Value) (bool, error)
 	case IsNullish(a) || IsNullish(b):
 		return false, nil
 	}
-	// Number/String and Boolean coercions.
+	// Number/String, BigInt, and Boolean coercions (§7.2.15 steps 4-9).
 	switch x := a.(type) {
 	case Number:
-		if _, ok := b.(String); ok {
+		switch b.(type) {
+		case String:
 			return float64(x) == ToNumber(b), nil
+		case *BigInt:
+			return bigEqualsNumber(b.(*BigInt), float64(x)), nil
 		}
 	case String:
-		if _, ok := b.(Number); ok {
-			return ToNumber(a) == float64(b.(Number)), nil
+		switch y := b.(type) {
+		case Number:
+			return ToNumber(a) == float64(y), nil
+		case *BigInt:
+			return bigEqualsString(y, string(x)), nil
 		}
 	case Boolean:
 		return i.looseEquals(ctx, Number(ToNumber(a)), b)
 	case *BigInt:
-		switch b.(type) {
-		case Number, String:
-			return bigEqualsNumeric(x, b), nil
+		switch y := b.(type) {
+		case Number:
+			return bigEqualsNumber(x, float64(y)), nil
+		case String:
+			return bigEqualsString(x, string(y)), nil
 		}
 	}
 	if _, ok := b.(Boolean); ok {
@@ -163,13 +171,26 @@ func sameTypeCategory(a, b Value) bool {
 	return false
 }
 
-// bigEqualsNumeric compares a BigInt with a Number or numeric String by value.
-func bigEqualsNumeric(x *BigInt, other Value) bool {
-	f := ToNumber(other)
+// bigEqualsNumber compares a BigInt with a Number by mathematical value
+// (§7.2.15 step 12 / §6.1.6.1.13): a non-finite or non-integer Number is never
+// equal to a BigInt.
+func bigEqualsNumber(x *BigInt, f float64) bool {
 	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
 		return false
 	}
 	xf := new(big.Float).SetInt(x.Int)
 	of := big.NewFloat(f)
 	return xf.Cmp(of) == 0
+}
+
+// bigEqualsString compares a BigInt with a String (§7.2.15 steps 6-7): the
+// string is parsed with StringToBigInt semantics, which — unlike ToNumber —
+// rejects decimal points and exponents (e.g. "1.0"/"1e3" are not BigInts), so a
+// string that is not a valid integer literal is never equal to a BigInt.
+func bigEqualsString(x *BigInt, s string) bool {
+	n, ok := parseStringToBigInt(s)
+	if !ok {
+		return false
+	}
+	return x.Int.Cmp(n) == 0
 }
