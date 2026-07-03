@@ -31,29 +31,33 @@ func (i *Interpreter) evalUnary(ctx context.Context, e *ast.UnaryExpr, env *Envi
 	case token.NOT:
 		return Bool(!ToBoolean(v)), nil
 	case token.MINUS:
-		if b, ok := v.(*BigInt); ok {
-			return &BigInt{Int: new(big.Int).Neg(b.Int)}, nil
-		}
-		n, err := i.ToNumberV(ctx, v)
+		// -x is ToNumeric(x) then negate, so an object coercing to a BigInt
+		// (boxed, or via @@toPrimitive/valueOf) takes the BigInt path.
+		num, err := i.toNumeric(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		return Number(-n), nil
+		if b, ok := num.(*BigInt); ok {
+			return &BigInt{Int: new(big.Int).Neg(b.Int)}, nil
+		}
+		return Number(-float64(num.(Number))), nil
 	case token.PLUS:
+		// Unary + is ToNumber, which rejects BigInt operands.
 		n, err := i.ToNumberV(ctx, v)
 		if err != nil {
 			return nil, err
 		}
 		return Number(n), nil
 	case token.BIT_NOT:
-		if b, ok := v.(*BigInt); ok {
-			return &BigInt{Int: new(big.Int).Not(b.Int)}, nil
-		}
-		n, err := i.ToNumberV(ctx, v)
+		// ~x is ToNumeric(x) then bitwise-NOT; BigInt operands negate-and-subtract-one.
+		num, err := i.toNumeric(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		return Number(float64(^ToInt32(n))), nil
+		if b, ok := num.(*BigInt); ok {
+			return &BigInt{Int: new(big.Int).Not(b.Int)}, nil
+		}
+		return Number(float64(^ToInt32(float64(num.(Number))))), nil
 	case token.VOID:
 		return Undef, nil
 	default:
@@ -171,8 +175,14 @@ func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *En
 	if err != nil {
 		return nil, err
 	}
+	// oldValue is ToNumeric(GetValue(ref)) (§13.4.4.1), so an object coercing to
+	// a BigInt takes the BigInt path rather than throwing in ToNumber.
+	oldNum, err := i.toNumeric(ctx, old)
+	if err != nil {
+		return nil, err
+	}
 	// BigInt increments stay BigInt.
-	if b, ok := old.(*BigInt); ok {
+	if b, ok := oldNum.(*BigInt); ok {
 		delta := big.NewInt(1)
 		nv := new(big.Int)
 		if e.Op == token.INC {
@@ -189,10 +199,7 @@ func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *En
 		}
 		return b, nil
 	}
-	n, err := i.ToNumberV(ctx, old)
-	if err != nil {
-		return nil, err
-	}
+	n := float64(oldNum.(Number))
 	var updated float64
 	if e.Op == token.INC {
 		updated = n + 1
