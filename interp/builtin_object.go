@@ -90,6 +90,81 @@ func (i *Interpreter) initObject() {
 		return i.ToObject(ctx, this)
 	})
 
+	// Annex B accessor helpers. __defineGetter__/__defineSetter__ install an
+	// accessor half (merging with an existing accessor); __lookupGetter__/
+	// __lookupSetter__ walk the prototype chain for the accessor half.
+	defineAccessorHalf := func(ctx context.Context, this Value, args []Value, isGet bool) (Value, error) {
+		o, err := i.ToObject(ctx, this)
+		if err != nil {
+			return nil, err
+		}
+		fn, ok := arg(args, 1).(*Object)
+		if !ok || !fn.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "Object.prototype.__define"+map[bool]string{true: "Getter", false: "Setter"}[isGet]+"__: Expecting function")
+		}
+		key, err := i.ToPropertyKey(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		existing, had := o.getOwn(key)
+		if had && existing.Accessor {
+			if isGet {
+				existing.Get = fn
+			} else {
+				existing.Set = fn
+			}
+			return Undef, nil
+		}
+		p := &Property{Accessor: true, Enumerable: true, Configurable: true}
+		if isGet {
+			p.Get = fn
+		} else {
+			p.Set = fn
+		}
+		o.defineOwn(key, p)
+		return Undef, nil
+	}
+	lookupAccessorHalf := func(ctx context.Context, this Value, args []Value, isGet bool) (Value, error) {
+		o, err := i.ToObject(ctx, this)
+		if err != nil {
+			return nil, err
+		}
+		key, err := i.ToPropertyKey(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		for cur := o; cur != nil; cur = cur.proto {
+			p, ok := cur.getOwn(key)
+			if !ok {
+				continue
+			}
+			if p.Accessor {
+				fn := p.Get
+				if !isGet {
+					fn = p.Set
+				}
+				if fn == nil {
+					return Undef, nil
+				}
+				return fn, nil
+			}
+			return Undef, nil // a data property shadows any inherited accessor
+		}
+		return Undef, nil
+	}
+	i.defineMethod(proto, "__defineGetter__", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return defineAccessorHalf(ctx, this, args, true)
+	})
+	i.defineMethod(proto, "__defineSetter__", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return defineAccessorHalf(ctx, this, args, false)
+	})
+	i.defineMethod(proto, "__lookupGetter__", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return lookupAccessorHalf(ctx, this, args, true)
+	})
+	i.defineMethod(proto, "__lookupSetter__", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return lookupAccessorHalf(ctx, this, args, false)
+	})
+
 	// Object constructor.
 	ctor := i.newNativeCtor("Object", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		v := arg(args, 0)
