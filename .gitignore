@@ -5,3 +5,7 @@ cmd/gojs/gojs
 NOTES-divergences.md
 reference
 .claude/
+
+# test262 conformance mining (memory-capped docker harness)
+run-test262.sh
+test262-logs/
