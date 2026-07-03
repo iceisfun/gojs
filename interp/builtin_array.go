@@ -1,6 +1,9 @@
 package interp
 
-import "context"
+import (
+	"context"
+	"strconv"
+)
 
 // newArray creates an Array object holding the given elements.
 func (i *Interpreter) newArray(elems []Value) *Object {
@@ -304,20 +307,180 @@ func (i *Interpreter) arraySplice(ctx context.Context, this Value, args []Value)
 	return i.newArray(removed), nil
 }
 
+// arrayConcat implements Array.prototype.concat (§23.1.3.1) generically: it
+// coerces `this` with ToObject, allocates the result via ArraySpeciesCreate, and
+// spreads each argument whose IsConcatSpreadable is true through
+// [[Get]]/[[HasProperty]] (preserving holes and surfacing poisoned getters and
+// Proxy traps) while appending non-spreadable items directly.
 func (i *Interpreter) arrayConcat(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	out := append([]Value{}, o.elems...)
-	for _, a := range args {
-		if ao, ok := a.(*Object); ok && ao.isArray {
-			out = append(out, ao.elems...)
+	a, err := i.arraySpeciesCreate(ctx, o, 0)
+	if err != nil {
+		return nil, err
+	}
+	const maxSafe = float64(1<<53 - 1)
+	n := 0
+	items := append([]Value{o}, args...)
+	for _, e := range items {
+		spreadable, err := i.isConcatSpreadable(ctx, e)
+		if err != nil {
+			return nil, err
+		}
+		if spreadable {
+			eo := e.(*Object)
+			length, err := i.lengthOfArrayLike(ctx, eo)
+			if err != nil {
+				return nil, err
+			}
+			if float64(n)+float64(length) > maxSafe {
+				return nil, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+			}
+			for k := 0; k < length; k++ {
+				kKey := StrKey(strconv.Itoa(k))
+				present, err := i.hasV(ctx, eo, kKey)
+				if err != nil {
+					return nil, err
+				}
+				if present {
+					sub, err := i.getV(ctx, eo, kKey, eo)
+					if err != nil {
+						return nil, err
+					}
+					if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(n)), sub); err != nil {
+						return nil, err
+					}
+				}
+				n++
+			}
 		} else {
-			out = append(out, a)
+			if float64(n) >= maxSafe {
+				return nil, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+			}
+			if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(n)), e); err != nil {
+				return nil, err
+			}
+			n++
 		}
 	}
-	return i.newArray(out), nil
+	// Set(A, "length", n, true).
+	ok, err := i.setV(ctx, a, StrKey("length"), Number(float64(n)), a)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "Cannot set length of concat result")
+	}
+	return a, nil
+}
+
+// isArrayV implements IsArray (§7.2.2): true for an Array exotic object,
+// recursing through a Proxy to its target and throwing on a revoked proxy.
+func (i *Interpreter) isArrayV(ctx context.Context, v Value) (bool, error) {
+	o, ok := v.(*Object)
+	if !ok {
+		return false, nil
+	}
+	for o.proxy != nil {
+		if o.proxy.revoked() || o.proxy.target == nil {
+			return false, i.throwError(ctx, "TypeError", "Cannot perform IsArray on a revoked Proxy")
+		}
+		o = o.proxy.target
+	}
+	return o.isArray, nil
+}
+
+// isConcatSpreadable implements IsConcatSpreadable (§23.1.3.1.1): consult
+// @@isConcatSpreadable when present, otherwise fall back to IsArray.
+func (i *Interpreter) isConcatSpreadable(ctx context.Context, v Value) (bool, error) {
+	o, ok := v.(*Object)
+	if !ok {
+		return false, nil
+	}
+	spreadable, err := o.Get(ctx, SymKey(i.symIsConcatSpreadable))
+	if err != nil {
+		return false, err
+	}
+	if !IsUndefined(spreadable) {
+		return ToBoolean(spreadable), nil
+	}
+	return i.isArrayV(ctx, o)
+}
+
+// arraySpeciesCreate implements ArraySpeciesCreate (§23.1.3.2.3): allocate a new
+// array of the given length, honoring the original array's constructor @@species.
+func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, length int) (*Object, error) {
+	isArr, err := i.isArrayV(ctx, original)
+	if err != nil {
+		return nil, err
+	}
+	if !isArr {
+		return i.newArrayOfLen(length), nil
+	}
+	c, err := original.GetStr(ctx, "constructor")
+	if err != nil {
+		return nil, err
+	}
+	if co, ok := c.(*Object); ok {
+		sv, err := co.Get(ctx, SymKey(i.symSpecies))
+		if err != nil {
+			return nil, err
+		}
+		if IsNullish(sv) {
+			c = Undef
+		} else {
+			c = sv
+		}
+	}
+	if IsUndefined(c) {
+		return i.newArrayOfLen(length), nil
+	}
+	co, ok := c.(*Object)
+	if !ok || !co.IsConstructor() {
+		return nil, i.throwError(ctx, "TypeError", "Array species is not a constructor")
+	}
+	res, err := co.fn.construct(ctx, co, []Value{Number(float64(length))})
+	if err != nil {
+		return nil, err
+	}
+	ro, ok := res.(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "Array species constructor did not return an object")
+	}
+	return ro, nil
+}
+
+// newArrayOfLen implements ArrayCreate(length): a fresh array of `length` holes.
+func (i *Interpreter) newArrayOfLen(n int) *Object {
+	arr := i.newArray(nil)
+	arr.ensureLen(n)
+	return arr
+}
+
+// createDataPropertyOrThrow implements CreateDataPropertyOrThrow (§7.3.7) via
+// [[DefineOwnProperty]], so it honors a Proxy target and array-index storage.
+func (i *Interpreter) createDataPropertyOrThrow(ctx context.Context, o *Object, key PropertyKey, v Value) error {
+	ok, err := i.definePropertyV(ctx, o, key, i.dataDescriptorObject(v))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return i.throwError(ctx, "TypeError", "Cannot create property")
+	}
+	return nil
+}
+
+// dataDescriptorObject builds a {value, writable, enumerable, configurable:true}
+// descriptor object for CreateDataProperty.
+func (i *Interpreter) dataDescriptorObject(v Value) *Object {
+	d := NewObject(i.objectProto)
+	d.SetData("value", v)
+	d.SetData("writable", Bool(true))
+	d.SetData("enumerable", Bool(true))
+	d.SetData("configurable", Bool(true))
+	return d
 }
 
 func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (Value, error) {

@@ -2,81 +2,147 @@ package interp
 
 import (
 	"context"
+	"math"
 	"sort"
+	"strconv"
 )
 
 // This file holds additional Array.prototype methods kept separate from the
 // core set in builtin_array.go for readability.
 
-// arraySort sorts the array in place. With no comparator, elements are compared
-// by their string representation (with undefined sorting last); otherwise the
-// provided comparator is used. A stable sort is used, matching modern engines.
+// sortCompare implements the SortCompare abstract closure (§23.1.3.30.2):
+// undefined sorts after everything, otherwise the comparator's ToNumber result
+// (NaN treated as +0) is used, falling back to a lexicographic ToString compare.
+// It returns a negative/zero/positive number like a C comparator.
+func (i *Interpreter) sortCompare(ctx context.Context, cmp *Object, x, y Value) (float64, error) {
+	xu, yu := IsUndefined(x), IsUndefined(y)
+	switch {
+	case xu && yu:
+		return 0, nil
+	case xu:
+		return 1, nil
+	case yu:
+		return -1, nil
+	}
+	if cmp != nil {
+		r, err := cmp.fn.call(ctx, Undef, []Value{x, y})
+		if err != nil {
+			return 0, err
+		}
+		n, err := i.ToNumberV(ctx, r)
+		if err != nil {
+			return 0, err
+		}
+		if math.IsNaN(n) {
+			return 0, nil
+		}
+		return n, nil
+	}
+	sa, err := i.ToStringV(ctx, x)
+	if err != nil {
+		return 0, err
+	}
+	sb, err := i.ToStringV(ctx, y)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case sa < sb:
+		return -1, nil
+	case sa > sb:
+		return 1, nil
+	}
+	return 0, nil
+}
+
+// arraySort implements Array.prototype.sort (§23.1.3.30) in place. It is generic:
+// a non-callable, non-undefined comparator throws, and an array-like receiver is
+// sorted through [[Get]]/[[Set]]/[[Delete]]. A plain dense array takes a direct
+// fast path. Present elements are sorted (undefined last); holes migrate to the
+// tail. The sort is stable, matching modern engines.
 func (i *Interpreter) arraySort(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// Comparefn must be undefined or callable (validated before any coercion).
+	var cmp *Object
+	if comparefn := arg(args, 0); !IsUndefined(comparefn) {
+		c, ok := comparefn.(*Object)
+		if !ok || !c.IsCallable() {
+			return nil, i.throwError(ctx, "TypeError", "The comparison function must be either a function or undefined")
+		}
+		cmp = c
+	}
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	var cmp *Object
-	if c, ok := arg(args, 0).(*Object); ok && c.IsCallable() {
-		cmp = c
-	}
-	// undefined elements always sort to the end (and are not passed to cmp);
-	// holes sort after even the undefineds, preserving their absence.
-	var defined []Value
-	undefinedCount := 0
-	holeCount := 0
-	for _, v := range o.elems {
-		switch {
-		case isHole(v):
-			holeCount++
-		case IsUndefined(v):
-			undefinedCount++
-		default:
-			defined = append(defined, v)
-		}
-	}
 
-	var sortErr error
-	sort.SliceStable(defined, func(a, b int) bool {
-		if sortErr != nil {
-			return false
-		}
-		if cmp != nil {
-			r, err := cmp.fn.call(ctx, Undef, []Value{defined[a], defined[b]})
-			if err != nil {
-				sortErr = err
+	// sortValues stably sorts a slice by sortCompare, surfacing a comparator error.
+	sortValues := func(vals []Value) error {
+		var sortErr error
+		sort.SliceStable(vals, func(a, b int) bool {
+			if sortErr != nil {
 				return false
 			}
-			n, err := i.ToNumberV(ctx, r)
+			n, err := i.sortCompare(ctx, cmp, vals[a], vals[b])
 			if err != nil {
 				sortErr = err
 				return false
 			}
 			return n < 0
-		}
-		// Default: compare by string value.
-		sa, err := i.ToStringV(ctx, defined[a])
+		})
+		return sortErr
+	}
+
+	// Sort an array-like object through its internal methods. There is no dense
+	// fast path: the spec reads present elements with [[Get]] (after a proto-
+	// chain-walking HasProperty) and writes them back with [[Set]], so an index
+	// accessor anywhere on the prototype chain — or one that mutates the array
+	// mid-sort — is observed exactly (see the sort/precise-* tests).
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	// Collect the values at present indices (holes are skipped, not deleted yet).
+	var items []Value
+	for k := 0; k < length; k++ {
+		key := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, o, key)
 		if err != nil {
-			sortErr = err
-			return false
+			return nil, err
 		}
-		sb, err := i.ToStringV(ctx, defined[b])
+		if present {
+			v, err := i.getV(ctx, o, key, o)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, v)
+		}
+	}
+	if err := sortValues(items); err != nil {
+		return nil, err
+	}
+	// Write the sorted values back over the low indices, then delete the tail so
+	// the trailing holes (absent indices) reappear at the end.
+	j := 0
+	for ; j < len(items); j++ {
+		key := StrKey(strconv.Itoa(j))
+		ok, err := i.setV(ctx, o, key, items[j], o)
 		if err != nil {
-			sortErr = err
-			return false
+			return nil, err
 		}
-		return sa < sb
-	})
-	if sortErr != nil {
-		return nil, sortErr
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Cannot assign to read only property '"+strconv.Itoa(j)+"'")
+		}
 	}
-	for k := 0; k < undefinedCount; k++ {
-		defined = append(defined, Undef)
+	for ; j < length; j++ {
+		key := StrKey(strconv.Itoa(j))
+		ok, err := i.deleteV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Cannot delete property '"+strconv.Itoa(j)+"'")
+		}
 	}
-	for k := 0; k < holeCount; k++ {
-		defined = append(defined, theHole)
-	}
-	o.elems = defined
 	return o, nil
 }
 
