@@ -396,7 +396,10 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 			i.setFuncName(m, key, "")
 			val = m
 		} else {
-			val, err = i.evalExprNamed(ctx, prop.Value, env, key.Str)
+			// NamedEvaluation uses the property key as the inferred name. A Symbol
+			// key contributes "[desc]" (or "" when it has no description); a string
+			// key contributes itself.
+			val, err = i.evalExprNamed(ctx, prop.Value, env, funcNameFromKey(key))
 			if err != nil {
 				return nil, err
 			}

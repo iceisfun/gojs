@@ -497,7 +497,10 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 		return i.assignTo(ctx, t, value, env)
 	case *ast.AssignPattern:
 		if IsUndefined(value) {
-			def, err := i.evalExpr(ctx, t.Default, env)
+			// NamedEvaluation: an anonymous function default whose target is a
+			// plain identifier reference gets the target's name (bindingName
+			// returns "" for member/pattern targets, so no name is applied).
+			def, err := i.evalExprNamed(ctx, t.Default, env, bindingName(t.Target))
 			if err != nil {
 				return err
 			}
@@ -509,7 +512,7 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 		// as a plain assignment expression rather than an AssignPattern.
 		if t.Op == token.ASSIGN {
 			if IsUndefined(value) {
-				def, err := i.evalExpr(ctx, t.Value, env)
+				def, err := i.evalExprNamed(ctx, t.Value, env, bindingName(t.Target))
 				if err != nil {
 					return err
 				}
@@ -600,6 +603,19 @@ func (i *Interpreter) calleeName(callee ast.Expr) string {
 		}
 	}
 	return "expression"
+}
+
+// funcNameFromKey renders a property key as the inferred function name for
+// NamedEvaluation: a Symbol with a description yields "[desc]"; a Symbol without
+// one yields "" (no name applied); a string key yields itself.
+func funcNameFromKey(k PropertyKey) string {
+	if k.IsSymbol() {
+		if k.Sym.Desc != "" {
+			return "[" + k.Sym.Desc + "]"
+		}
+		return ""
+	}
+	return k.Str
 }
 
 // keyName renders a property key for error messages.
