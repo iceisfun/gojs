@@ -245,6 +245,8 @@ func (p *parser) parseSubStatement(annexBFunc bool) ast.Stmt {
 		if p.peek(1).Type == token.LBRACKET {
 			p.errorAt(p.cur().Pos, "Lexical declaration cannot appear in a single-statement context")
 		}
+		// A concrete statement ends the enclosing label chain (it is not a loop).
+		p.pendingLabels = nil
 		return p.parseExprStmt()
 	}
 	p.checkStatementPosition(annexBFunc)

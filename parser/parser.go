@@ -52,6 +52,21 @@ type parser struct {
 	inFunction int
 	inLoop     int
 	inSwitch   int
+	// inFuncBody counts enclosing function/arrow/method bodies. A ReturnStatement
+	// is an early error unless inFuncBody > 0. Unlike inFunction (used for the
+	// module top-level await check), it also counts arrow bodies and is
+	// saved/restored around every function-like body so eval and global code see
+	// zero.
+	inFuncBody int
+	// labelSet holds the labels of the LabelledStatements currently enclosing the
+	// cursor, within the same function boundary. Each records whether the label
+	// directly labels an IterationStatement, which distinguishes a valid `continue`
+	// target (iteration labels only) from a valid `break` target (any label).
+	// pendingLabels are the labels of the immediate enclosing label chain that
+	// have not yet reached a concrete statement; an IterationStatement consumes
+	// them as iteration labels, any other statement clears them.
+	labelSet      []labelInfo
+	pendingLabels []string
 	// classDepth is the class-body nesting depth; private names (#x) are only
 	// valid where it is > 0.
 	classDepth int
@@ -116,6 +131,35 @@ type parser struct {
 	// single-statement position under Annex B, binding `eval`/`arguments`, or a
 	// LegacyOctalIntegerLiteral / octal string escape).
 	strict bool
+}
+
+// labelInfo records an enclosing statement label and whether it directly labels
+// an IterationStatement (making it a legal `continue` target).
+type labelInfo struct {
+	name      string
+	iteration bool
+}
+
+// hasBreakLabel reports whether name is an enclosing label (a legal `break`
+// target).
+func (p *parser) hasBreakLabel(name string) bool {
+	for _, l := range p.labelSet {
+		if l.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasContinueLabel reports whether name is an enclosing iteration label (a legal
+// `continue` target).
+func (p *parser) hasContinueLabel(name string) bool {
+	for _, l := range p.labelSet {
+		if l.name == name && l.iteration {
+			return true
+		}
+	}
+	return false
 }
 
 // isContextualKeyword reports whether t is a soft/contextual keyword (let,

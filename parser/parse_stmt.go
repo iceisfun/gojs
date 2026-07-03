@@ -15,6 +15,25 @@ func (p *parser) parseStmt() ast.Stmt {
 	defer p.leave()
 
 	tk := p.cur()
+
+	// Labeled statement: IDENT ':' Statement. Detected before the concrete
+	// statement dispatch so the label chain can accumulate before an iteration
+	// statement consumes it (see parseLabeledStmt).
+	if tk.Type == token.IDENT && p.peek(1).Type == token.COLON {
+		return p.parseLabeledStmt()
+	}
+
+	// This is a concrete (non-labelled) statement, so it terminates the current
+	// label chain. An IterationStatement (for/while/do) claims the pending labels
+	// as iteration labels (legal `continue` targets); every other statement simply
+	// clears them. Loop parsers perform the claim via consumePendingLabels(true).
+	switch tk.Type {
+	case token.FOR, token.WHILE, token.DO:
+		// handled in the loop parser
+	default:
+		p.pendingLabels = nil
+	}
+
 	switch tk.Type {
 	case token.LBRACE:
 		return p.parseBlock()
@@ -71,16 +90,47 @@ func (p *parser) parseStmt() ast.Stmt {
 		}
 	}
 
-	// Labeled statement: IDENT ':' Statement.
-	if tk.Type == token.IDENT && p.peek(1).Type == token.COLON {
-		label := p.next()
-		p.checkEscapedReserved(label)
-		p.next() // ':'
-		body := p.parseSubStatement(true)
-		return &ast.LabeledStmt{Label: &ast.Ident{NamePos: label.Pos, Name: label.Literal}, Body: body}
-	}
-
 	return p.parseExprStmt()
+}
+
+// parseLabeledStmt parses a LabelledStatement (`IDENT : Statement`). The cursor
+// is on the label identifier. It records the label in the enclosing label set so
+// break/continue targets can be validated, rejecting a duplicate label in the
+// same function (ECMA-262 §14.13.1 ContainsDuplicateLabels), and appends it to
+// the pending-label chain so an immediately-following IterationStatement can
+// treat it as a legal `continue` target.
+func (p *parser) parseLabeledStmt() ast.Stmt {
+	label := p.next()
+	p.checkEscapedReserved(label)
+	name := label.Literal
+	// A LabelledStatement may not redeclare an enclosing label (within the same
+	// function boundary).
+	if p.hasBreakLabel(name) {
+		p.errorAt(label.Pos, "Label '%s' has already been declared", name)
+	}
+	p.next() // ':'
+	p.labelSet = append(p.labelSet, labelInfo{name: name})
+	p.pendingLabels = append(p.pendingLabels, name)
+	body := p.parseSubStatement(true)
+	p.labelSet = p.labelSet[:len(p.labelSet)-1]
+	return &ast.LabeledStmt{Label: &ast.Ident{NamePos: label.Pos, Name: name}, Body: body}
+}
+
+// consumePendingLabels ends the current label chain. When iteration is true (an
+// IterationStatement is claiming the chain), each pending label is marked as an
+// iteration label in the enclosing label set, making it a legal `continue`
+// target throughout the loop body. The pending list is cleared either way.
+func (p *parser) consumePendingLabels(iteration bool) {
+	if iteration {
+		for _, name := range p.pendingLabels {
+			for i := range p.labelSet {
+				if p.labelSet[i].name == name {
+					p.labelSet[i].iteration = true
+				}
+			}
+		}
+	}
+	p.pendingLabels = nil
 }
 
 // parseExport parses an ES-module export declaration. The cursor is on the
@@ -225,6 +275,15 @@ func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
 	// suspension checks for the parameter context do not reach in.
 	prevParams := p.inParams
 	p.inParams = false
+	// A function body is a fresh break/continue/return boundary: an enclosing
+	// loop, switch, or label does not reach across it (ECMA-262 forbids
+	// break/continue/return from crossing a function boundary). Save and reset the
+	// tracking state, and mark that returns are now permitted.
+	prevLoop, prevSwitch := p.inLoop, p.inSwitch
+	prevLabels, prevPending := p.labelSet, p.pendingLabels
+	p.inLoop, p.inSwitch = 0, 0
+	p.labelSet, p.pendingLabels = nil, nil
+	p.inFuncBody++
 	if p.at(token.LBRACE) && p.scanUseStrict(p.idx+1) {
 		p.strict = true
 	}
@@ -232,6 +291,9 @@ func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
 	blk := p.parseBraceBody()
 	p.strict = prevStrict
 	p.inParams = prevParams
+	p.inFuncBody--
+	p.inLoop, p.inSwitch = prevLoop, prevSwitch
+	p.labelSet, p.pendingLabels = prevLabels, prevPending
 	return blk, strict
 }
 
@@ -296,6 +358,7 @@ func (p *parser) parseIf() ast.Stmt {
 
 // parseFor parses for, for-in, and for-of statements.
 func (p *parser) parseFor() ast.Stmt {
+	p.consumePendingLabels(true)
 	kw := p.next() // for
 	await := false
 	if p.at(token.AWAIT) {
@@ -391,6 +454,7 @@ func (p *parser) parseLoopBody() ast.Stmt {
 
 // parseWhile parses a while loop.
 func (p *parser) parseWhile() ast.Stmt {
+	p.consumePendingLabels(true)
 	kw := p.next()
 	p.expect(token.LPAREN)
 	test := p.parseExpression()
@@ -415,6 +479,7 @@ func (p *parser) parseWith() ast.Stmt {
 
 // parseDoWhile parses a do/while loop.
 func (p *parser) parseDoWhile() ast.Stmt {
+	p.consumePendingLabels(true)
 	kw := p.next()
 	body := p.parseLoopBody()
 	p.expect(token.WHILE)
@@ -625,11 +690,15 @@ func eachBoundName(target ast.Expr, fn func(string)) {
 // parseReturn parses a return statement, honoring ASI for the optional argument.
 func (p *parser) parseReturn() ast.Stmt {
 	kw := p.next()
-	// A return statement may not appear directly in a class static initialization
-	// block (it is not a function body). Nested functions inside the block reset
-	// inStaticBlock, so their returns remain legal.
+	// A ReturnStatement is only permitted inside a function body (the [+Return]
+	// grammar parameter). It is an early SyntaxError in global code, eval code,
+	// and — separately — a class static initialization block, none of which is a
+	// function body. Nested functions inside such contexts re-enter a function
+	// body, so their returns remain legal.
 	if p.inStaticBlock {
 		p.errorAt(kw.Pos, "'return' is not allowed in a class static initialization block")
+	} else if p.inFuncBody == 0 {
+		p.errorAt(kw.Pos, "'return' outside of function")
 	}
 	stmt := &ast.ReturnStmt{Keyword: kw.Pos, EndPos: kw.End}
 	if !p.at(token.SEMICOLON) && !p.at(token.RBRACE) && !p.at(token.EOF) && !p.cur().NewlineBefore {
@@ -645,12 +714,38 @@ func (p *parser) parseBreakContinue(isBreak bool) ast.Stmt {
 	kw := p.next()
 	var label *ast.Ident
 	end := kw.End
+	labelName := ""
 	// A label must appear on the same line (no ASI newline before it).
 	if p.at(token.IDENT) && !p.cur().NewlineBefore {
 		id := p.next()
 		p.checkEscapedReserved(id)
-		label = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
+		labelName = id.Literal
+		label = &ast.Ident{NamePos: id.Pos, Name: labelName}
 		end = id.End
+	}
+	// Early errors (ECMA-262 §13.9 / §13.8): break/continue must resolve to an
+	// enclosing target within the same function or static-block boundary. An
+	// unlabelled continue requires an enclosing IterationStatement; an unlabelled
+	// break requires an enclosing IterationStatement or SwitchStatement. A
+	// labelled break requires an enclosing label; a labelled continue requires an
+	// enclosing label that directly labels an IterationStatement.
+	switch {
+	case labelName == "" && !isBreak:
+		if p.inLoop == 0 {
+			p.errorAt(kw.Pos, "Illegal continue statement: no surrounding iteration statement")
+		}
+	case labelName == "" && isBreak:
+		if p.inLoop == 0 && p.inSwitch == 0 {
+			p.errorAt(kw.Pos, "Illegal break statement")
+		}
+	case isBreak:
+		if !p.hasBreakLabel(labelName) {
+			p.errorAt(kw.Pos, "Undefined label '%s'", labelName)
+		}
+	default: // labelled continue
+		if !p.hasContinueLabel(labelName) {
+			p.errorAt(kw.Pos, "Undefined label '%s'", labelName)
+		}
 	}
 	p.expectSemicolon()
 	if isBreak {

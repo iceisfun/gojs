@@ -996,15 +996,24 @@ func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
 	prevField, prevStatic := p.inFieldInit, p.inStaticBlock
 	prevGen, prevAsync, prevParams := p.inGenerator, p.inAsync, p.inParams
 	prevSuperCall, prevSuperProp := p.superCallOK, p.superPropOK
+	// A static initialization block is a break/continue/return boundary just like
+	// a function body: an enclosing loop, switch, or label does not reach across
+	// it. Save and reset the tracking state.
+	prevLoop, prevSwitch := p.inLoop, p.inSwitch
+	prevLabels, prevPending := p.labelSet, p.pendingLabels
 	p.inFieldInit = false
 	p.inStaticBlock = true
 	p.inGenerator, p.inAsync, p.inParams = false, false, false
 	p.superCallOK = false
 	p.superPropOK = true
+	p.inLoop, p.inSwitch = 0, 0
+	p.labelSet, p.pendingLabels = nil, nil
 	m.StaticBlock = p.parseBlock()
 	p.inFieldInit, p.inStaticBlock = prevField, prevStatic
 	p.inGenerator, p.inAsync, p.inParams = prevGen, prevAsync, prevParams
 	p.superCallOK, p.superPropOK = prevSuperCall, prevSuperProp
+	p.inLoop, p.inSwitch = prevLoop, prevSwitch
+	p.labelSet, p.pendingLabels = prevLabels, prevPending
 	return m
 }
 
