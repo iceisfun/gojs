@@ -19,6 +19,10 @@ type classData struct {
 	superCtor      *Object // parent constructor (nil when no extends)
 	fieldInits     []*ast.ClassMember
 	privateMethods []*ast.ClassMember // instance #methods and private accessors
+	// computedKeys holds each computed member's property key, evaluated once at
+	// class-definition time (ECMA-262 evaluates ClassElementName when the class is
+	// defined, not per instance), so instance-field keys are not re-evaluated.
+	computedKeys map[*ast.ClassMember]PropertyKey
 }
 
 // evalClass evaluates a class definition to its constructor object.
@@ -58,9 +62,20 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 				return nil, i.throwError(ctx, "TypeError", "Class extends value is not a constructor or null")
 			}
 			superCtor = sc
-			protoV, _ := sc.GetStr(ctx, "prototype")
-			if pp, ok := protoV.(*Object); ok {
-				protoParent = pp
+			protoV, err := sc.GetStr(ctx, "prototype")
+			if err != nil {
+				return nil, err
+			}
+			// The superclass's .prototype must be an Object or null; any other
+			// value (e.g. a getter that returns a primitive) is a TypeError
+			// (ECMA-262 ClassDefinitionEvaluation step: protoParent).
+			switch pv := protoV.(type) {
+			case *Object:
+				protoParent = pv
+			case Null:
+				protoParent = nil
+			default:
+				return nil, i.throwError(ctx, "TypeError", "Class extends value does not have valid prototype property")
 			}
 		}
 	}
@@ -102,11 +117,39 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 		classEnv.vars[def.Name.Name] = &binding{value: ctor, mutable: false, initialized: true}
 	}
 
+	// Evaluate every computed element name exactly once, in source order, at
+	// class-definition time. A computed name that throws, or that evaluates to a
+	// value whose ToPropertyKey fails (e.g. a private-brand miss), is an error
+	// raised here rather than per instance.
+	for _, m := range def.Members {
+		if !m.Computed {
+			continue
+		}
+		v, err := i.evalExpr(ctx, m.Key, classEnv)
+		if err != nil {
+			return nil, err
+		}
+		key, err := i.ToPropertyKey(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		if cd.computedKeys == nil {
+			cd.computedKeys = make(map[*ast.ClassMember]PropertyKey)
+		}
+		cd.computedKeys[m] = key
+	}
+
 	// Install methods, accessors, and static members.
 	for _, m := range def.Members {
+		if m.StaticBlock != nil {
+			if err := i.runStaticBlock(ctx, ctor, m, classEnv); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if m.Field {
 			if m.Static {
-				if err := i.initStaticField(ctx, ctor, m, classEnv); err != nil {
+				if err := i.initStaticField(ctx, cd, ctor, m, classEnv); err != nil {
 					return nil, err
 				}
 			}
@@ -134,7 +177,7 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 			}
 			continue
 		}
-		if err := i.installClassMethod(ctx, target, home, m, classEnv); err != nil {
+		if err := i.installClassMethod(ctx, cd, target, home, m, classEnv); err != nil {
 			return nil, err
 		}
 	}
@@ -183,6 +226,10 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		env.homeObj = proto
 		env.setThis(self)
 		env.newTgt = newTarget
+		// A class constructor (like any ordinary function) has an `arguments`
+		// object. Class code is strict, so it is unmapped; a formal named
+		// "arguments" is a SyntaxError, so there is never a shadowing conflict.
+		env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
 
 		// With a superclass, `this` field/private init and body run after super()
 		// is called; a base class initializes everything up front.
@@ -210,16 +257,24 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			if err != nil {
 				return nil, err
 			}
-			// An explicit object return from a constructor replaces `this`; a
-			// primitive (or undefined) return is ignored. In a derived class a
-			// non-object return instead reads the `this` binding, which is still
-			// uninitialized if super() was never called — a ReferenceError
-			// (ECMA-262 10.2.2 / GetThisBinding on an uninitialized environment).
+			// An explicit object return from a constructor replaces `this`. A
+			// non-object return is governed by ECMA-262 10.2.2 [[Construct]] step 13:
+			//   - In a base class a primitive/undefined return is ignored (this).
+			//   - In a derived class a non-undefined non-object return is a TypeError;
+			//     an undefined return yields the `this` binding, which is a
+			//     ReferenceError if super() was never called (GetThisBinding on an
+			//     uninitialized environment).
 			if obj, ok := ret.(*Object); ok {
 				result = obj
-			} else if cd.superCtor != nil && (env.superInit == nil || !env.superInit.called) {
-				return nil, i.throwError(ctx, "ReferenceError",
-					"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
+			} else if cd.superCtor != nil {
+				if !IsUndefined(ret) {
+					return nil, i.throwError(ctx, "TypeError",
+						"Derived constructors may only return an object or undefined")
+				}
+				if env.superInit == nil || !env.superInit.called {
+					return nil, i.throwError(ctx, "ReferenceError",
+						"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
+				}
 			}
 		} else if cd.superCtor != nil {
 			// Default derived constructor behaves as `constructor(...args) {
@@ -273,7 +328,7 @@ func (i *Interpreter) fieldInitThunk(cd *classData, self *Object) *Object {
 // initInstanceFields evaluates and assigns instance field initializers.
 func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *classData, env *Environment) error {
 	for _, m := range cd.fieldInits {
-		key, err := i.classMemberKey(ctx, m, env)
+		key, err := i.classMemberKey(ctx, cd, m, env)
 		if err != nil {
 			return err
 		}
@@ -317,8 +372,8 @@ func (i *Interpreter) defineFieldOrThrow(ctx context.Context, obj *Object, key P
 }
 
 // initStaticField evaluates a static field initializer on the constructor.
-func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.ClassMember, classEnv *Environment) error {
-	key, err := i.classMemberKey(ctx, m, classEnv)
+func (i *Interpreter) initStaticField(ctx context.Context, cd *classData, ctor *Object, m *ast.ClassMember, classEnv *Environment) error {
+	key, err := i.classMemberKey(ctx, cd, m, classEnv)
 	if err != nil {
 		return err
 	}
@@ -346,6 +401,23 @@ func (i *Interpreter) initStaticField(ctx context.Context, ctor *Object, m *ast.
 	return i.defineFieldOrThrow(ctx, ctor, key, v)
 }
 
+// runStaticBlock evaluates a `static { ... }` initialization block at class
+// definition time. Its `this` is the constructor, new.target is undefined, and
+// the class name is in scope (via classEnv). It has its own function-like var
+// scope (ECMA-262 EvaluateStaticBlock).
+func (i *Interpreter) runStaticBlock(ctx context.Context, ctor *Object, m *ast.ClassMember, classEnv *Environment) error {
+	if err := i.enterCall(); err != nil {
+		return err
+	}
+	defer i.leaveCall()
+	env := NewEnvironment(classEnv, true)
+	env.setThis(ctor)
+	env.homeObj = ctor
+	env.newTgt = Undef
+	_, err := i.runFunctionBody(ctx, "static block", m.StaticBlock, env)
+	return err
+}
+
 // forbidStaticPrototypeKey returns a TypeError when a static class element's
 // name evaluates to "prototype", which no static element may use (ECMA-262
 // ClassDefinitionEvaluation). Non-computed forms are rejected by the parser, so
@@ -359,8 +431,8 @@ func (i *Interpreter) forbidStaticPrototypeKey(ctx context.Context, m *ast.Class
 
 // installClassMethod installs a method or accessor on target with home as its
 // [[HomeObject]] (for super).
-func (i *Interpreter) installClassMethod(ctx context.Context, target, home *Object, m *ast.ClassMember, classEnv *Environment) error {
-	key, err := i.classMemberKey(ctx, m, classEnv)
+func (i *Interpreter) installClassMethod(ctx context.Context, cd *classData, target, home *Object, m *ast.ClassMember, classEnv *Environment) error {
+	key, err := i.classMemberKey(ctx, cd, m, classEnv)
 	if err != nil {
 		return err
 	}
@@ -416,11 +488,52 @@ func (i *Interpreter) installPrivateMember(ctx context.Context, target, home *Ob
 }
 
 // installInstancePrivateMethods installs the class's per-instance private
-// methods and accessors onto self's private storage.
+// methods and accessors onto self's private storage. It first enforces the
+// brand check that a private element may not be added to an object twice
+// (ECMA-262 PrivateMethodOrAccessorAdd / PrivateFieldAdd): this happens when a
+// constructor return-overrides to an object that a prior construction of the
+// same class already initialized.
 func (i *Interpreter) installInstancePrivateMethods(ctx context.Context, self *Object, cd *classData) error {
+	if err := i.checkNoDuplicateBrand(ctx, self, cd); err != nil {
+		return err
+	}
 	for _, m := range cd.privateMethods {
 		if err := i.installPrivateMember(ctx, self, cd.proto, m, cd.env); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// checkNoDuplicateBrand throws a TypeError when self already carries any of the
+// private elements (methods, accessors, or fields) that this class installs on
+// each instance — i.e. this object was already initialized by this class.
+func (i *Interpreter) checkNoDuplicateBrand(ctx context.Context, self *Object, cd *classData) error {
+	seen := map[*PrivateName]bool{}
+	check := func(name string) error {
+		pn := cd.env.resolvePrivate(name)
+		if pn == nil || seen[pn] {
+			return nil
+		}
+		seen[pn] = true
+		if self.hasPrivate(pn) {
+			return i.throwError(ctx, "TypeError",
+				"Cannot initialize private element "+name+" twice on the same object")
+		}
+		return nil
+	}
+	for _, m := range cd.privateMethods {
+		if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+			if err := check(priv.Name); err != nil {
+				return err
+			}
+		}
+	}
+	for _, m := range cd.fieldInits {
+		if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+			if err := check(priv.Name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -442,9 +555,16 @@ func (i *Interpreter) mergeAccessor(target *Object, key PropertyKey, get, set *O
 	}
 }
 
-// classMemberKey computes a class member's property key.
-func (i *Interpreter) classMemberKey(ctx context.Context, m *ast.ClassMember, env *Environment) (PropertyKey, error) {
+// classMemberKey computes a class member's property key. For a computed name it
+// returns the value evaluated once at class-definition time (cached in cd);
+// falling back to evaluating in env only when no cache is available.
+func (i *Interpreter) classMemberKey(ctx context.Context, cd *classData, m *ast.ClassMember, env *Environment) (PropertyKey, error) {
 	if m.Computed {
+		if cd != nil {
+			if k, ok := cd.computedKeys[m]; ok {
+				return k, nil
+			}
+		}
 		v, err := i.evalExpr(ctx, m.Key, env)
 		if err != nil {
 			return PropertyKey{}, err

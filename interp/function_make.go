@@ -113,16 +113,17 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 				env.vars[name] = &binding{value: fnObj, mutable: false, initialized: true}
 			}
 		}
+		// The arguments object is created before the parameters are bound so it is
+		// visible to default-value initializers (ECMA-262 FunctionDeclaration-
+		// Instantiation creates it before IteratorBindingInitialization). gojs
+		// uses an unmapped snapshot, so there is no aliasing to defer. A formal
+		// parameter (or lexical binding) literally named "arguments" shadows it,
+		// so bindParams below overwrites the binding when such a name exists.
+		if kind == kindNormal {
+			env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+		}
 		if err := i.bindParams(ctx, def.Params, args, env); err != nil {
 			return nil, err
-		}
-		// The arguments object is created after the parameters are bound so a
-		// mapped arguments object can alias their bindings. A formal parameter
-		// (or lexical binding) literally named "arguments" shadows it.
-		if kind == kindNormal {
-			if _, exists := env.vars["arguments"]; !exists {
-				env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
-			}
 		}
 		return i.runFunctionBody(ctx, funcFrameName(fnObj, name), def.Body, env)
 	}

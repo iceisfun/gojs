@@ -432,7 +432,9 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	// reservation determined by whether it is a generator or async.
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
 	prevSuper, prevNT := p.superCallOK, p.newTargetOK
+	prevStatic := p.inStaticBlock
 	p.inFieldInit = false
+	p.inStaticBlock = false // a nested function has its own arguments scope
 	p.inGenerator, p.inAsync = def.Generator, async
 	p.superCallOK = false // a nested regular function never permits super()
 	p.newTargetOK = true  // but new.target is valid in any function
@@ -444,6 +446,7 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
 	p.superCallOK, p.newTargetOK = prevSuper, prevNT
+	p.inStaticBlock = prevStatic
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
 	return def
@@ -596,7 +599,9 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	// reservation (see parseFuncDef).
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
 	prevSuper, prevProp, prevNT := p.superCallOK, p.superPropOK, p.newTargetOK
+	prevStatic := p.inStaticBlock
 	p.inFieldInit = false
+	p.inStaticBlock = false // a method has its own arguments scope
 	p.inGenerator, p.inAsync = generator, async
 	// A SuperCall is permitted only in the derived constructor; parseClassMember
 	// signals that via pendingSuperCall for exactly that one method body. Super
@@ -612,6 +617,7 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
 	p.superCallOK, p.superPropOK, p.newTargetOK = prevSuper, prevProp, prevNT
+	p.inStaticBlock = prevStatic
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
@@ -747,7 +753,14 @@ func (p *parser) checkClassMembers(def *ast.ClassDef) {
 	// (bit 1 = get, bit 2 = set) or a sentinel for a field/method.
 	const kindOther = 4
 	privateKinds := map[string]int{}
+	// privateStatic records, per private name, whether the first-seen half was
+	// static; a complementary get/set half must agree (a private accessor pair
+	// may not mix static and non-static).
+	privateStatic := map[string]bool{}
 	for _, m := range def.Members {
+		// A getter takes no parameters; a setter takes exactly one (and it may
+		// not be a rest parameter). This is an early (parse-phase) error.
+		p.checkAccessorArity(m)
 		if priv, ok := m.Key.(*ast.PrivateIdent); ok && priv.Name == "#constructor" {
 			p.errorAt(m.KeyPos, "Classes may not declare a private element named '#constructor'")
 		}
@@ -788,8 +801,42 @@ func (p *parser) checkClassMembers(def *ast.ClassDef) {
 		// A duplicate is an error unless it is the complementary accessor half.
 		if prev != 0 && !(bit != kindOther && prev != kindOther && prev&bit == 0) {
 			p.errorAt(priv.Pos(), "Duplicate private name %s", name)
+		} else if prev != 0 && privateStatic[name] != m.Static {
+			// A private get/set accessor pair may not mix static and non-static.
+			p.errorAt(priv.Pos(), "Private accessor %s must be all static or all non-static", name)
+		}
+		if prev == 0 {
+			privateStatic[name] = m.Static
 		}
 		privateKinds[name] = prev | bit
+	}
+}
+
+// checkAccessorArity enforces the early error that a getter declares no
+// parameters and a setter declares exactly one non-rest parameter (ECMA-262
+// class MethodDefinition static semantics).
+func (p *parser) checkAccessorArity(m *ast.ClassMember) {
+	if m.Field || (m.Kind != ast.PropGet && m.Kind != ast.PropSet) {
+		return
+	}
+	fe, ok := m.Value.(*ast.FuncExpr)
+	if !ok {
+		return
+	}
+	params := fe.Def.Params
+	if m.Kind == ast.PropGet {
+		if len(params) != 0 {
+			p.errorAt(m.KeyPos, "getter functions must have no arguments")
+		}
+		return
+	}
+	// setter
+	if len(params) != 1 {
+		p.errorAt(m.KeyPos, "setter functions must have exactly one argument")
+		return
+	}
+	if _, isRest := params[0].(*ast.RestElement); isRest {
+		p.errorAt(m.KeyPos, "setter function argument must not be a rest parameter")
 	}
 }
 
@@ -836,6 +883,12 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 		p.peek(1).Type != token.ASSIGN && p.peek(1).Type != token.SEMICOLON {
 		p.next()
 		m.Static = true
+
+		// A `static { ... }` initialization block. Its body is a statement list
+		// evaluated at class-definition time with `this` bound to the constructor.
+		if p.at(token.LBRACE) {
+			return p.parseStaticBlock(m)
+		}
 	}
 
 	async := false
@@ -889,6 +942,32 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 		p.inFieldInit, p.superPropOK = prev, prevProp
 	}
 	p.expectSemicolon()
+	return m
+}
+
+// parseStaticBlock parses a `static { ... }` class initialization block. Its
+// body is a statement list evaluated at class-definition time. Like a field
+// initializer it may not reference `arguments` or contain a SuperCall, but it
+// may use super.property; it establishes its own function-like scope so nested
+// functions inside it are unrestricted.
+func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
+	m.Field = false
+	m.Key = nil
+	// Save and set the boundary flags: this block is its own arguments/super
+	// scope (super() forbidden, super.property allowed, new.target allowed) and
+	// its own generator/async context.
+	prevField, prevStatic := p.inFieldInit, p.inStaticBlock
+	prevGen, prevAsync, prevParams := p.inGenerator, p.inAsync, p.inParams
+	prevSuperCall, prevSuperProp := p.superCallOK, p.superPropOK
+	p.inFieldInit = false
+	p.inStaticBlock = true
+	p.inGenerator, p.inAsync, p.inParams = false, false, false
+	p.superCallOK = false
+	p.superPropOK = true
+	m.StaticBlock = p.parseBlock()
+	p.inFieldInit, p.inStaticBlock = prevField, prevStatic
+	p.inGenerator, p.inAsync, p.inParams = prevGen, prevAsync, prevParams
+	p.superCallOK, p.superPropOK = prevSuperCall, prevSuperProp
 	return m
 }
 

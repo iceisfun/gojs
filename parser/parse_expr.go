@@ -117,6 +117,12 @@ func (p *parser) parseYield() ast.Expr {
 	if p.inParams && p.inGenerator {
 		p.errorAt(kw.Pos, "yield expression is not allowed in formal parameters")
 	}
+	// In strict-mode code outside a generator, `yield` is a reserved word and may
+	// not begin a YieldExpression or be used as an identifier (e.g. in the formal
+	// parameters or body of a non-generator class method, which is always strict).
+	if p.strict && !p.inGenerator {
+		p.errorAt(kw.Pos, "yield is only valid inside a generator")
+	}
 	y := &ast.YieldExpr{Keyword: kw.Pos}
 	if p.accept(token.STAR) {
 		y.Delegate = true
@@ -443,6 +449,9 @@ func (p *parser) parsePrimary() ast.Expr {
 		p.checkEscapedReserved(tk)
 		if p.inFieldInit && tk.Literal == "arguments" {
 			p.errorAt(tk.Pos, "'arguments' is not allowed in a class field initializer")
+		}
+		if p.inStaticBlock && tk.Literal == "arguments" {
+			p.errorAt(tk.Pos, "'arguments' is not allowed in a class static initialization block")
 		}
 		return &ast.Ident{NamePos: tk.Pos, Name: tk.Literal}
 	case token.REGEX:

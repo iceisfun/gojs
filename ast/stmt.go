@@ -46,10 +46,17 @@ type ClassMember struct {
 	// Field reports whether this member is a class field (as opposed to a
 	// method or accessor).
 	Field bool
+	// StaticBlock holds the body of a `static { ... }` initialization block.
+	// When non-nil the member is a static block (Static is true and Key is nil);
+	// it is neither a field nor a method.
+	StaticBlock *BlockStmt
 }
 
 func (m *ClassMember) Pos() token.Pos { return m.KeyPos }
 func (m *ClassMember) End() token.Pos {
+	if m.StaticBlock != nil {
+		return m.StaticBlock.End()
+	}
 	if m.Value != nil {
 		return m.Value.End()
 	}

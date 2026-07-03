@@ -69,6 +69,11 @@ type parser struct {
 	// transparent through arrow functions but reset at a regular function or a
 	// method boundary, which introduce their own arguments/super scope.
 	inFieldInit bool
+	// inStaticBlock is true while parsing a `static { ... }` class initialization
+	// block. Like a field initializer it may not contain `arguments` or a
+	// SuperCall, and additionally `await` is treated as a reserved word. It is
+	// reset at every regular function/method boundary.
+	inStaticBlock bool
 	// inGenerator/inAsync track whether the function whose parameters or body is
 	// currently being parsed is a generator or async. They gate the reserved-word
 	// treatment of `yield` (in a generator) and `await` (in an async function),
