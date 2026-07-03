@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/iceisfun/gojs/ast"
+	"github.com/iceisfun/gojs/token"
 )
 
 // This file builds callable objects from AST function definitions, wiring the
@@ -265,6 +266,17 @@ func (i *Interpreter) makeConstruct(fnObj *Object, call CallFn) CallFn {
 // bindParams binds actual arguments to a function's formal parameters,
 // destructuring patterns and gathering rest parameters.
 func (i *Interpreter) bindParams(ctx context.Context, params []ast.Expr, args []Value, env *Environment) error {
+	// Pre-declare every parameter name as an uninitialized binding, so a default
+	// value that references a parameter which is not yet bound (e.g. `(x = x)` or
+	// `(a = b, b)`) reads it in its Temporal Dead Zone and throws a ReferenceError
+	// (ECMA-262 FunctionDeclarationInstantiation instantiates the formals before
+	// IteratorBindingInitialization). Names already present (arguments, or the
+	// function's own name) are left untouched.
+	for _, name := range collectParamNames(params) {
+		if _, exists := env.vars[name]; !exists {
+			env.vars[name] = &binding{mutable: true, initialized: false}
+		}
+	}
 	declare := func(name string, v Value) {
 		env.vars[name] = &binding{value: v, mutable: true, initialized: true}
 	}
@@ -290,6 +302,47 @@ func (i *Interpreter) bindParams(ctx context.Context, params []ast.Expr, args []
 		idx++
 	}
 	return nil
+}
+
+// collectParamNames returns the bound identifier names of a formal parameter
+// list, recursing through defaults, rest elements, and array/object patterns.
+func collectParamNames(params []ast.Expr) []string {
+	var names []string
+	var walk func(ast.Expr)
+	walk = func(e ast.Expr) {
+		switch t := e.(type) {
+		case *ast.Ident:
+			names = append(names, t.Name)
+		case *ast.AssignPattern:
+			walk(t.Target)
+		case *ast.AssignExpr:
+			if t.Op == token.ASSIGN {
+				walk(t.Target)
+			}
+		case *ast.RestElement:
+			walk(t.Target)
+		case *ast.ArrayLit:
+			for _, el := range t.Elements {
+				if el != nil {
+					walk(el)
+				}
+			}
+		case *ast.ObjectLit:
+			for _, pr := range t.Properties {
+				if pr.Value != nil {
+					walk(pr.Value)
+				} else if pr.Key != nil {
+					walk(pr.Key)
+				}
+			}
+		case *ast.SpreadElement:
+			walk(t.Argument)
+		}
+	}
+	for _, p := range params {
+		walk(p)
+	}
+	return names
 }
 
 // makeArguments builds the arguments object for a function invocation: an
