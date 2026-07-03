@@ -79,6 +79,26 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
 	}
 
+	// EvalDeclarationInstantiation early error: when this direct eval runs while a
+	// function's parameter default is being evaluated, its VariableEnvironment is
+	// the enclosing scope, not the parameter environment. A var/function
+	// declaration in the eval whose name is already bound in that parameter
+	// environment (e.g. `eval("var arguments")` inside `f(p = eval(...))`, where
+	// the parameter environment holds the arguments object or a parameter named
+	// "arguments") may not hoist over it — a SyntaxError (§19.2.1.3). Strict eval
+	// declares in its own scope, so the rule does not apply.
+	if !(env.isStrict() || prog.Strict) && i.paramDefaultEnv != nil {
+		names := map[string]bool{}
+		collectVarNames(prog.Body, names)
+		collectTopLevelFuncNames(prog.Body, names)
+		for name := range names {
+			if _, bound := i.paramDefaultEnv.vars[name]; bound {
+				return nil, i.throwError(ctx, "SyntaxError",
+					"Identifier '"+name+"' has already been declared in the parameter scope")
+			}
+		}
+	}
+
 	// A fresh declarative scope holds the eval's own lexical (let/const)
 	// bindings; var/function declarations hoist to the caller's variable scope,
 	// and this/super/#private resolve up the parent chain. Direct-eval code is

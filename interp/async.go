@@ -25,6 +25,17 @@ import (
 func (i *Interpreter) asyncRun(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (Value, error) {
 	_, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, arrow)
 	if err != nil {
+		// An error raised while instantiating the async function (e.g. a
+		// parameter-default expression that throws, or a direct-eval early error
+		// in a default) rejects the returned promise rather than throwing to the
+		// caller (ECMA-262 AsyncFunctionStart / OrdinaryCallEvaluateBody: the
+		// abrupt completion is delivered through the promise capability). A
+		// non-JS error (e.g. cancellation) still propagates.
+		if tv, ok := ThrownValue(err); ok {
+			promise, _, reject := i.newPromise()
+			reject(tv)
+			return promise, nil
+		}
 		return nil, err
 	}
 

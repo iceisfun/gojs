@@ -646,6 +646,10 @@ func (i *Interpreter) classMemberKey(ctx context.Context, cd *classData, m *ast.
 // runConstructorBody runs a class constructor body, translating a return signal.
 func (i *Interpreter) runConstructorBody(ctx context.Context, name string, body *ast.BlockStmt, env *Environment) (Value, error) {
 	defer i.enterFrame(name)()
+	// Clear any enclosing parameter-default context (see runFunctionBody).
+	savedParamEnv := i.paramDefaultEnv
+	i.paramDefaultEnv = nil
+	defer func() { i.paramDefaultEnv = savedParamEnv }()
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return nil, err
 	}

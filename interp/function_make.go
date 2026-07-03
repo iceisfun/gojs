@@ -283,6 +283,15 @@ func (i *Interpreter) bindParams(ctx context.Context, params []ast.Expr, args []
 	declare := func(name string, v Value) {
 		env.vars[name] = &binding{value: v, mutable: true, initialized: true}
 	}
+	// While binding parameters, a direct eval in a default value runs with this
+	// parameter environment as its lexical scope but the enclosing scope as its
+	// variable environment, which governs the EvalDeclarationInstantiation
+	// var-hoisting early error (see Interpreter.paramDefaultEnv). Restore the
+	// previous value afterward so a nested function's own parameter binding, or
+	// the body that follows, is unaffected.
+	savedParamEnv := i.paramDefaultEnv
+	i.paramDefaultEnv = env
+	defer func() { i.paramDefaultEnv = savedParamEnv }()
 	idx := 0
 	for _, param := range params {
 		if rest, ok := param.(*ast.RestElement); ok {
@@ -411,6 +420,13 @@ func simpleParameterList(params []ast.Expr) bool {
 // return signal into the function's return value.
 func (i *Interpreter) runFunctionBody(ctx context.Context, name string, body *ast.BlockStmt, env *Environment) (Value, error) {
 	defer i.enterFrame(name)()
+	// A direct eval in this body must not observe an enclosing function's
+	// parameter-default context (which governs a var-hoisting early error), so
+	// clear it while the body runs. This matters when the body executes during an
+	// outer parameter default (e.g. `f(p = (function(){ eval(...) })())`).
+	savedParamEnv := i.paramDefaultEnv
+	i.paramDefaultEnv = nil
+	defer func() { i.paramDefaultEnv = savedParamEnv }()
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return nil, err
 	}

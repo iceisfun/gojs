@@ -439,6 +439,18 @@ func collectVarNames(stmts []ast.Stmt, into map[string]bool) {
 	}
 }
 
+// collectTopLevelFuncNames records the names of function declarations that
+// appear directly in a statement list (eval/script top level). These are
+// var-scoped (hoisted like `var`), so they participate in the
+// EvalDeclarationInstantiation var-hoisting early error alongside var names.
+func collectTopLevelFuncNames(stmts []ast.Stmt, into map[string]bool) {
+	for _, s := range stmts {
+		if fd, ok := s.(*ast.FuncDecl); ok && fd.Def.Name != nil {
+			into[fd.Def.Name.Name] = true
+		}
+	}
+}
+
 func collectVarNamesStmt(s ast.Stmt, into map[string]bool) {
 	switch st := s.(type) {
 	case *ast.VarDecl:

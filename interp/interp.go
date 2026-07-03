@@ -91,6 +91,18 @@ type Interpreter struct {
 	// the caller's lexical context rather than the global scope.
 	evalFn *Object
 
+	// paramDefaultEnv is non-nil only while a function's formal-parameter default
+	// value is being evaluated; it points at that function's parameter
+	// environment (holding the parameters and, when present, the arguments
+	// object). A direct eval running here has its VariableEnvironment set to the
+	// enclosing (outer) scope rather than the parameter environment, so a var/
+	// function declaration in the eval whose name is already bound in the
+	// parameter environment is a SyntaxError (ECMA-262 EvalDeclarationInstantiation
+	// — a var may not hoist over a like-named binding in an intervening
+	// declarative environment). Cleared when a function body begins executing so a
+	// nested function body's eval is unaffected.
+	paramDefaultEnv *Environment
+
 	// pendingNewTarget carries the [[NewTarget]] value from an ordinary
 	// function's [[Construct]] to the [[Call]] that runs its body. It is set
 	// immediately before the call and consumed at the top of the call, so no

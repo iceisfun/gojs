@@ -304,6 +304,10 @@ func (i *Interpreter) initGenerator() {
 // home.
 func (i *Interpreter) runGeneratorBody(ctx context.Context, name string, body *ast.BlockStmt, env *Environment) (Value, error) {
 	defer i.enterFrame(name)()
+	// Clear any enclosing parameter-default context (see runFunctionBody).
+	savedParamEnv := i.paramDefaultEnv
+	i.paramDefaultEnv = nil
+	defer func() { i.paramDefaultEnv = savedParamEnv }()
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return Undef, err
 	}
