@@ -92,15 +92,15 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 		}
 	}
 	env.gen = gs
+	// Establish the arguments object before binding parameters so it is visible
+	// to default-value initializers (gojs uses an unmapped snapshot, so there is
+	// no aliasing to defer); a parameter named "arguments" shadows it, which
+	// bindParams applies by overwriting the binding below.
+	if !arrow {
+		env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+	}
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
 		return nil, nil, err
-	}
-	// Establish the arguments object after binding parameters (so a mapped
-	// arguments object can alias them); a parameter named "arguments" shadows it.
-	if !arrow {
-		if _, exists := env.vars["arguments"]; !exists {
-			env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
-		}
 	}
 
 	started := false

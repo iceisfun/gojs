@@ -23,6 +23,11 @@ type classData struct {
 	// class-definition time (ECMA-262 evaluates ClassElementName when the class is
 	// defined, not per instance), so instance-field keys are not re-evaluated.
 	computedKeys map[*ast.ClassMember]PropertyKey
+	// sharedPrivate holds this class's instance private methods and accessors,
+	// created once at class-definition time and installed by reference on every
+	// instance (ECMA-262: private methods/accessors are defined once and shared,
+	// so the same function object is observed across all instances).
+	sharedPrivate map[*PrivateName]*Property
 }
 
 // evalClass evaluates a class definition to its constructor object.
@@ -137,6 +142,11 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 			cd.computedKeys = make(map[*ast.ClassMember]PropertyKey)
 		}
 		cd.computedKeys[m] = key
+	}
+
+	// Build the shared instance private methods/accessors once (see sharedPrivate).
+	if err := i.buildSharedPrivate(ctx, cd, classEnv, proto); err != nil {
+		return nil, err
 	}
 
 	// Install methods, accessors, and static members.
@@ -497,9 +507,48 @@ func (i *Interpreter) installInstancePrivateMethods(ctx context.Context, self *O
 	if err := i.checkNoDuplicateBrand(ctx, self, cd); err != nil {
 		return err
 	}
+	// Install the shared private elements by reference, so every instance observes
+	// the same private method/accessor function objects.
+	for pn, p := range cd.sharedPrivate {
+		self.definePrivate(pn, p)
+	}
+	return nil
+}
+
+// buildSharedPrivate creates this class's instance private methods and accessors
+// once (with home as their [[HomeObject]]), merging a get/set pair for the same
+// private name into a single accessor element.
+func (i *Interpreter) buildSharedPrivate(ctx context.Context, cd *classData, classEnv *Environment, home *Object) error {
 	for _, m := range cd.privateMethods {
-		if err := i.installPrivateMember(ctx, self, cd.proto, m, cd.env); err != nil {
-			return err
+		priv, ok := m.Key.(*ast.PrivateIdent)
+		if !ok {
+			continue
+		}
+		pn := classEnv.resolvePrivate(priv.Name)
+		fnExpr := m.Value.(*ast.FuncExpr)
+		fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
+		setFuncNameProp(fn, priv.Name)
+		if cd.sharedPrivate == nil {
+			cd.sharedPrivate = make(map[*PrivateName]*Property)
+		}
+		switch m.Kind {
+		case ast.PropGet:
+			p := cd.sharedPrivate[pn]
+			if p == nil || !p.Accessor {
+				p = &Property{Accessor: true}
+				cd.sharedPrivate[pn] = p
+			}
+			p.Get = fn
+		case ast.PropSet:
+			p := cd.sharedPrivate[pn]
+			if p == nil || !p.Accessor {
+				p = &Property{Accessor: true}
+				cd.sharedPrivate[pn] = p
+			}
+			p.Set = fn
+		default:
+			// A private method is non-writable, so assigning to it throws.
+			cd.sharedPrivate[pn] = &Property{Value: fn, Writable: false}
 		}
 	}
 	return nil
