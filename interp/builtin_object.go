@@ -1069,9 +1069,48 @@ func (i *Interpreter) ordinaryDefineOwn(ctx context.Context, o *Object, key Prop
 // via lengthNonWritable. Truncating length deletes elements from the highest
 // index down and is blocked by any non-configurable (de-optimized) element.
 func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Object) (bool, error) {
-	// Length can never become an accessor, configurable, or enumerable.
+	// A descriptor with no [[Value]] cannot change length's value: it is an
+	// attribute-only change. (An accessor descriptor has no value either and,
+	// against the data "length" property, is rejected below.)
+	if !desc.Has(StrKey("value")) {
+		return i.arrayDefineLengthAttrs(ctx, o, desc, nil)
+	}
+
+	// Steps 3–5: coerce the requested value BEFORE validating the descriptor's
+	// attributes or the current length's writability. ToUint32 performs one
+	// ToNumber and step 4's ToNumber performs a second, so a value with a
+	// user-defined [Symbol.toPrimitive]/valueOf is coerced twice (both with the
+	// "number" hint), and a RangeError for a non-uint32 length is thrown ahead
+	// of any TypeError from descriptor validation.
+	v, err := desc.GetStr(ctx, "value")
+	if err != nil {
+		return false, err
+	}
+	num1, err := i.ToNumberV(ctx, v) // ToUint32's internal ToNumber (step 3)
+	if err != nil {
+		return false, err
+	}
+	newLen := ToUint32(num1)
+	num2, err := i.ToNumberV(ctx, v) // ToNumber (step 4)
+	if err != nil {
+		return false, err
+	}
+	if float64(newLen) != num2 { // SameValueZero(newLen, numberLen) is false
+		return false, i.throwError(ctx, "RangeError", "Invalid array length")
+	}
+	return i.arrayDefineLengthAttrs(ctx, o, desc, &newLen)
+}
+
+// arrayDefineLengthAttrs validates and applies the non-value part of an Array
+// "length" [[DefineOwnProperty]] (the OrdinaryDefineOwnProperty of ArraySetLength
+// steps 9/13): length is a non-configurable, non-enumerable data property, so a
+// descriptor requesting configurable/enumerable true, or making an already
+// non-writable length writable, is rejected. When newLen is non-nil it also
+// applies the length change, honoring non-configurable-element blocking. It
+// assumes any value coercion (and its RangeError) has already happened.
+func (i *Interpreter) arrayDefineLengthAttrs(ctx context.Context, o *Object, desc *Object, newLen *uint32) (bool, error) {
 	if desc.Has(StrKey("get")) || desc.Has(StrKey("set")) {
-		return false, nil
+		return false, nil // an accessor descriptor cannot redefine a data property here
 	}
 	if desc.Has(StrKey("configurable")) {
 		v, err := desc.GetStr(ctx, "configurable")
@@ -1091,9 +1130,6 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 			return false, nil
 		}
 	}
-	// Read the requested [[Writable]] attribute, if any. Once length is
-	// non-writable it can never be made writable again (unless configurable,
-	// which it never is here).
 	newWritable := true
 	hasWritable := desc.Has(StrKey("writable"))
 	if hasWritable {
@@ -1102,12 +1138,13 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 			return false, err
 		}
 		newWritable = ToBoolean(v)
+		// A non-writable length can never be made writable again (length is
+		// never configurable).
 		if o.lengthNonWritable && newWritable {
 			return false, nil
 		}
 	}
-
-	if !desc.Has(StrKey("value")) {
+	if newLen == nil {
 		// Attribute-only change: apply the writable transition (to false).
 		if hasWritable && !newWritable {
 			o.lengthNonWritable = true
@@ -1115,51 +1152,20 @@ func (i *Interpreter) arraySetLength(ctx context.Context, o *Object, desc *Objec
 		return true, nil
 	}
 
-	v, err := desc.GetStr(ctx, "value")
-	if err != nil {
-		return false, err
-	}
-	num, err := i.ToNumberV(ctx, v)
-	if err != nil {
-		return false, err
-	}
-	newLen := ToUint32(num)
-	if float64(newLen) != num {
-		return false, i.throwError(ctx, "RangeError", "Invalid array length")
-	}
-	oldLen := len(o.elems)
-	// A non-writable length rejects any change to its value.
-	if o.lengthNonWritable && int(newLen) != oldLen {
+	oldLen := o.ArrayLen()
+	// Shrinking a non-writable length is rejected (ArraySetLength step 12); a
+	// value that leaves length unchanged is a no-op regardless of writability.
+	if int(*newLen) < oldLen && o.lengthNonWritable {
 		return false, nil
 	}
-	// The array's backing store is dense, so growing to a very large length
-	// would eagerly allocate that many holes. Refuse such lengths rather than
-	// exhaust memory (a limitation shared with ordinary "length" assignment).
-	if int(newLen) > oldLen && newLen > maxDenseArrayLen {
-		return false, i.throwError(ctx, "RangeError", "Array length exceeds the supported dense-array limit")
-	}
-	if int(newLen) < oldLen {
-		// Delete elements from oldLen-1 down to newLen. A de-optimized index
-		// that is non-configurable cannot be deleted: stop there, set length to
-		// that index + 1, apply the writable transition, and report failure.
-		for idx := oldLen - 1; idx >= int(newLen); idx-- {
-			if p, ok := o.props[StrKey(intToStr(idx))]; ok && !p.Configurable {
-				o.setArrayLength(Number(float64(idx + 1)))
-				if hasWritable && !newWritable {
-					o.lengthNonWritable = true
-				}
-				return false, nil
-			}
-		}
-		for idx := oldLen - 1; idx >= int(newLen); idx-- {
-			o.removeProp(StrKey(intToStr(idx)))
-		}
-	}
-	o.setArrayLength(Number(float64(newLen)))
+	// Apply the new length. Growing past the dense limit records a sparse tail
+	// rather than eagerly allocating holes; shrinking deletes the covered
+	// elements, stopping (and reporting failure) at any non-configurable one.
+	ok := o.applyArrayLength(int(*newLen))
 	if hasWritable && !newWritable {
 		o.lengthNonWritable = true
 	}
-	return true, nil
+	return ok, nil
 }
 
 // maxDenseArrayLen bounds how far the dense element backing may be grown in a

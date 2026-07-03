@@ -22,6 +22,7 @@ func (i *Interpreter) bootstrap() {
 	// 2. Remaining intrinsic prototypes (bare; methods added by initializers).
 	i.arrayProto = NewObject(i.objectProto)
 	i.arrayProto.isArray = true
+	i.arrayProto.i = i
 	i.arrayProto.elems = []Value{}
 	i.stringProto = NewObject(i.objectProto)
 	i.numberProto = NewObject(i.objectProto)

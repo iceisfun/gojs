@@ -10,6 +10,7 @@ func (i *Interpreter) newArray(elems []Value) *Object {
 	o := NewObject(i.arrayProto)
 	o.class = "Array"
 	o.isArray = true
+	o.i = i
 	if elems == nil {
 		elems = []Value{}
 	}
@@ -100,24 +101,27 @@ func (i *Interpreter) initArray() {
 func (i *Interpreter) arrayConstruct(ctx context.Context, this Value, args []Value) (Value, error) {
 	if len(args) == 1 {
 		if n, ok := args[0].(Number); ok {
-			length := int(float64(n))
-			if float64(n) != float64(length) || length < 0 {
+			num := float64(n)
+			u := ToUint32(num)
+			if float64(u) != num {
 				return nil, i.throwError(ctx, "RangeError", "Invalid array length")
 			}
-			// gojs backs arrays densely (length == len(elems)), so a valid-but-huge
-			// length like new Array(2**32-1) would eagerly allocate billions of
-			// holes and exhaust host memory — a DoS from a one-line untrusted
-			// script. Refuse lengths past the dense backing limit rather than OOM;
-			// spec-correct sparse arrays of that size are a known unsupported case.
-			if length > maxDenseArrayLen {
-				return nil, i.throwError(ctx, "RangeError", "array length exceeds gojs dense-array limit")
+			length := int(u)
+			a := i.newArray(nil)
+			// Array(n) produces a sparse array of n holes, not n undefineds. A
+			// length past the dense limit (up to 2^32-1) is represented sparsely
+			// via arrayLen rather than eagerly allocating billions of holes and
+			// exhausting host memory — a DoS from a one-line untrusted script.
+			if length <= maxDenseArrayLen {
+				elems := make([]Value, length)
+				for j := range elems {
+					elems[j] = theHole
+				}
+				a.elems = elems
+			} else {
+				a.arrayLen = length
 			}
-			// Array(n) produces a sparse array of n holes, not n undefineds.
-			elems := make([]Value, length)
-			for j := range elems {
-				elems[j] = theHole
-			}
-			return i.newArray(elems), nil
+			return a, nil
 		}
 	}
 	cp := make([]Value, len(args))

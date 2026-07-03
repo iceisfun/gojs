@@ -729,6 +729,7 @@ func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCt
 	// must itself be array-backed so length/indexing/push work on it.
 	if parentObj.isArray {
 		self.isArray = true
+		self.i = i
 		self.elems = parentObj.elems
 		self.class = "Array"
 	}

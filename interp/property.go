@@ -98,6 +98,12 @@ func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool,
 			return o.typedArray.i.typedArraySetElement(ctx, o.typedArray, n, v)
 		}
 	}
+	// An Array's own "length" [[Set]] routes through ArraySetLength, which
+	// coerces and validates the value (throwing RangeError for a non-uint32
+	// length) rather than silently clamping. It is always an own data property.
+	if o.isArray && o.i != nil && !key.IsSymbol() && key.Str == "length" {
+		return o.setArrayLengthChecked(ctx, v)
+	}
 	// Search the prototype chain for an accessor or a non-writable data
 	// property that governs the assignment.
 	for cur := o; cur != nil; cur = cur.proto {
@@ -157,8 +163,7 @@ func (o *Object) writeData(key PropertyKey, v Value) {
 				p.Value = v
 				return
 			}
-			o.ensureLen(idx + 1)
-			o.elems[idx] = v
+			o.setArrayIndex(key, idx, v)
 			return
 		}
 	}

@@ -169,6 +169,12 @@ func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKe
 	if !ok {
 		return false, nil
 	}
+	// An Array's own "length" [[Set]] on the receiver routes through
+	// ArraySetLength (coercing/validating the value, reporting RangeError and the
+	// success flag) rather than the plain data-property write below.
+	if recv.isArray && recv.i != nil && !key.IsSymbol() && key.Str == "length" {
+		return recv.setArrayLengthChecked(ctx, v)
+	}
 	// OrdinarySetWithOwnDescriptor (§10.1.9.2): the write is applied to the
 	// receiver's own property. For a Proxy receiver the descriptor must be read
 	// through its [[GetOwnProperty]] (which runs the trap / forwards), and an

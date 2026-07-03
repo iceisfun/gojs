@@ -137,6 +137,16 @@ type Object struct {
 	fn      *functionData // non-nil for callable objects
 	elems   []Value       // dense element storage for arrays
 	isArray bool
+	// arrayLen holds an Array's logical length when it exceeds the dense element
+	// backing — i.e. when the array is sparse beyond len(elems), because a far
+	// index (>= maxDenseArrayLen) was written or "length" was set past the dense
+	// limit. It avoids eagerly allocating a dense backing of up to ~2^32 holes.
+	// The authoritative length is max(arrayLen, len(elems)); see ArrayLen. When
+	// the dense backing covers the whole array, arrayLen is 0 (unused).
+	arrayLen int
+	// i is the owning interpreter, recorded on Array exotic objects so array-only
+	// operations (the "length" [[Set]] validation) can construct a RangeError.
+	i *Interpreter
 	// immutableProto marks an immutable-prototype exotic object (§10.4.7), e.g.
 	// %Object.prototype%: [[SetPrototypeOf]] succeeds only when the new prototype
 	// equals the current one, and otherwise returns false.
@@ -313,7 +323,7 @@ func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
 	}
 	if o.isArray && !key.IsSymbol() {
 		if key.Str == "length" {
-			return &Property{Value: Number(float64(len(o.elems))), Writable: !o.lengthNonWritable}, true
+			return &Property{Value: Number(float64(o.ArrayLen())), Writable: !o.lengthNonWritable}, true
 		}
 		if idx, ok := arrayIndex(key.Str); ok {
 			// A de-optimized index (redefined with non-default attributes or as an
@@ -371,12 +381,17 @@ func (o *Object) installProperty(key PropertyKey, p *Property) {
 				o.elems[idx] = p.Value
 				return
 			}
-			// De-optimize into the props map. Extend length to cover the index
-			// (unless far-out) so defineOwn holes the now-covered dense slot.
+			// De-optimize into the props map. Extend length to cover the index:
+			// densely when within the dense limit (so defineOwn holes the
+			// now-covered dense slot), or via the sparse tail (arrayLen) for a
+			// far-out index — never eagerly allocating a huge dense backing.
 			if !far && idx >= len(o.elems) {
 				o.ensureLen(idx + 1)
 			}
 			o.defineOwn(key, p)
+			if idx+1 > o.arrayLen {
+				o.arrayLen = idx + 1
+			}
 			return
 		}
 	}
@@ -408,8 +423,7 @@ func (o *Object) SetData(name string, v Value) {
 			return
 		}
 		if idx, ok := arrayIndex(name); ok {
-			o.ensureLen(idx + 1)
-			o.elems[idx] = v
+			o.setArrayIndex(StrKey(name), idx, v)
 			return
 		}
 	}
@@ -573,30 +587,182 @@ func (o *Object) testIntegrityLevel(frozen bool) bool {
 
 // ensureLen grows the element slice to at least n, padding new slots with holes
 // (a gap created by an out-of-bounds index write or a length extension is
-// sparse, not filled with explicit undefined).
+// sparse, not filled with explicit undefined). Callers must keep n within the
+// dense limit; a far index or oversized length is represented sparsely (via
+// arrayLen and the props map) instead, so ensureLen never eagerly allocates a
+// pathologically large backing. The guard below is a defensive backstop.
 func (o *Object) ensureLen(n int) {
-	for len(o.elems) < n {
-		o.elems = append(o.elems, theHole)
+	if n > maxDenseArrayLen {
+		n = maxDenseArrayLen
+	}
+	old := len(o.elems)
+	if n <= old {
+		return
+	}
+	if n <= cap(o.elems) {
+		o.elems = o.elems[:n]
+	} else {
+		// Grow capacity geometrically so repeated one-slot extensions (a[i]=v in
+		// an ascending loop) stay amortized O(1), matching append's behavior;
+		// a single large jump still allocates once.
+		newCap := cap(o.elems) * 2
+		if newCap < n {
+			newCap = n
+		}
+		if newCap > maxDenseArrayLen {
+			newCap = maxDenseArrayLen
+		}
+		grown := make([]Value, n, newCap)
+		copy(grown, o.elems)
+		o.elems = grown
+	}
+	for j := old; j < n; j++ {
+		o.elems[j] = theHole
 	}
 }
 
-// setArrayLength adjusts an array's length, truncating or padding elements.
-func (o *Object) setArrayLength(v Value) {
-	n := int(ToInteger(ToNumber(v)))
+// setArrayLenTo is the raw length setter: it makes the array's logical length
+// exactly n, truncating the dense backing and deleting any de-optimized/sparse
+// index at or above n, and extending the dense backing (within the dense limit)
+// or recording a sparse tail in arrayLen otherwise. It performs no validation
+// and no non-configurable-element blocking (see applyArrayLength for that).
+func (o *Object) setArrayLenTo(n int) {
 	if n < 0 {
 		n = 0
 	}
-	if n < len(o.elems) {
-		o.elems = o.elems[:n]
-	} else if n <= maxDenseArrayLen {
+	if n < o.ArrayLen() {
+		if n < len(o.elems) {
+			o.elems = o.elems[:n]
+		}
+		o.deleteArrayIndicesFrom(n)
+	} else if n > len(o.elems) && n <= maxDenseArrayLen {
 		o.ensureLen(n)
 	}
-	// Growing beyond the dense limit is refused rather than eagerly allocating
-	// billions of holes; such lengths are unsupported by the dense backing.
+	if n > len(o.elems) {
+		o.arrayLen = n // sparse tail beyond the dense backing
+	} else {
+		o.arrayLen = 0 // dense backing covers the whole array
+	}
 }
 
-// ArrayLen returns the length of an array object.
-func (o *Object) ArrayLen() int { return len(o.elems) }
+// deleteArrayIndicesFrom removes every de-optimized/sparse array index property
+// whose index is >= n from the ordinary props map. It scans the property set
+// (bounded by the number of stored properties), never the index range, so it is
+// safe for a near-2^32 length.
+func (o *Object) deleteArrayIndicesFrom(n int) {
+	var rm []PropertyKey
+	for k := range o.props {
+		if k.IsSymbol() {
+			continue
+		}
+		if idx, ok := arrayIndex(k.Str); ok && idx >= n {
+			rm = append(rm, k)
+		}
+	}
+	for _, k := range rm {
+		o.removeProp(k)
+	}
+}
+
+// applyArrayLength sets the array length to newLen with the spec's
+// non-configurable-element blocking (ArraySetLength §10.4.2.4 steps 15–17): when
+// truncating, a non-configurable element at or above newLen stops the deletion,
+// so the length settles at that index+1 and the operation reports failure.
+func (o *Object) applyArrayLength(newLen int) bool {
+	if newLen < 0 {
+		newLen = 0
+	}
+	if newLen >= o.ArrayLen() {
+		o.setArrayLenTo(newLen)
+		return true
+	}
+	target := newLen
+	blocked := false
+	for k := range o.props {
+		if k.IsSymbol() {
+			continue
+		}
+		if idx, ok := arrayIndex(k.Str); ok && idx >= newLen && !o.props[k].Configurable {
+			blocked = true
+			if idx+1 > target {
+				target = idx + 1
+			}
+		}
+	}
+	if o.elemsNonConfigurable && newLen < len(o.elems) {
+		for idx := len(o.elems) - 1; idx >= newLen; idx-- {
+			if !isHole(o.elems[idx]) {
+				blocked = true
+				if idx+1 > target {
+					target = idx + 1
+				}
+				break
+			}
+		}
+	}
+	o.setArrayLenTo(target)
+	return !blocked
+}
+
+// setArrayLength adjusts an array's length from a coerced value, without
+// throwing. It is the internal (non-Set) path; the JS-visible "length" [[Set]]
+// validates the value and reports RangeError via setArrayLengthChecked.
+func (o *Object) setArrayLength(v Value) {
+	n := int(ToInteger(ToNumber(v)))
+	o.applyArrayLength(n)
+}
+
+// setArrayLengthChecked implements the "length" [[Set]] (ArraySetLength): it
+// coerces v to a uint32, throwing RangeError when the numeric value is not a
+// valid array length, honors a non-writable length, and otherwise applies the
+// new length (which may be a sparse tail for large values, never an eager
+// allocation). It reports whether the write took effect.
+func (o *Object) setArrayLengthChecked(ctx context.Context, v Value) (bool, error) {
+	// Coerce the value twice (ToUint32's ToNumber, then ToNumber), matching
+	// ArraySetLength steps 3–4, so a user-defined [Symbol.toPrimitive]/valueOf
+	// observes both invocations.
+	num1, err := o.i.ToNumberV(ctx, v)
+	if err != nil {
+		return false, err
+	}
+	newLen := ToUint32(num1)
+	num2, err := o.i.ToNumberV(ctx, v)
+	if err != nil {
+		return false, err
+	}
+	if float64(newLen) != num2 {
+		return false, NewThrow(o.i.newError("RangeError", "Invalid array length"))
+	}
+	if o.lengthNonWritable {
+		return int(newLen) == o.ArrayLen(), nil
+	}
+	return o.applyArrayLength(int(newLen)), nil
+}
+
+// setArrayIndex stores v at array index idx, choosing dense element storage
+// within the dense limit and a sparse props-map entry (extending the logical
+// length via arrayLen) for a far index, so a near-2^32 index never allocates a
+// dense backing.
+func (o *Object) setArrayIndex(key PropertyKey, idx int, v Value) {
+	if idx < maxDenseArrayLen {
+		o.ensureLen(idx + 1)
+		o.elems[idx] = v
+		return
+	}
+	o.defineOwn(key, &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
+	if idx+1 > o.arrayLen {
+		o.arrayLen = idx + 1
+	}
+}
+
+// ArrayLen returns the logical length of an array object: the dense backing
+// length, extended by any sparse tail recorded in arrayLen.
+func (o *Object) ArrayLen() int {
+	if o.arrayLen > len(o.elems) {
+		return o.arrayLen
+	}
+	return len(o.elems)
+}
 
 // arrayIndex parses s as a canonical array index (a non-negative integer with
 // no leading zeros, below 2^32-1), returning the index and whether it matched.
