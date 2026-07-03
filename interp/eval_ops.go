@@ -315,22 +315,29 @@ func (i *Interpreter) evalAdd(ctx context.Context, left, right Value) (Value, er
 	return Number(ln + rn), nil
 }
 
-// evalArithmetic implements -, *, /, %, ** for numbers and BigInts.
+// evalArithmetic implements -, *, /, %, ** for numbers and BigInts, following
+// ApplyStringOrNumericBinaryOperator (§13.15.3): both operands are reduced with
+// ToNumeric first, and only then is the Number-vs-BigInt path chosen. Mixing a
+// BigInt with a non-BigInt is a TypeError.
 func (i *Interpreter) evalArithmetic(ctx context.Context, op token.Type, left, right Value) (Value, error) {
-	if lb, ok := left.(*BigInt); ok {
-		if rb, ok := right.(*BigInt); ok {
-			return i.bigArithmetic(ctx, op, lb, rb)
-		}
+	lnum, err := i.toNumeric(ctx, left)
+	if err != nil {
+		return nil, err
+	}
+	rnum, err := i.toNumeric(ctx, right)
+	if err != nil {
+		return nil, err
+	}
+	lb, lok := lnum.(*BigInt)
+	rb, rok := rnum.(*BigInt)
+	if lok != rok {
 		return nil, i.throwError(ctx, "TypeError", "Cannot mix BigInt and other types, use explicit conversions")
 	}
-	ln, err := i.ToNumberV(ctx, left)
-	if err != nil {
-		return nil, err
+	if lok {
+		return i.bigArithmetic(ctx, op, lb, rb)
 	}
-	rn, err := i.ToNumberV(ctx, right)
-	if err != nil {
-		return nil, err
-	}
+	ln := float64(lnum.(Number))
+	rn := float64(rnum.(Number))
 	switch op {
 	case token.MINUS:
 		return Number(ln - rn), nil
@@ -341,10 +348,21 @@ func (i *Interpreter) evalArithmetic(ctx context.Context, op token.Type, left, r
 	case token.PERCENT:
 		return Number(math.Mod(ln, rn)), nil
 	case token.EXP:
-		return Number(math.Pow(ln, rn)), nil
+		return Number(numberExponentiate(ln, rn)), nil
 	default:
 		return nil, i.throwError(ctx, "SyntaxError", "unsupported arithmetic operator")
 	}
+}
+
+// numberExponentiate implements Number::exponentiate (§6.1.6.1.3). It defers to
+// math.Pow, which follows C99 pow and matches the spec everywhere except one
+// case: when the exponent is ±∞ and the base has magnitude exactly 1, the spec
+// requires NaN (C99 pow returns 1).
+func numberExponentiate(base, exp float64) float64 {
+	if math.IsInf(exp, 0) && math.Abs(base) == 1 {
+		return math.NaN()
+	}
+	return math.Pow(base, exp)
 }
 
 // bigArithmetic implements BigInt arithmetic.
@@ -366,6 +384,11 @@ func (i *Interpreter) bigArithmetic(ctx context.Context, op token.Type, a, b *Bi
 		}
 		res.Rem(a.Int, b.Int)
 	case token.EXP:
+		// BigInt::exponentiate throws for a negative exponent (§6.1.6.2.3);
+		// math/big would instead treat x ** -n as 1.
+		if b.Int.Sign() < 0 {
+			return nil, i.throwError(ctx, "RangeError", "Exponent must be non-negative")
+		}
 		res.Exp(a.Int, b.Int, nil)
 	default:
 		return nil, i.throwError(ctx, "SyntaxError", "unsupported BigInt operator")
@@ -497,22 +520,29 @@ func parseStringToBigInt(s string) (*big.Int, bool) {
 	return nil, false
 }
 
-// evalBitwise implements the bitwise and shift operators over 32-bit integers.
+// evalBitwise implements the bitwise and shift operators over 32-bit integers,
+// following ApplyStringOrNumericBinaryOperator (§13.15.3): both operands are
+// reduced with ToNumeric first, then dispatched to the Number or BigInt path.
+// Mixing a BigInt with a non-BigInt is a TypeError.
 func (i *Interpreter) evalBitwise(ctx context.Context, op token.Type, left, right Value) (Value, error) {
-	// BigInt bitwise.
-	if lb, ok := left.(*BigInt); ok {
-		if rb, ok := right.(*BigInt); ok {
-			return i.bigBitwise(ctx, op, lb, rb)
-		}
-	}
-	ln, err := i.ToNumberV(ctx, left)
+	lnum, err := i.toNumeric(ctx, left)
 	if err != nil {
 		return nil, err
 	}
-	rn, err := i.ToNumberV(ctx, right)
+	rnum, err := i.toNumeric(ctx, right)
 	if err != nil {
 		return nil, err
 	}
+	lb, lok := lnum.(*BigInt)
+	rb, rok := rnum.(*BigInt)
+	if lok != rok {
+		return nil, i.throwError(ctx, "TypeError", "Cannot mix BigInt and other types, use explicit conversions")
+	}
+	if lok {
+		return i.bigBitwise(ctx, op, lb, rb)
+	}
+	ln := float64(lnum.(Number))
+	rn := float64(rnum.(Number))
 	switch op {
 	case token.BIT_AND:
 		return Number(float64(ToInt32(ln) & ToInt32(rn))), nil

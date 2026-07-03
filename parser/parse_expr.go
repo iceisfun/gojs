@@ -167,13 +167,33 @@ func (p *parser) parseConditional() ast.Expr {
 
 // parseBinary implements precedence climbing over binary and logical operators.
 func (p *parser) parseBinary(minPrec int) ast.Expr {
+	// The base of ** must be an UpdateExpression, not a UnaryExpression
+	// (ExponentiationExpression : UpdateExpression ** ExponentiationExpression).
+	// So a bare unary operator immediately before ** — e.g. -a ** b, !a ** b,
+	// typeof a ** b — is an early SyntaxError; the base must be parenthesized.
+	// A parenthesized base starts with '(' rather than the unary operator, and
+	// ++a / a++ are UpdateExpressions, so only the prefix unary/await operators
+	// qualify.
+	startTok := p.cur().Type
 	left := p.parseUnary()
+	bareUnary := false
+	switch startTok {
+	case token.NOT, token.BIT_NOT, token.PLUS, token.MINUS,
+		token.TYPEOF, token.VOID, token.DELETE:
+		bareUnary = true
+	case token.AWAIT:
+		_, bareUnary = left.(*ast.AwaitExpr)
+	}
 	for {
 		opType := p.cur().Type
 		prec := p.binaryPrec(opType)
 		if prec == 0 || prec < minPrec {
 			break
 		}
+		if opType == token.EXP && bareUnary {
+			p.errorAt(p.cur().Pos, "Unary operator used immediately before exponentiation expression; wrap the base in parentheses")
+		}
+		bareUnary = false
 		opTok := p.next()
 		// ** is right-associative; all others are left-associative.
 		nextMin := prec + 1

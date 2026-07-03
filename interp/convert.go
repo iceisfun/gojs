@@ -120,6 +120,27 @@ func (i *Interpreter) ToNumberV(ctx context.Context, v Value) (float64, error) {
 	}
 }
 
+// toNumeric implements ToNumeric (§7.1.3): it reduces v to a primitive with a
+// number hint, then yields either a *BigInt (when the primitive is a BigInt) or
+// a Number. Numeric binary operators call this on both operands before deciding
+// between Number and BigInt arithmetic, so an object whose @@toPrimitive/valueOf
+// produces a BigInt (or a boxed BigInt) is handled as a BigInt rather than
+// erroring in ToNumber.
+func (i *Interpreter) toNumeric(ctx context.Context, v Value) (Value, error) {
+	prim, err := i.ToPrimitive(ctx, v, "number")
+	if err != nil {
+		return nil, err
+	}
+	if b, ok := prim.(*BigInt); ok {
+		return b, nil
+	}
+	n, err := i.ToNumberV(ctx, prim)
+	if err != nil {
+		return nil, err
+	}
+	return Number(n), nil
+}
+
 // ToObject boxes a primitive into its wrapper object, or throws a TypeError for
 // null/undefined (§7.1.18).
 func (i *Interpreter) ToObject(ctx context.Context, v Value) (*Object, error) {
