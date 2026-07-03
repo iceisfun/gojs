@@ -331,16 +331,16 @@ func (i *Interpreter) initString() {
 		return String(string(rs[start:end])), nil
 	})
 	m("toUpperCase", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.ToUpper(s)), nil
+		return String(toUpperCaseFull(s)), nil
 	})
 	m("toLowerCase", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.ToLower(s)), nil
+		return String(toLowerCaseFull(s)), nil
 	})
 	m("toLocaleUpperCase", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.ToUpper(s)), nil
+		return String(toUpperCaseFull(s)), nil
 	})
 	m("toLocaleLowerCase", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(strings.ToLower(s)), nil
+		return String(toLowerCaseFull(s)), nil
 	})
 	m("trim", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return String(strings.TrimFunc(s, isECMAWhiteSpace)), nil
@@ -364,7 +364,11 @@ func (i *Interpreter) initString() {
 		}
 		// Minimal non-Intl implementation: lexicographic comparison over
 		// UTF-16 code units. Comparing the Go UTF-8 strings yields the same
-		// ordering for the Basic Multilingual Plane.
+		// ordering for the Basic Multilingual Plane. Per §22.1.3.10, canonically
+		// equivalent Strings must compare as identical, so normalize both sides
+		// (NFC) before comparing.
+		s = norm.NFC.String(s)
+		that = norm.NFC.String(that)
 		if s < that {
 			return Number(-1), nil
 		}
