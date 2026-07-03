@@ -625,6 +625,12 @@ func eachBoundName(target ast.Expr, fn func(string)) {
 // parseReturn parses a return statement, honoring ASI for the optional argument.
 func (p *parser) parseReturn() ast.Stmt {
 	kw := p.next()
+	// A return statement may not appear directly in a class static initialization
+	// block (it is not a function body). Nested functions inside the block reset
+	// inStaticBlock, so their returns remain legal.
+	if p.inStaticBlock {
+		p.errorAt(kw.Pos, "'return' is not allowed in a class static initialization block")
+	}
 	stmt := &ast.ReturnStmt{Keyword: kw.Pos, EndPos: kw.End}
 	if !p.at(token.SEMICOLON) && !p.at(token.RBRACE) && !p.at(token.EOF) && !p.cur().NewlineBefore {
 		stmt.Argument = p.parseExpression()

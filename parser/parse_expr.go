@@ -210,6 +210,11 @@ func (p *parser) parseUnary() ast.Expr {
 		if p.inParams && p.inAsync {
 			p.errorAt(op.Pos, "await expression is not allowed in formal parameters")
 		}
+		// `await` is a reserved word in a class static initialization block and may
+		// not appear there (ECMA-262 ClassStaticBlockBody early error).
+		if p.inStaticBlock {
+			p.errorAt(op.Pos, "await is not allowed in a class static initialization block")
+		}
 		operand := p.parseUnary()
 		return &ast.AwaitExpr{Keyword: op.Pos, Argument: operand}
 	}

@@ -648,6 +648,12 @@ func (p *parser) parseClassDecl() *ast.ClassDecl {
 // parseClassDef parses the shared body of a class (name, extends, members).
 func (p *parser) parseClassDef() *ast.ClassDef {
 	def := &ast.ClassDef{}
+	// All class code — including the name BindingIdentifier and the heritage
+	// expression — is strict-mode code, so enter strict mode before reading the
+	// name (which may then not be a strict reserved word such as an escaped
+	// `yield`/`let`/`static`).
+	prevStrict := p.strict
+	p.strict = true
 	if p.at(token.IDENT) {
 		id := p.next()
 		p.checkEscapedReserved(id)
@@ -664,8 +670,6 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 	p.classDepth++
 	env := &privateEnv{declared: map[string]bool{}}
 	p.privateEnvStack = append(p.privateEnvStack, env)
-	prevStrict := p.strict
-	p.strict = true
 	// Entering a class body: a SuperCall is permitted only in this class's own
 	// derived constructor, not in any construct inherited from an outer scope.
 	prevHeritage, prevSuper := p.classHeritage, p.superCallOK
