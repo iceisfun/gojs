@@ -587,36 +587,47 @@ func fromIndex(idx, n int) int {
 	return idx
 }
 
-// eachElem runs fn(this=thisArg, [element, index, array]) for each element.
+// eachElem is the generic iteration core shared by the callback-visiting Array
+// methods (forEach, map, filter, some, every, find, findIndex, flatMap). It is
+// spec-faithful: the receiver has already been coerced with ToObject and its
+// length read with LengthOfArrayLike, so it works over any array-like object,
+// reading elements through [[Get]] and probing holes through [[HasProperty]].
+//
+// The callback (cb) is validated as callable here — a missing or non-callable
+// callback throws a TypeError before any element is visited. length is captured
+// once by the caller (per spec), so elements the callback appends are not
+// visited and a callback that shrinks the array reads holes, not out of bounds.
+//
 // When skipHoles is true (the HasProperty-family methods: forEach, map, filter,
-// some, every, flatMap) hole indices are not visited at all; when false (the
-// Get-from-0..len methods: find, findIndex) a hole is visited with the callback
-// receiving undefined. The hole sentinel is never passed to the callback.
-func (i *Interpreter) eachElem(ctx context.Context, o *Object, cb Value, thisArg Value, skipHoles bool, fn func(idx int, res Value) (bool, error)) error {
+// some, every, flatMap) an absent index is not visited at all. When false (the
+// Get-from-0..len methods: find, findIndex) every index is read via [[Get]], so
+// a hole surfaces as undefined (or an inherited value from the prototype chain).
+// fn receives the read value v alongside the callback's result res.
+func (i *Interpreter) eachElem(ctx context.Context, o *Object, length int, cb Value, thisArg Value, skipHoles bool, fn func(idx int, v Value, res Value) (bool, error)) error {
 	callback, ok := cb.(*Object)
 	if !ok || !callback.IsCallable() {
 		return i.throwError(ctx, "TypeError", briefValue(cb)+" is not a function")
 	}
-	// The iteration length is captured once (per spec): elements the callback
-	// appends are not visited, and a callback that shrinks the array leaves the
-	// tail as holes rather than reading out of bounds.
-	n := len(o.elems)
-	for j := 0; j < n; j++ {
-		v := theHole
-		if j < len(o.elems) {
-			v = o.elems[j]
-		}
-		if isHole(v) {
-			if skipHoles {
+	for j := 0; j < length; j++ {
+		key := StrKey(strconv.Itoa(j))
+		if skipHoles {
+			present, err := i.hasV(ctx, o, key)
+			if err != nil {
+				return err
+			}
+			if !present {
 				continue
 			}
-			v = Undef
+		}
+		v, err := i.getV(ctx, o, key, o)
+		if err != nil {
+			return err
 		}
 		res, err := callback.fn.call(ctx, thisArg, []Value{v, Number(float64(j)), o})
 		if err != nil {
 			return err
 		}
-		if stop, err := fn(j, res); err != nil || stop {
+		if stop, err := fn(j, v, res); err != nil || stop {
 			return err
 		}
 	}
@@ -624,63 +635,95 @@ func (i *Interpreter) eachElem(ctx context.Context, o *Object, cb Value, thisArg
 }
 
 func (i *Interpreter) arrayForEach(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(int, Value) (bool, error) { return false, nil })
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	err = i.eachElem(ctx, o, length, arg(args, 0), arg(args, 1), true, func(int, Value, Value) (bool, error) { return false, nil })
 	return Undef, err
 }
 
 func (i *Interpreter) arrayMap(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	// map preserves hole positions: pre-fill with holes, then overwrite only the
-	// indices the callback actually visits.
-	out := make([]Value, len(o.elems))
-	for j := range out {
-		out[j] = theHole
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
 	}
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(idx int, res Value) (bool, error) {
-		out[idx] = res
-		return false, nil
+	// The callback must be callable before ArraySpeciesCreate runs (§23.1.3.19).
+	cb := arg(args, 0)
+	if callback, ok := cb.(*Object); !ok || !callback.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", briefValue(cb)+" is not a function")
+	}
+	a, err := i.arraySpeciesCreate(ctx, o, length)
+	if err != nil {
+		return nil, err
+	}
+	// map preserves hole positions: only the indices the callback actually
+	// visits get a data property, leaving the rest of the result array absent.
+	err = i.eachElem(ctx, o, length, cb, arg(args, 1), true, func(idx int, v Value, res Value) (bool, error) {
+		return false, i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(idx)), res)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return i.newArray(out), nil
+	return a, nil
 }
 
 func (i *Interpreter) arrayFilter(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	var out []Value
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(idx int, res Value) (bool, error) {
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	// The callback must be callable before ArraySpeciesCreate runs (§23.1.3.7).
+	cb := arg(args, 0)
+	if callback, ok := cb.(*Object); !ok || !callback.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", briefValue(cb)+" is not a function")
+	}
+	a, err := i.arraySpeciesCreate(ctx, o, 0)
+	if err != nil {
+		return nil, err
+	}
+	n := 0
+	err = i.eachElem(ctx, o, length, cb, arg(args, 1), true, func(idx int, v Value, res Value) (bool, error) {
 		if ToBoolean(res) {
-			out = append(out, elemAt(o, idx))
+			if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(n)), v); err != nil {
+				return false, err
+			}
+			n++
 		}
 		return false, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return i.newArray(out), nil
+	return a, nil
 }
 
 func (i *Interpreter) arrayFind(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	result := Value(Undef)
-	// find does not skip holes; a hole is visited as undefined.
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), false, func(idx int, res Value) (bool, error) {
+	// find does not skip holes; every index is read via [[Get]].
+	err = i.eachElem(ctx, o, length, arg(args, 0), arg(args, 1), false, func(idx int, v Value, res Value) (bool, error) {
 		if ToBoolean(res) {
-			result = elemAt(o, idx)
+			result = v
 			return true, nil
 		}
 		return false, nil
@@ -689,13 +732,17 @@ func (i *Interpreter) arrayFind(ctx context.Context, this Value, args []Value) (
 }
 
 func (i *Interpreter) arrayFindIndex(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	result := Number(-1)
-	// findIndex does not skip holes; a hole is visited as undefined.
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), false, func(idx int, res Value) (bool, error) {
+	// findIndex does not skip holes; every index is read via [[Get]].
+	err = i.eachElem(ctx, o, length, arg(args, 0), arg(args, 1), false, func(idx int, v Value, res Value) (bool, error) {
 		if ToBoolean(res) {
 			result = Number(float64(idx))
 			return true, nil
@@ -706,12 +753,16 @@ func (i *Interpreter) arrayFindIndex(ctx context.Context, this Value, args []Val
 }
 
 func (i *Interpreter) arraySome(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	found := false
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(_ int, res Value) (bool, error) {
+	err = i.eachElem(ctx, o, length, arg(args, 0), arg(args, 1), true, func(_ int, v Value, res Value) (bool, error) {
 		if ToBoolean(res) {
 			found = true
 			return true, nil
@@ -722,12 +773,16 @@ func (i *Interpreter) arraySome(ctx context.Context, this Value, args []Value) (
 }
 
 func (i *Interpreter) arrayEvery(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	all := true
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(_ int, res Value) (bool, error) {
+	err = i.eachElem(ctx, o, length, arg(args, 0), arg(args, 1), true, func(_ int, v Value, res Value) (bool, error) {
 		if !ToBoolean(res) {
 			all = false
 			return true, nil
@@ -738,7 +793,11 @@ func (i *Interpreter) arrayEvery(ctx context.Context, this Value, args []Value) 
 }
 
 func (i *Interpreter) arrayReduce(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
@@ -748,27 +807,50 @@ func (i *Interpreter) arrayReduce(ctx context.Context, this Value, args []Value)
 	}
 	// reduce skips holes: they seed neither the accumulator nor a callback call.
 	var acc Value
-	haveAcc := false
-	if len(args) >= 2 {
+	haveAcc := len(args) >= 2
+	if haveAcc {
 		acc = args[1]
-		haveAcc = true
 	}
-	for j := 0; j < len(o.elems); j++ {
-		if isHole(o.elems[j]) {
-			continue
+	k := 0
+	if !haveAcc {
+		// Seed the accumulator from the first present element (§23.1.3.24 step 8).
+		for ; k < length; k++ {
+			key := StrKey(strconv.Itoa(k))
+			present, err := i.hasV(ctx, o, key)
+			if err != nil {
+				return nil, err
+			}
+			if present {
+				acc, err = i.getV(ctx, o, key, o)
+				if err != nil {
+					return nil, err
+				}
+				haveAcc = true
+				k++
+				break
+			}
 		}
 		if !haveAcc {
-			acc = o.elems[j]
-			haveAcc = true
-			continue
+			return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
 		}
-		acc, err = callback.fn.call(ctx, Undef, []Value{acc, o.elems[j], Number(float64(j)), o})
+	}
+	for ; k < length; k++ {
+		key := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, o, key)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if !haveAcc {
-		return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
+		if !present {
+			continue
+		}
+		kv, err := i.getV(ctx, o, key, o)
+		if err != nil {
+			return nil, err
+		}
+		acc, err = callback.fn.call(ctx, Undef, []Value{acc, kv, Number(float64(k)), o})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return acc, nil
 }

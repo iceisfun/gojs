@@ -146,30 +146,79 @@ func (i *Interpreter) arraySort(ctx context.Context, this Value, args []Value) (
 	return o, nil
 }
 
-// arrayFlatMap maps each element then flattens the result by one level.
+// arrayFlatMap maps each element then flattens the result by one level
+// (§23.1.3.12). It is generic: the receiver is coerced with ToObject, the result
+// is allocated with ArraySpeciesCreate, and both the source and each mapped
+// sub-array are read through [[HasProperty]]/[[Get]].
 func (i *Interpreter) arrayFlatMap(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
-	var out []Value
-	err = i.eachElem(ctx, o, arg(args, 0), arg(args, 1), true, func(_ int, res Value) (bool, error) {
-		if ro, ok := res.(*Object); ok && ro.isArray {
-			// FlattenIntoArray uses HasProperty; skip holes in the mapped array.
-			for _, ev := range ro.elems {
-				if !isHole(ev) {
-					out = append(out, ev)
-				}
-			}
-		} else {
-			out = append(out, res)
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	// The mapper must be callable before ArraySpeciesCreate runs.
+	cb := arg(args, 0)
+	if callback, ok := cb.(*Object); !ok || !callback.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", briefValue(cb)+" is not a function")
+	}
+	a, err := i.arraySpeciesCreate(ctx, o, 0)
+	if err != nil {
+		return nil, err
+	}
+	const maxSafe = float64(1<<53 - 1)
+	n := 0
+	err = i.eachElem(ctx, o, length, cb, arg(args, 1), true, func(_ int, v Value, res Value) (bool, error) {
+		// FlattenIntoArray with depth 1: array results are flattened one level
+		// (their present elements copied), non-arrays are appended as-is.
+		isArr, err := i.isArrayV(ctx, res)
+		if err != nil {
+			return false, err
 		}
+		if isArr {
+			ro := res.(*Object)
+			elemLen, err := i.lengthOfArrayLike(ctx, ro)
+			if err != nil {
+				return false, err
+			}
+			for k := 0; k < elemLen; k++ {
+				key := StrKey(strconv.Itoa(k))
+				present, err := i.hasV(ctx, ro, key)
+				if err != nil {
+					return false, err
+				}
+				if !present {
+					continue
+				}
+				ev, err := i.getV(ctx, ro, key, ro)
+				if err != nil {
+					return false, err
+				}
+				if float64(n) >= maxSafe {
+					return false, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+				}
+				if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(n)), ev); err != nil {
+					return false, err
+				}
+				n++
+			}
+			return false, nil
+		}
+		if float64(n) >= maxSafe {
+			return false, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+		}
+		if err := i.createDataPropertyOrThrow(ctx, a, StrKey(strconv.Itoa(n)), res); err != nil {
+			return false, err
+		}
+		n++
 		return false, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return i.newArray(out), nil
+	return a, nil
 }
 
 // arrayAt returns the element at a possibly-negative index.
@@ -298,9 +347,15 @@ func (i *Interpreter) arrayLastIndexOf(ctx context.Context, this Value, args []V
 	return Number(-1), nil
 }
 
-// arrayReduceRight is Array.prototype.reduceRight: fold from right to left.
+// arrayReduceRight is Array.prototype.reduceRight (§23.1.3.25): fold from right
+// to left. It is generic over any array-like receiver, reading present elements
+// through [[HasProperty]]/[[Get]] and skipping holes, just like reduce.
 func (i *Interpreter) arrayReduceRight(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
@@ -308,36 +363,63 @@ func (i *Interpreter) arrayReduceRight(ctx context.Context, this Value, args []V
 	if !ok || !callback.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "Reduce callback is not a function")
 	}
-	// reduceRight skips holes, just like reduce.
 	var acc Value
-	haveAcc := false
-	if len(args) >= 2 {
+	haveAcc := len(args) >= 2
+	if haveAcc {
 		acc = args[1]
-		haveAcc = true
 	}
-	for j := len(o.elems) - 1; j >= 0; j-- {
-		if isHole(o.elems[j]) {
-			continue
+	k := length - 1
+	if !haveAcc {
+		// Seed the accumulator from the last present element.
+		for ; k >= 0; k-- {
+			key := StrKey(strconv.Itoa(k))
+			present, err := i.hasV(ctx, o, key)
+			if err != nil {
+				return nil, err
+			}
+			if present {
+				acc, err = i.getV(ctx, o, key, o)
+				if err != nil {
+					return nil, err
+				}
+				haveAcc = true
+				k--
+				break
+			}
 		}
 		if !haveAcc {
-			acc = o.elems[j]
-			haveAcc = true
+			return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
+		}
+	}
+	for ; k >= 0; k-- {
+		key := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
 			continue
 		}
-		acc, err = callback.fn.call(ctx, Undef, []Value{acc, o.elems[j], Number(float64(j)), o})
+		kv, err := i.getV(ctx, o, key, o)
+		if err != nil {
+			return nil, err
+		}
+		acc, err = callback.fn.call(ctx, Undef, []Value{acc, kv, Number(float64(k)), o})
 		if err != nil {
 			return nil, err
 		}
 	}
-	if !haveAcc {
-		return nil, i.throwError(ctx, "TypeError", "Reduce of empty array with no initial value")
-	}
 	return acc, nil
 }
 
-// arrayFindLast returns the last element satisfying the predicate.
+// arrayFindLast returns the last element satisfying the predicate (§23.1.3.11).
+// It is generic and does not skip holes; every index is read via [[Get]].
 func (i *Interpreter) arrayFindLast(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
@@ -345,9 +427,11 @@ func (i *Interpreter) arrayFindLast(ctx context.Context, this Value, args []Valu
 	if !ok || !cb.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "predicate is not a function")
 	}
-	// findLast does not skip holes; a hole is visited as undefined.
-	for j := len(o.elems) - 1; j >= 0; j-- {
-		v := elemAt(o, j)
+	for j := length - 1; j >= 0; j-- {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(j)), o)
+		if err != nil {
+			return nil, err
+		}
 		r, err := cb.fn.call(ctx, arg(args, 1), []Value{v, Number(float64(j)), o})
 		if err != nil {
 			return nil, err
@@ -360,9 +444,14 @@ func (i *Interpreter) arrayFindLast(ctx context.Context, this Value, args []Valu
 }
 
 // arrayFindLastIndex returns the index of the last element satisfying the
-// predicate, or -1.
+// predicate, or -1 (§23.1.3.12). It is generic and does not skip holes; every
+// index is read via [[Get]].
 func (i *Interpreter) arrayFindLastIndex(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
@@ -370,9 +459,12 @@ func (i *Interpreter) arrayFindLastIndex(ctx context.Context, this Value, args [
 	if !ok || !cb.IsCallable() {
 		return nil, i.throwError(ctx, "TypeError", "predicate is not a function")
 	}
-	// findLastIndex does not skip holes; a hole is visited as undefined.
-	for j := len(o.elems) - 1; j >= 0; j-- {
-		r, err := cb.fn.call(ctx, arg(args, 1), []Value{elemAt(o, j), Number(float64(j)), o})
+	for j := length - 1; j >= 0; j-- {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(j)), o)
+		if err != nil {
+			return nil, err
+		}
+		r, err := cb.fn.call(ctx, arg(args, 1), []Value{v, Number(float64(j)), o})
 		if err != nil {
 			return nil, err
 		}
