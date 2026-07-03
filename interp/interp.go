@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/token"
 )
 
@@ -73,6 +74,14 @@ type Interpreter struct {
 	// imported via dynamic import(), so a module is evaluated at most once and
 	// repeated imports share the same namespace.
 	moduleNamespaces map[string]*Object
+
+	// templateCache is the realm's [[TemplateMap]] (§13.2.8.4 GetTemplateObject).
+	// It canonicalizes tagged-template objects by source location: each distinct
+	// TemplateLiteral Parse Node maps to the single frozen strings array handed to
+	// the tag function, so evaluating the same source site again returns the same
+	// object. Keyed by AST-node identity (a fresh parse — e.g. each eval call —
+	// yields a distinct node, while a loop reuses one node).
+	templateCache map[*ast.TemplateLit]*Object
 
 	// rng is the per-interpreter PRNG backing Math.random.
 	rng *prng

@@ -249,14 +249,7 @@ func (i *Interpreter) evalTaggedTemplate(ctx context.Context, e *ast.TaggedTempl
 	if err != nil {
 		return nil, err
 	}
-	strs := make([]Value, len(e.Quasi.Quasis))
-	raws := make([]Value, len(e.Quasi.Quasis))
-	for idx, q := range e.Quasi.Quasis {
-		strs[idx] = String(q.Cooked)
-		raws[idx] = String(q.Raw)
-	}
-	stringsArr := i.newArray(strs)
-	stringsArr.SetData("raw", i.newArray(raws))
+	stringsArr := i.getTemplateObject(e.Quasi)
 	callArgs := []Value{stringsArr}
 	for _, ex := range e.Quasi.Exprs {
 		v, err := i.evalExpr(ctx, ex, env)
@@ -266,6 +259,46 @@ func (i *Interpreter) evalTaggedTemplate(ctx context.Context, e *ast.TaggedTempl
 		callArgs = append(callArgs, v)
 	}
 	return i.call(ctx, tag, thisVal, callArgs)
+}
+
+// getTemplateObject implements GetTemplateObject (§13.2.8.4). It returns the
+// realm's canonical frozen strings array for a given TemplateLiteral Parse Node,
+// creating and caching it on first use so that evaluating the same source site
+// again hands the tag function the identical object. The returned array and its
+// non-enumerable "raw" sub-array are both frozen: indices are
+// {writable:false, enumerable:true, configurable:false}, "length" is
+// non-writable/non-enumerable, and "raw" is
+// {writable:false, enumerable:false, configurable:false}.
+func (i *Interpreter) getTemplateObject(quasi *ast.TemplateLit) *Object {
+	if cached, ok := i.templateCache[quasi]; ok {
+		return cached
+	}
+
+	strs := make([]Value, len(quasi.Quasis))
+	raws := make([]Value, len(quasi.Quasis))
+	for idx, q := range quasi.Quasis {
+		strs[idx] = String(q.Cooked)
+		raws[idx] = String(q.Raw)
+	}
+	rawArr := i.newArray(raws)
+	rawArr.setIntegrityLevel(true)
+
+	template := i.newArray(strs)
+	// Define "raw" as a non-enumerable, non-writable, non-configurable data
+	// property (CreateDataPropertyOrThrow then SetIntegrityLevel freezes it).
+	template.defineOwn(StrKey("raw"), &Property{
+		Value:        rawArr,
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: false,
+	})
+	template.setIntegrityLevel(true)
+
+	if i.templateCache == nil {
+		i.templateCache = map[*ast.TemplateLit]*Object{}
+	}
+	i.templateCache[quasi] = template
+	return template
 }
 
 // evalArrayLit evaluates an array literal, expanding spread elements.
