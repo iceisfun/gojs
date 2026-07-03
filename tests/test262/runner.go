@@ -516,5 +516,24 @@ func installT262Host(vm *interp.Interpreter) {
 		}
 		return interp.Undef, nil
 	}))
+	// $262.evalScript(sourceText): evaluate sourceText as a Script (global code,
+	// not eval code) in the current realm and return its completion value. It
+	// shares this Interpreter's realm/global, so declarations it introduces are
+	// observable on globalThis afterwards — the property the language/global-code
+	// tests rely on. RunString is the runner's own global-script entry point, so
+	// reusing it keeps evalScript's semantics identical to the main test body; a
+	// parse error or thrown exception comes back as an error and propagates as a
+	// normal throw to the caller.
+	host.SetData("evalScript", vm.NewFunction("evalScript", func(args []interp.Value) (interp.Value, error) {
+		var src string
+		if len(args) > 0 {
+			s, err := vm.ToString(args[0])
+			if err != nil {
+				return interp.Undef, err
+			}
+			src = s
+		}
+		return vm.RunString("<evalScript>", src)
+	}))
 	vm.SetGlobal("$262", host)
 }
