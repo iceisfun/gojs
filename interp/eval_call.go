@@ -147,55 +147,110 @@ func (i *Interpreter) evalMember(ctx context.Context, e *ast.MemberExpr, env *En
 	return val, base, nil
 }
 
-// evalSuperMember handles super.x property access inside a method.
-func (i *Interpreter) evalSuperMember(ctx context.Context, e *ast.MemberExpr, env *Environment) (Value, Value, error) {
-	home := env.homeObject()
-	if home == nil || home.proto == nil {
-		return nil, nil, i.throwError(ctx, "SyntaxError", "'super' keyword unexpected here")
+// getThisBinding implements the Function Environment Record GetThisBinding
+// (§9.1.1.3.4): it returns the effective `this`, but a derived constructor's
+// binding is uninitialized until super() runs, and reading it then is a
+// ReferenceError.
+func (i *Interpreter) getThisBinding(ctx context.Context, env *Environment) (Value, error) {
+	if env.thisUninitialized() {
+		return nil, i.throwError(ctx, "ReferenceError",
+			"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
 	}
-	key, err := i.memberKey(ctx, e, env)
+	v, _ := env.thisBinding()
+	return v, nil
+}
+
+// superBase implements MakeSuperPropertyReference's GetThisBinding + GetSuperBase
+// (§13.3.7.1, §9.1.1.3.5). It returns actualThis and the super base value
+// (home.[[GetPrototypeOf]]()). The base is captured before ToPropertyKey runs on
+// any computed key, per the "GetSuperBase before ToPropertyKey" ordering.
+func (i *Interpreter) superBase(ctx context.Context, env *Environment) (thisVal Value, base *Object, err error) {
+	home := env.homeObject()
+	if home == nil {
+		// HasSuperBinding() is false: no [[HomeObject]] in scope.
+		return nil, nil, i.throwError(ctx, "ReferenceError", "'super' keyword unexpected here")
+	}
+	thisVal, err = i.getThisBinding(ctx, env)
 	if err != nil {
 		return nil, nil, err
 	}
-	thisVal, _ := env.thisBinding()
-	val, err := home.proto.getWithReceiver(ctx, key, thisVal)
+	return thisVal, home.proto, nil
+}
+
+// evalSuperMember handles super.x property access inside a method.
+func (i *Interpreter) evalSuperMember(ctx context.Context, e *ast.MemberExpr, env *Environment) (Value, Value, error) {
+	// GetThisBinding precedes evaluation of a computed key (§13.3.7.1 steps 1-2).
+	thisVal, base, err := i.superBase(ctx, env)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Evaluate a computed key to a raw value, capturing the super base before
+	// ToPropertyKey may run user code that mutates the home prototype.
+	var keyVal Value
+	if e.Computed {
+		if keyVal, err = i.evalExpr(ctx, e.Property, env); err != nil {
+			return nil, nil, err
+		}
+	}
+	// RequireObjectCoercible on the super base (ToObject in GetValue): a null base
+	// (class extends null) is a TypeError, not a SyntaxError.
+	if base == nil {
+		return nil, nil, i.throwError(ctx, "TypeError", "Cannot read properties of null")
+	}
+	key, err := i.superKey(ctx, e, keyVal)
+	if err != nil {
+		return nil, nil, err
+	}
+	val, err := base.getWithReceiver(ctx, key, thisVal)
 	if err != nil {
 		return nil, nil, err
 	}
 	return val, thisVal, nil
 }
 
-// assignSuperMember implements `super.x = v`: an inherited accessor's setter is
-// invoked with `this` as the receiver; otherwise the value is written as an own
-// property of `this`.
-func (i *Interpreter) assignSuperMember(ctx context.Context, e *ast.MemberExpr, value Value, env *Environment) error {
-	home := env.homeObject()
-	if home == nil || home.proto == nil {
-		return i.throwError(ctx, "SyntaxError", "'super' keyword unexpected here")
+// superKey resolves a super member's property key: a literal IdentifierName, or
+// ToPropertyKey of an already-evaluated computed key value.
+func (i *Interpreter) superKey(ctx context.Context, e *ast.MemberExpr, keyVal Value) (PropertyKey, error) {
+	if e.Computed {
+		return i.ToPropertyKey(ctx, keyVal)
 	}
-	key, err := i.memberKey(ctx, e, env)
+	switch p := e.Property.(type) {
+	case *ast.Ident:
+		return StrKey(p.Name), nil
+	case *ast.PrivateIdent:
+		return StrKey(p.Name), nil
+	default:
+		return PropertyKey{}, i.throwError(ctx, "SyntaxError", "invalid member expression")
+	}
+}
+
+// assignSuperMember implements `super.x = v` as PutValue on a Super Reference
+// (§6.2.5.6): [[Set]] with `this` as the receiver, and a failed write is a
+// TypeError in strict mode.
+func (i *Interpreter) assignSuperMember(ctx context.Context, e *ast.MemberExpr, value Value, env *Environment) error {
+	thisVal, base, err := i.superBase(ctx, env)
 	if err != nil {
 		return err
 	}
-	thisVal, _ := env.thisBinding()
-	// Look up an accessor on the super chain; if a setter exists, run it with the
-	// current `this` as the receiver.
-	for cur := home.proto; cur != nil; cur = cur.proto {
-		p, ok := cur.getOwn(key)
-		if !ok {
-			continue
-		}
-		if p.Accessor {
-			if p.Set == nil {
-				return nil // accessor without a setter: ignore (non-strict)
-			}
-			_, err := p.Set.fn.call(ctx, thisVal, []Value{value})
+	var keyVal Value
+	if e.Computed {
+		if keyVal, err = i.evalExpr(ctx, e.Property, env); err != nil {
 			return err
 		}
-		break
 	}
-	if obj, ok := thisVal.(*Object); ok {
-		return obj.Set(ctx, key, value)
+	if base == nil {
+		return i.throwError(ctx, "TypeError", "Cannot set properties of null")
+	}
+	key, err := i.superKey(ctx, e, keyVal)
+	if err != nil {
+		return err
+	}
+	succeeded, err := i.setV(ctx, base, key, value, thisVal)
+	if err != nil {
+		return err
+	}
+	if !succeeded && env.isStrict() {
+		return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+keyName(key))
 	}
 	return nil
 }

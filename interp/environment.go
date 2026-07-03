@@ -188,6 +188,14 @@ func (e *Environment) setThis(v Value) {
 	e.hasThis = true
 }
 
+// thisUninitialized reports whether the nearest `this` binding belongs to a
+// derived constructor still awaiting super() (its [[ThisBindingStatus]] is
+// "uninitialized"). GetThisBinding on such an environment is a ReferenceError.
+func (e *Environment) thisUninitialized() bool {
+	ts := e.thisScope()
+	return ts != nil && ts.superInit != nil && !ts.superInit.called
+}
+
 // thisScope returns the nearest environment that establishes a `this` binding,
 // or nil. It is used to locate a derived constructor's super-init state so that
 // reading `this` before super() can be rejected.

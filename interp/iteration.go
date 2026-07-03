@@ -112,8 +112,14 @@ func (i *Interpreter) iterate(ctx context.Context, iterable Value, fn func(Value
 
 // iterateProtocol drives the full Symbol.iterator protocol on an object.
 func (i *Interpreter) iterateProtocol(ctx context.Context, obj *Object, fn func(Value) error) error {
-	itFn, ok := i.methodBySymbol(obj, i.symIterator)
-	if !ok {
+	// GetMethod(obj, @@iterator) reads the method through [[Get]], so an accessor
+	// @@iterator runs its getter (and a throwing getter propagates) rather than
+	// being silently treated as non-iterable (§7.4.2 GetIterator).
+	itFn, err := i.getMethod(ctx, obj, i.symIterator)
+	if err != nil {
+		return err
+	}
+	if itFn == nil {
 		return i.throwError(ctx, "TypeError", briefValue(obj)+" is not iterable")
 	}
 	iterator, err := itFn.fn.call(ctx, obj, nil)

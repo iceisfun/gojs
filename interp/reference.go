@@ -41,8 +41,8 @@ type reference struct {
 	key     PropertyKey // resolved key (valid once keyDone is true)
 	keyDone bool
 
-	// super.key references.
-	home    *Object
+	// super.key references: base is GetSuperBase (the home object's prototype, or
+	// null), thisVal is the actualThis receiver.
 	thisVal Value
 
 	// Private references.
@@ -61,13 +61,26 @@ func (i *Interpreter) evalRef(ctx context.Context, target ast.Expr, env *Environ
 	case *ast.MemberExpr:
 		if _, ok := t.Object.(*ast.SuperExpr); ok {
 			home := env.homeObject()
-			if home == nil || home.proto == nil {
-				return nil, i.throwError(ctx, "SyntaxError", "'super' keyword unexpected here")
+			if home == nil {
+				return nil, i.throwError(ctx, "ReferenceError", "'super' keyword unexpected here")
 			}
-			thisVal, _ := env.thisBinding()
-			ref := &reference{kind: refSuperProp, strict: env.isStrict(), home: home, thisVal: thisVal}
+			// GetThisBinding (ReferenceError when uninitialized) precedes evaluation
+			// of a computed key (§13.3.7.1 steps 1-3).
+			thisVal, err := i.getThisBinding(ctx, env)
+			if err != nil {
+				return nil, err
+			}
+			ref := &reference{kind: refSuperProp, strict: env.isStrict(), thisVal: thisVal}
 			if err := i.setRefKey(ctx, ref, t, env); err != nil {
 				return nil, err
+			}
+			// GetSuperBase snapshot (§9.1.1.3.5), captured after the key expression
+			// but before the deferred ToPropertyKey. A null base (extends null) is a
+			// TypeError only once GetValue/PutValue coerces it via ToObject.
+			if home.proto != nil {
+				ref.base = home.proto
+			} else {
+				ref.base = Nul
 			}
 			return ref, nil
 		}
@@ -175,11 +188,17 @@ func (i *Interpreter) getRefValue(ctx context.Context, ref *reference) (Value, e
 	case refPrivate:
 		return i.getPrivateMember(ctx, ref.base, ref.priv, ref.name)
 	case refSuperProp:
+		// GetValue on a Super Reference: ToObject(base) rejects a null base before
+		// ToPropertyKey (§6.2.5.5), then [[Get]] runs with `this` as the receiver.
+		base, ok := ref.base.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Cannot read properties of "+briefValue(ref.base))
+		}
 		key, err := i.resolveKey(ctx, ref)
 		if err != nil {
 			return nil, err
 		}
-		return ref.home.proto.getWithReceiver(ctx, key, ref.thisVal)
+		return base.getWithReceiver(ctx, key, ref.thisVal)
 	case refProp:
 		// ToObject rejects a nullish base before the computed key is coerced, so
 		// resolve the key only after the base is known object-coercible.
@@ -268,30 +287,25 @@ func (i *Interpreter) putRefValue(ctx context.Context, ref *reference, value Val
 	}
 }
 
-// putSuperRef writes through a super.x reference: an inherited setter runs with
-// the current `this` as receiver, else the value becomes an own property of
-// `this` (mirrors assignSuperMember).
+// putSuperRef implements PutValue on a Super Reference (§6.2.5.6): ToObject(base)
+// rejects a null base, then [[Set]] runs with `this` as the receiver (so an
+// inherited setter fires, else the value becomes an own property of `this`); a
+// failed write is a TypeError in strict mode.
 func (i *Interpreter) putSuperRef(ctx context.Context, ref *reference, value Value) error {
+	base, ok := ref.base.(*Object)
+	if !ok {
+		return i.throwError(ctx, "TypeError", "Cannot set properties of "+briefValue(ref.base))
+	}
 	key, err := i.resolveKey(ctx, ref)
 	if err != nil {
 		return err
 	}
-	for cur := ref.home.proto; cur != nil; cur = cur.proto {
-		p, ok := cur.getOwn(key)
-		if !ok {
-			continue
-		}
-		if p.Accessor {
-			if p.Set == nil {
-				return nil
-			}
-			_, err := p.Set.fn.call(ctx, ref.thisVal, []Value{value})
-			return err
-		}
-		break
+	succeeded, err := i.setV(ctx, base, key, value, ref.thisVal)
+	if err != nil {
+		return err
 	}
-	if obj, ok := ref.thisVal.(*Object); ok {
-		return obj.Set(ctx, key, value)
+	if !succeeded && ref.strict {
+		return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+keyName(key))
 	}
 	return nil
 }

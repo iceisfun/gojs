@@ -43,12 +43,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.ThisExpr:
 		// In a derived constructor, `this` is in the Temporal Dead Zone until
 		// super() has been called.
-		if ts := env.thisScope(); ts != nil && ts.superInit != nil && !ts.superInit.called {
-			return nil, i.throwError(ctx, "ReferenceError",
-				"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
-		}
-		v, _ := env.thisBinding()
-		return v, nil
+		return i.getThisBinding(ctx, env)
 	case *ast.TemplateLit:
 		return i.evalTemplate(ctx, e, env)
 	case *ast.TaggedTemplateExpr:
@@ -342,14 +337,19 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 				return nil, err
 			}
 			if src, ok := v.(*Object); ok {
-				for _, name := range src.OwnKeys() {
-					if p, ok := src.getOwn(StrKey(name)); ok && p.Enumerable {
-						pv, err := src.GetStr(ctx, name)
-						if err != nil {
-							return nil, err
-						}
-						obj.SetData(name, pv)
+				// CopyDataProperties (§7.3.25): copy every own *enumerable* property in
+				// [[OwnPropertyKeys]] order — symbol keys included — reading each value
+				// through [[Get]] so accessors run.
+				for _, key := range src.ownPropertyKeys() {
+					p, ok := src.getOwn(key)
+					if !ok || !p.Enumerable {
+						continue
 					}
+					pv, err := src.getWithReceiver(ctx, key, src)
+					if err != nil {
+						return nil, err
+					}
+					obj.writeData(key, pv)
 				}
 			}
 			continue

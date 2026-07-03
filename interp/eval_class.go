@@ -252,8 +252,11 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			}
 		} else {
 			// Provide a super() binding that constructs the parent onto self, and
-			// mark `this` as uninitialized until super() runs.
+			// mark `this` as uninitialized until super() runs. The active function
+			// object is recorded so GetSuperConstructor can read its current
+			// [[Prototype]] dynamically (§13.3.7.1 SuperCall / GetSuperConstructor).
 			env.superInit = &superInitState{}
+			env.vars["%activefunc%"] = &binding{value: fnObj, mutable: false, initialized: true}
 			env.vars["%superctor%"] = &binding{value: cd.superCtor, mutable: false, initialized: true}
 			env.vars["%fieldinit%"] = &binding{value: i.fieldInitThunk(cd, self), mutable: false, initialized: true}
 		}
@@ -277,13 +280,17 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			if obj, ok := ret.(*Object); ok {
 				result = obj
 			} else if cd.superCtor != nil {
-				if !IsUndefined(ret) {
-					return nil, i.throwError(ctx, "TypeError",
-						"Derived constructors may only return an object or undefined")
-				}
+				// GetThisBinding is consulted for a non-object completion: a derived
+				// constructor whose `this` is still uninitialized (super() never ran)
+				// is a ReferenceError, observed before the invalid-return TypeError for
+				// a primitive completion value.
 				if env.superInit == nil || !env.superInit.called {
 					return nil, i.throwError(ctx, "ReferenceError",
 						"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
+				}
+				if !IsUndefined(ret) {
+					return nil, i.throwError(ctx, "TypeError",
+						"Derived constructors may only return an object or undefined")
 				}
 			}
 		} else if cd.superCtor != nil {
@@ -658,7 +665,15 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 	if b == nil {
 		return nil, nil, i.throwError(ctx, "SyntaxError", "'super' keyword unexpected here")
 	}
-	superCtor := b.value.(*Object)
+	// GetSuperConstructor (§13.3.7.1): the active function object's current
+	// [[Prototype]], not the value statically captured at class definition, so a
+	// later Object.setPrototypeOf on the class is honored.
+	superCtor, _ := b.value.(*Object)
+	if af := env.lookup("%activefunc%"); af != nil {
+		if fn, ok := af.value.(*Object); ok {
+			superCtor = fn.proto
+		}
+	}
 	thisVal, _ := env.thisBinding()
 	self, _ := thisVal.(*Object)
 	fieldInit := env.lookup("%fieldinit%")
@@ -673,6 +688,12 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 		// super() may be called at most once in a derived constructor.
 		if initState != nil && initState.called {
 			return nil, i.throwError(ctx, "ReferenceError", "Super constructor may only be called once")
+		}
+		// IsConstructor(superCtor) is checked after ArgumentListEvaluation, so the
+		// arguments' side effects are observed even when the super value is not a
+		// constructor (§13.3.7.1 SuperCall steps 4-5).
+		if superCtor == nil || !superCtor.IsConstructor() {
+			return nil, i.throwError(ctx, "TypeError", "Super constructor is not a constructor")
 		}
 		if err := i.invokeSuperOnto(ctx, self, superCtor, args, newTarget); err != nil {
 			return nil, err
