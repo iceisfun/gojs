@@ -55,6 +55,14 @@ type yieldMsg struct {
 	value Value
 	done  bool
 	err   error
+	// rawResult, when non-nil, is an iterator-result object that the sync
+	// generator driver must hand back to the consumer verbatim (without
+	// re-wrapping it via CreateIterResultObject). It models the sync
+	// GeneratorYield(innerResult) step of yield* delegation (§14.4.14), where the
+	// exact { value, done } object produced by the inner iterator is re-yielded —
+	// so a missing `done` property is observably preserved. It is meaningless for
+	// async generators and async functions.
+	rawResult *Object
 	// awaited marks a suspension produced by `await` (as opposed to `yield`):
 	// the async-generator driver resolves the value and resumes the body without
 	// delivering an iterator result to the consumer. It is meaningless for sync
@@ -259,6 +267,10 @@ func (i *Interpreter) initGenerator() {
 		if res.err != nil {
 			return nil, res.err
 		}
+		if res.rawResult != nil {
+			// yield* re-yields the inner iterator's result object verbatim.
+			return res.rawResult, nil
+		}
 		return i.createIterResult(res.value, res.done), nil
 	}
 
@@ -326,9 +338,9 @@ func (i *Interpreter) evalYield(ctx context.Context, e *ast.YieldExpr, env *Envi
 // translating a return()/throw() resume into the appropriate control signal.
 // awaited distinguishes an `await` suspension (transparent to an async
 // generator's consumer) from a `yield` suspension (which delivers a result).
-func (i *Interpreter) suspend(gs *generatorState, value Value, awaited bool) (Value, error) {
+func (i *Interpreter) suspend(gs *generatorState, out yieldMsg) (Value, error) {
 	select {
-	case gs.out <- yieldMsg{value: value, done: false, awaited: awaited}:
+	case gs.out <- out:
 	case <-gs.ctx.Done():
 		return nil, gs.ctx.Err()
 	}
@@ -349,13 +361,19 @@ func (i *Interpreter) suspend(gs *generatorState, value Value, awaited bool) (Va
 
 // doYield hands a yielded value to the consumer and blocks until resumed.
 func (i *Interpreter) doYield(gs *generatorState, value Value) (Value, error) {
-	return i.suspend(gs, value, false)
+	return i.suspend(gs, yieldMsg{value: value, done: false})
+}
+
+// doYieldRaw hands the inner iterator's result object to the consumer verbatim
+// (sync GeneratorYield(innerResult) for yield*), blocking until resumed.
+func (i *Interpreter) doYieldRaw(gs *generatorState, result *Object) (Value, error) {
+	return i.suspend(gs, yieldMsg{rawResult: result})
 }
 
 // doAwait suspends for an awaited value; the async driver resolves it to a
 // promise and resumes with the settled value (or a thrown rejection).
 func (i *Interpreter) doAwait(gs *generatorState, value Value) (Value, error) {
-	return i.suspend(gs, value, true)
+	return i.suspend(gs, yieldMsg{value: value, done: false, awaited: true})
 }
 
 // createIterResult builds a { value, done } iterator-result object.
@@ -376,16 +394,120 @@ func (i *Interpreter) evalYieldDelegate(ctx context.Context, e *ast.YieldExpr, e
 	if gs.asyncGen {
 		return i.evalYieldDelegateAsync(ctx, iterable, gs)
 	}
-	var last Value = Undef
-	err = i.iterate(ctx, iterable, func(v Value) error {
-		last = v
-		_, yErr := i.doYield(gs, v)
-		return yErr
-	})
+
+	// GetIterator(value, sync) (§14.4.14 step 4).
+	rec, err := i.getIterator(ctx, iterable)
 	if err != nil {
 		return nil, err
 	}
-	return last, nil
+	iter := rec.iterator
+
+	// received models the resumption driving each loop turn (§14.4.14 step 6):
+	// nil = normal (next), *genReturn = a consumer return(), *Throw = throw().
+	// recVal carries the value sent by a normal resumption.
+	var recVal Value = Undef
+	var received error
+
+	for {
+		switch rc := received.(type) {
+		case nil:
+			// step a.i: innerResult = IteratorNext(iterator, received.[[Value]]).
+			innerResult, err := i.call(ctx, rec.nextMethod, iter, []Value{recVal})
+			if err != nil {
+				return nil, err
+			}
+			ro, ok := innerResult.(*Object)
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "iterator result is not an object")
+			}
+			done, err := iterResultDone(ctx, ro)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				// step a.iii.1: Return IteratorValue(innerResult).
+				return ro.GetStr(ctx, "value")
+			}
+			// step a.vii: GeneratorYield(innerResult) — re-yield the raw object.
+			recVal, received = i.doYieldRaw(gs, ro)
+		case *genReturn:
+			// step c: received is a return completion.
+			retMethod, err := i.getMethodStr(ctx, iter, "return")
+			if err != nil {
+				return nil, err
+			}
+			if retMethod == nil {
+				// step c.iii: no return method — forward the return completion.
+				return nil, &genReturn{value: rc.value}
+			}
+			innerResult, err := i.call(ctx, retMethod, iter, []Value{rc.value})
+			if err != nil {
+				return nil, err
+			}
+			ro, ok := innerResult.(*Object)
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "iterator result is not an object")
+			}
+			done, err := iterResultDone(ctx, ro)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				// step c.viii: complete the yield* with a return of IteratorValue.
+				value, err := ro.GetStr(ctx, "value")
+				if err != nil {
+					return nil, err
+				}
+				return nil, &genReturn{value: value}
+			}
+			recVal, received = i.doYieldRaw(gs, ro)
+		case *Throw:
+			// step b: received is a throw completion.
+			throwMethod, err := i.getMethodStr(ctx, iter, "throw")
+			if err != nil {
+				return nil, err
+			}
+			if throwMethod == nil {
+				// step b.iii: no throw method — close the iterator, then report the
+				// protocol violation as a TypeError.
+				if cerr := i.iteratorClose(ctx, rec, nil); cerr != nil {
+					return nil, cerr
+				}
+				return nil, i.throwError(ctx, "TypeError", "The iterator does not provide a throw method")
+			}
+			innerResult, err := i.call(ctx, throwMethod, iter, []Value{rc.Value})
+			if err != nil {
+				return nil, err
+			}
+			ro, ok := innerResult.(*Object)
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "iterator result is not an object")
+			}
+			done, err := iterResultDone(ctx, ro)
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				// step b.ii.6: Return IteratorValue(innerResult).
+				return ro.GetStr(ctx, "value")
+			}
+			recVal, received = i.doYieldRaw(gs, ro)
+		default:
+			// A host error (e.g. context cancellation) from a prior suspension.
+			return nil, received
+		}
+	}
+}
+
+// iterResultDone implements IteratorComplete (§7.4.5): Get(result, "done") then
+// ToBoolean. It deliberately does not read "value", so a consumer that only
+// observes an incomplete step never triggers a "value" getter.
+func iterResultDone(ctx context.Context, result *Object) (bool, error) {
+	doneV, err := result.GetStr(ctx, "done")
+	if err != nil {
+		return false, err
+	}
+	return ToBoolean(doneV), nil
 }
 
 // evalYieldDelegateAsync implements `yield* value` inside an async generator

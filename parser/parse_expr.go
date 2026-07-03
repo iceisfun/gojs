@@ -671,7 +671,11 @@ func regexFlags(raw string) string {
 func canStartExpr(t token.Type) bool {
 	switch t {
 	case token.SEMICOLON, token.RPAREN, token.RBRACE, token.RBRACKET,
-		token.COMMA, token.COLON, token.EOF:
+		token.COMMA, token.COLON, token.EOF,
+		// A template middle/tail closes an interpolation (`}...${` / `}...` + "`")
+		// and can never begin an expression: a bare `yield`/`return`/`throw`
+		// directly inside a substitution is argument-less.
+		token.TEMPLATE_MIDDLE, token.TEMPLATE_TAIL:
 		return false
 	}
 	return true
