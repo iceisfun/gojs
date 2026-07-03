@@ -400,6 +400,40 @@ func (i *Interpreter) initString() {
 		}
 		return String(f.String(s)), nil
 	})
+	// isWellFormed (§22.1.3.9) / toWellFormed (§22.1.3.35): report or repair
+	// unpaired UTF-16 surrogates. gojs indexes strings by code point (Go
+	// strings are valid UTF-8), so unpaired surrogates written as \uD800-style
+	// escapes are folded to U+FFFD before storage; these methods therefore
+	// implement the algorithm faithfully but rarely observe a raw surrogate.
+	m("isWellFormed", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
+		for _, r := range s {
+			if r >= 0xD800 && r <= 0xDFFF {
+				return Boolean(false), nil
+			}
+		}
+		return Boolean(true), nil
+	})
+	m("toWellFormed", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
+		hasSurrogate := false
+		for _, r := range s {
+			if r >= 0xD800 && r <= 0xDFFF {
+				hasSurrogate = true
+				break
+			}
+		}
+		if !hasSurrogate {
+			return String(s), nil
+		}
+		var b strings.Builder
+		for _, r := range s {
+			if r >= 0xD800 && r <= 0xDFFF {
+				b.WriteRune('�')
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		return String(b.String()), nil
+	})
 	m("padStart", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return i.stringPad(ctx, s, args, true)
 	})

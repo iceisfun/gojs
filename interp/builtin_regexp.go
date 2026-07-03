@@ -93,15 +93,14 @@ func (i *Interpreter) initStringRegex() {
 			return nil, err
 		}
 		regexp := arg(args, 0)
-		if !IsNullish(regexp) {
-			if m, err := i.getMethod(ctx, regexp, i.symSearch); err != nil {
+		// §22.1.3.13 step 3: the @@search lookup is only performed when the
+		// argument is an Object; a primitive never has its @@search accessed.
+		if ro, ok := regexp.(*Object); ok {
+			if m, err := i.getMethod(ctx, ro, i.symSearch); err != nil {
 				return nil, err
 			} else if m != nil {
-				s, err := i.ToStringV(ctx, this)
-				if err != nil {
-					return nil, err
-				}
-				return i.call(ctx, m, regexp, []Value{String(s)})
+				// The searcher receives the original receiver unchanged.
+				return i.call(ctx, m, ro, []Value{this})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -112,7 +111,9 @@ func (i *Interpreter) initStringRegex() {
 		if err != nil {
 			return nil, err
 		}
-		return i.regexpSymbolSearch(ctx, rx, []Value{String(s)})
+		// Step 8: Invoke(rx, @@search, «S») — a fresh property lookup so a
+		// user-overridden RegExp.prototype[@@search] is honored.
+		return i.invokeSymbol(ctx, rx, i.symSearch, "@@search", []Value{String(s)})
 	})
 
 	i.defineMethod(sp, "match", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -120,15 +121,11 @@ func (i *Interpreter) initStringRegex() {
 			return nil, err
 		}
 		regexp := arg(args, 0)
-		if !IsNullish(regexp) {
-			if m, err := i.getMethod(ctx, regexp, i.symMatch); err != nil {
+		if ro, ok := regexp.(*Object); ok {
+			if m, err := i.getMethod(ctx, ro, i.symMatch); err != nil {
 				return nil, err
 			} else if m != nil {
-				s, err := i.ToStringV(ctx, this)
-				if err != nil {
-					return nil, err
-				}
-				return i.call(ctx, m, regexp, []Value{String(s)})
+				return i.call(ctx, m, ro, []Value{this})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -139,7 +136,7 @@ func (i *Interpreter) initStringRegex() {
 		if err != nil {
 			return nil, err
 		}
-		return i.regexpSymbolMatch(ctx, rx, []Value{String(s)})
+		return i.invokeSymbol(ctx, rx, i.symMatch, "@@match", []Value{String(s)})
 	})
 
 	i.defineMethod(sp, "matchAll", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -147,13 +144,13 @@ func (i *Interpreter) initStringRegex() {
 			return nil, err
 		}
 		regexp := arg(args, 0)
-		if !IsNullish(regexp) {
-			isRe, err := i.isRegExpValue(ctx, regexp)
+		if ro, ok := regexp.(*Object); ok {
+			isRe, err := i.isRegExpValue(ctx, ro)
 			if err != nil {
 				return nil, err
 			}
 			if isRe {
-				flags, err := i.getStrProp(ctx, regexp.(*Object), "flags")
+				flags, err := i.getStrProp(ctx, ro, "flags")
 				if err != nil {
 					return nil, err
 				}
@@ -161,14 +158,10 @@ func (i *Interpreter) initStringRegex() {
 					return nil, i.throwError(ctx, "TypeError", "String.prototype.matchAll called with a non-global RegExp argument")
 				}
 			}
-			if m, err := i.getMethod(ctx, regexp, i.symMatchAll); err != nil {
+			if m, err := i.getMethod(ctx, ro, i.symMatchAll); err != nil {
 				return nil, err
 			} else if m != nil {
-				s, err := i.ToStringV(ctx, this)
-				if err != nil {
-					return nil, err
-				}
-				return i.call(ctx, m, regexp, []Value{String(s)})
+				return i.call(ctx, m, ro, []Value{this})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -179,7 +172,9 @@ func (i *Interpreter) initStringRegex() {
 		if err != nil {
 			return nil, err
 		}
-		return i.regexpSymbolMatchAll(ctx, rx, []Value{String(s)})
+		// Step 5: Invoke(rx, @@matchAll, «S») — a property lookup so a removed or
+		// overridden RegExp.prototype[@@matchAll] is honored (TypeError if absent).
+		return i.invokeSymbol(ctx, rx, i.symMatchAll, "@@matchAll", []Value{String(s)})
 	})
 
 	i.defineMethod(sp, "replace", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
@@ -187,15 +182,14 @@ func (i *Interpreter) initStringRegex() {
 			return nil, err
 		}
 		searchValue := arg(args, 0)
-		if !IsNullish(searchValue) {
-			if m, err := i.getMethod(ctx, searchValue, i.symReplace); err != nil {
+		// §22.1.3.19 step 3: the @@replace lookup is only performed when the
+		// searchValue is an Object.
+		if sv, ok := searchValue.(*Object); ok {
+			if m, err := i.getMethod(ctx, sv, i.symReplace); err != nil {
 				return nil, err
 			} else if m != nil {
-				s, err := i.ToStringV(ctx, this)
-				if err != nil {
-					return nil, err
-				}
-				return i.call(ctx, m, searchValue, []Value{String(s), arg(args, 1)})
+				// The replacer receives the original receiver unchanged.
+				return i.call(ctx, m, sv, []Value{this, arg(args, 1)})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -210,13 +204,13 @@ func (i *Interpreter) initStringRegex() {
 			return nil, err
 		}
 		searchValue := arg(args, 0)
-		if !IsNullish(searchValue) {
-			isRe, err := i.isRegExpValue(ctx, searchValue)
+		if sv, ok := searchValue.(*Object); ok {
+			isRe, err := i.isRegExpValue(ctx, sv)
 			if err != nil {
 				return nil, err
 			}
 			if isRe {
-				flags, err := i.getStrProp(ctx, searchValue.(*Object), "flags")
+				flags, err := i.getStrProp(ctx, sv, "flags")
 				if err != nil {
 					return nil, err
 				}
@@ -224,14 +218,10 @@ func (i *Interpreter) initStringRegex() {
 					return nil, i.throwError(ctx, "TypeError", "String.prototype.replaceAll called with a non-global RegExp argument")
 				}
 			}
-			if m, err := i.getMethod(ctx, searchValue, i.symReplace); err != nil {
+			if m, err := i.getMethod(ctx, sv, i.symReplace); err != nil {
 				return nil, err
 			} else if m != nil {
-				s, err := i.ToStringV(ctx, this)
-				if err != nil {
-					return nil, err
-				}
-				return i.call(ctx, m, searchValue, []Value{String(s), arg(args, 1)})
+				return i.call(ctx, m, sv, []Value{this, arg(args, 1)})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -246,13 +236,14 @@ func (i *Interpreter) initStringRegex() {
 			return nil, err
 		}
 		separator := arg(args, 0)
-		if !IsNullish(separator) {
-			if m, err := i.getMethod(ctx, separator, i.symSplit); err != nil {
+		// §22.1.3.23 step 3: the @@split lookup is only performed when the
+		// separator is an Object; a primitive never has its @@split accessed.
+		if sep, ok := separator.(*Object); ok {
+			if m, err := i.getMethod(ctx, sep, i.symSplit); err != nil {
 				return nil, err
 			} else if m != nil {
-				// §22.1.3.21 step 2: the @@split method receives the original
-				// receiver (ToString is not called on it here).
-				return i.call(ctx, m, separator, []Value{this, arg(args, 1)})
+				// The splitter receives the original receiver unchanged.
+				return i.call(ctx, m, sep, []Value{this, arg(args, 1)})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -261,6 +252,22 @@ func (i *Interpreter) initStringRegex() {
 		}
 		return i.stringSplitString(ctx, s, args)
 	})
+}
+
+// invokeSymbol implements Invoke (§7.3.20) for a well-known symbol method: it
+// re-reads the property from o (so a user-overridden method on the prototype is
+// honored) and calls it with o as the receiver. A missing or non-callable
+// method is a TypeError.
+func (i *Interpreter) invokeSymbol(ctx context.Context, o *Object, sym *Symbol, name string, args []Value) (Value, error) {
+	fn, err := o.Get(ctx, SymKey(sym))
+	if err != nil {
+		return nil, err
+	}
+	fo, ok := fn.(*Object)
+	if !ok || !fo.IsCallable() {
+		return nil, i.throwError(ctx, "TypeError", "the "+name+" property is not callable")
+	}
+	return i.call(ctx, fo, o, args)
 }
 
 // getMethod implements GetMethod (§7.3.11): Get(V, P); undefined/null → nil;
