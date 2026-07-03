@@ -490,25 +490,58 @@ func (i *Interpreter) arrayWith(ctx context.Context, this Value, args []Value) (
 // arrayLastIndexOf finds the last index of a value using strict equality,
 // searching backward from an optional fromIndex (default: last element).
 func (i *Interpreter) arrayLastIndexOf(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// Array.prototype.lastIndexOf (§23.1.3.19) is generic: length is coerced
+	// before ToIntegerOrInfinity(fromIndex), present indices are read via
+	// HasProperty/[[Get]] using strict equality, and the scan runs high to low.
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return Number(-1), nil
+	}
 	target := arg(args, 0)
-	n := len(o.elems)
-	start := n - 1
-	if !IsUndefined(arg(args, 1)) {
-		start = argIntOr(ctx, i, args, 1, n-1)
-		if start < 0 {
-			start += n
+	k := length - 1
+	// The default is len-1 only when fromIndex is ABSENT; an explicit undefined
+	// coerces to 0 via ToIntegerOrInfinity (§23.1.3.19 keys off argument count).
+	if len(args) > 1 {
+		f, err := i.argNum(ctx, args, 1)
+		if err != nil {
+			return nil, err
 		}
-		if start >= n {
-			start = n - 1
+		nf := ToInteger(f)
+		switch {
+		case nf >= 0:
+			if nf >= float64(length-1) { // clamp +Infinity to the last index
+				k = length - 1
+			} else {
+				k = int(nf)
+			}
+		case -nf > float64(length): // n == -Infinity, or before the start
+			k = -1
+		default:
+			k = length + int(nf)
 		}
 	}
-	for j := start; j >= 0; j-- {
-		if strictEquals(o.elems[j], target) {
-			return Number(float64(j)), nil
+	for ; k >= 0; k-- {
+		key := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			continue
+		}
+		v, err := i.getV(ctx, o, key, o)
+		if err != nil {
+			return nil, err
+		}
+		if strictEquals(v, target) {
+			return Number(float64(k)), nil
 		}
 	}
 	return Number(-1), nil

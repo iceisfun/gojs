@@ -642,7 +642,14 @@ func (i *Interpreter) dataDescriptorObject(v Value) *Object {
 }
 
 func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// Array.prototype.join (§23.1.3.18) is generic: ToObject + LengthOfArrayLike,
+	// then each index is read via [[Get]] and coerced with ToString unless it is
+	// null or undefined (which render as the empty string).
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	length, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
@@ -654,12 +661,15 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 		}
 	}
 	out := ""
-	for j, v := range o.elems {
-		if j > 0 {
+	for k := 0; k < length; k++ {
+		if k > 0 {
 			out += sep
 		}
-		// Holes, null, and undefined all render as the empty string.
-		if isHole(v) || IsNullish(v) {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(k)), o)
+		if err != nil {
+			return nil, err
+		}
+		if IsNullish(v) {
 			continue
 		}
 		s, err := i.ToStringV(ctx, v)
@@ -697,46 +707,108 @@ func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Valu
 }
 
 func (i *Interpreter) arrayIndexOf(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// Array.prototype.indexOf (§23.1.3.14) is generic: ToObject, then length is
+	// read (and coerced) BEFORE ToIntegerOrInfinity(fromIndex), and present
+	// indices are visited via HasProperty/[[Get]] using strict equality.
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return Number(-1), nil
+	}
 	target := arg(args, 0)
-	start := fromIndex(argIntOr(ctx, i, args, 1, 0), len(o.elems))
-	for j := start; j < len(o.elems); j++ {
-		if strictEquals(o.elems[j], target) {
-			return Number(float64(j)), nil
+	nf := 0.0
+	if !IsUndefined(arg(args, 1)) {
+		f, err := i.argNum(ctx, args, 1)
+		if err != nil {
+			return nil, err
+		}
+		nf = ToInteger(f)
+	}
+	// n == +Infinity (or beyond length) means the search cannot find anything.
+	if nf >= float64(length) {
+		return Number(-1), nil
+	}
+	var k int
+	switch {
+	case nf >= 0:
+		k = int(nf)
+	case -nf >= float64(length): // n == -Infinity, or clamps below 0
+		k = 0
+	default:
+		k = length + int(nf)
+	}
+	for ; k < length; k++ {
+		key := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, o, key)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			continue
+		}
+		v, err := i.getV(ctx, o, key, o)
+		if err != nil {
+			return nil, err
+		}
+		if strictEquals(v, target) {
+			return Number(float64(k)), nil
 		}
 	}
 	return Number(-1), nil
 }
 
 func (i *Interpreter) arrayIncludes(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// Array.prototype.includes (§23.1.3.13) is generic and, unlike indexOf, uses
+	// SameValueZero (so it finds NaN) and does NOT skip holes: an absent index is
+	// read via [[Get]] and treated as undefined.
+	o, err := i.ToObject(ctx, this)
 	if err != nil {
 		return nil, err
 	}
+	length, err := i.lengthOfArrayLike(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return False, nil
+	}
 	target := arg(args, 0)
-	start := fromIndex(argIntOr(ctx, i, args, 1, 0), len(o.elems))
-	// includes does not skip holes; a hole is treated as undefined.
-	for j := start; j < len(o.elems); j++ {
-		if sameValueZero(elemAt(o, j), target) {
+	nf := 0.0
+	if !IsUndefined(arg(args, 1)) {
+		f, err := i.argNum(ctx, args, 1)
+		if err != nil {
+			return nil, err
+		}
+		nf = ToInteger(f)
+	}
+	if nf >= float64(length) {
+		return False, nil
+	}
+	var k int
+	switch {
+	case nf >= 0:
+		k = int(nf)
+	case -nf >= float64(length):
+		k = 0
+	default:
+		k = length + int(nf)
+	}
+	for ; k < length; k++ {
+		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(k)), o)
+		if err != nil {
+			return nil, err
+		}
+		if sameValueZero(v, target) {
 			return True, nil
 		}
 	}
 	return False, nil
-}
-
-// fromIndex resolves an indexOf/includes start index, clamping a negative value
-// relative to length and never below 0.
-func fromIndex(idx, n int) int {
-	if idx < 0 {
-		idx += n
-	}
-	if idx < 0 {
-		return 0
-	}
-	return idx
 }
 
 // eachElem is the generic iteration core shared by the callback-visiting Array
@@ -1113,7 +1185,15 @@ func (i *Interpreter) arrayFill(ctx context.Context, this Value, args []Value) (
 }
 
 func (i *Interpreter) arrayFlat(ctx context.Context, this Value, args []Value) (Value, error) {
-	o, err := i.thisArray(ctx, this)
+	// Array.prototype.flat (§23.1.3.11): ToObject, LengthOfArrayLike, then
+	// ArraySpeciesCreate and FlattenIntoArray, which is fully generic — it walks
+	// the source via HasProperty/[[Get]] and recurses into elements that IsArray,
+	// so the observable "length","constructor","0",... access sequence is exact.
+	o, err := i.ToObject(ctx, this)
+	if err != nil {
+		return nil, err
+	}
+	sourceLen, err := i.lengthOfArrayLike(ctx, o)
 	if err != nil {
 		return nil, err
 	}
@@ -1134,22 +1214,64 @@ func (i *Interpreter) arrayFlat(ctx context.Context, this Value, args []Value) (
 			depth = int(ToInteger(d))
 		}
 	}
-	var flatten func(elems []Value, d int) []Value
-	flatten = func(elems []Value, d int) []Value {
-		var out []Value
-		for _, v := range elems {
-			if isHole(v) {
-				continue // flatten uses HasProperty; holes are skipped
-			}
-			if vo, ok := v.(*Object); ok && vo.isArray && d > 0 {
-				out = append(out, flatten(vo.elems, d-1)...)
-			} else {
-				out = append(out, v)
+	a, err := i.arraySpeciesCreate(ctx, o, 0)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := i.flattenIntoArray(ctx, a, o, sourceLen, 0, depth); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// flattenIntoArray implements FlattenIntoArray (§23.1.3.11.1) for flat: it copies
+// present source elements into target starting at start, recursing one level
+// deeper (down to depth 0) for each element that IsArray. It returns the next
+// free target index.
+func (i *Interpreter) flattenIntoArray(ctx context.Context, target, source *Object, sourceLen, start, depth int) (int, error) {
+	const maxSafe = float64(1<<53 - 1)
+	targetIndex := start
+	for k := 0; k < sourceLen; k++ {
+		key := StrKey(strconv.Itoa(k))
+		present, err := i.hasV(ctx, source, key)
+		if err != nil {
+			return 0, err
+		}
+		if !present {
+			continue
+		}
+		element, err := i.getV(ctx, source, key, source)
+		if err != nil {
+			return 0, err
+		}
+		shouldFlatten := false
+		if depth > 0 {
+			shouldFlatten, err = i.isArrayV(ctx, element)
+			if err != nil {
+				return 0, err
 			}
 		}
-		return out
+		if shouldFlatten {
+			eo := element.(*Object)
+			elementLen, err := i.lengthOfArrayLike(ctx, eo)
+			if err != nil {
+				return 0, err
+			}
+			targetIndex, err = i.flattenIntoArray(ctx, target, eo, elementLen, targetIndex, depth-1)
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			if float64(targetIndex) >= maxSafe {
+				return 0, i.throwError(ctx, "TypeError", "Array length exceeds 2^53-1")
+			}
+			if err := i.createDataPropertyOrThrow(ctx, target, StrKey(strconv.Itoa(targetIndex)), element); err != nil {
+				return 0, err
+			}
+			targetIndex++
+		}
 	}
-	return i.newArray(flatten(o.elems, depth)), nil
+	return targetIndex, nil
 }
 
 // arrayKeys/Values/Entries return array iterators (keys, values, entries).
@@ -1185,8 +1307,13 @@ func (i *Interpreter) newArrayIterator(ctx context.Context, this Value, kind arr
 	}
 	if o.isArray && o.proxy == nil {
 		idx := 0
+		done := false
 		return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-			if idx >= len(o.elems) {
+			// Once the index reaches the length the iterator drops its target and
+			// stays done (§23.1.5.1), so elements appended afterward are not
+			// revisited even though the dense backing may have grown.
+			if done || idx >= len(o.elems) {
+				done = true
 				return Undef, false
 			}
 			cur := idx
