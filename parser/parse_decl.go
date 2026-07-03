@@ -163,10 +163,13 @@ func (p *parser) tryParseArrow() ast.Expr {
 	p.expect(token.ARROW)
 	if p.at(token.LBRACE) {
 		bodyUseStrict := p.scanUseStrict(p.idx + 1)
-		arrow.Body, _ = p.parseFunctionBody()
+		arrow.Body, arrow.Strict = p.parseFunctionBody()
 		p.checkStrictSimpleParams(start.Pos, bodyUseStrict, arrow.Params)
 	} else {
 		arrow.Expression = true
+		// A concise body carries no directive prologue, so its strictness is
+		// exactly the enclosing lexical context's.
+		arrow.Strict = p.strict
 		// A concise body is outside the parameter list.
 		prevParams := p.inParams
 		p.inParams = false

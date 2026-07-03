@@ -157,7 +157,7 @@ func (i *Interpreter) resolveIdent(ctx context.Context, name string, env *Enviro
 // evalArrow builds an arrow function, whose body may be a block or an
 // expression.
 func (i *Interpreter) evalArrow(ctx context.Context, e *ast.ArrowFunc, env *Environment, name string) *Object {
-	def := &ast.FuncDef{Params: e.Params, Async: e.Async}
+	def := &ast.FuncDef{Params: e.Params, Async: e.Async, Strict: e.Strict}
 	var body *ast.BlockStmt
 	if b, ok := e.Body.(*ast.BlockStmt); ok {
 		body = b

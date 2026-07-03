@@ -310,30 +310,7 @@ func (i *Interpreter) evalAssign(ctx context.Context, e *ast.AssignExpr, env *En
 		}
 	}
 
-	// Logical assignment operators short-circuit on the current value.
-	switch e.Op {
-	case token.AND_ASSIGN, token.OR_ASSIGN, token.NULLISH_ASSIGN:
-		cur, err := i.evalExpr(ctx, e.Target, env)
-		if err != nil {
-			return nil, err
-		}
-		short := (e.Op == token.AND_ASSIGN && !ToBoolean(cur)) ||
-			(e.Op == token.OR_ASSIGN && ToBoolean(cur)) ||
-			(e.Op == token.NULLISH_ASSIGN && !IsNullish(cur))
-		if short {
-			return cur, nil
-		}
-		val, err := i.evalExprNamed(ctx, e.Value, env, bindingName(e.Target))
-		if err != nil {
-			return nil, err
-		}
-		if err := i.assignTo(ctx, e.Target, val, env); err != nil {
-			return nil, err
-		}
-		return val, nil
-	}
-
-	// Plain and arithmetic compound assignment.
+	// Plain assignment keeps the existing target path.
 	if e.Op == token.ASSIGN {
 		val, err := i.evalExprNamed(ctx, e.Value, env, bindingName(e.Target))
 		if err != nil {
@@ -344,10 +321,41 @@ func (i *Interpreter) evalAssign(ctx context.Context, e *ast.AssignExpr, env *En
 		}
 		return val, nil
 	}
-	cur, err := i.evalExpr(ctx, e.Target, env)
+
+	// Compound and logical assignment must resolve the LeftHandSideExpression to
+	// a single Reference, read through it, then write back through that same
+	// reference — never re-resolving the target after the right-hand side runs
+	// (§13.15.2). Re-resolution would consult a binding the RHS introduced or a
+	// `with`-property it deleted.
+	ref, err := i.evalRef(ctx, e.Target, env)
 	if err != nil {
 		return nil, err
 	}
+	cur, err := i.getRefValue(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	// Logical assignment operators short-circuit on the current value.
+	switch e.Op {
+	case token.AND_ASSIGN, token.OR_ASSIGN, token.NULLISH_ASSIGN:
+		short := (e.Op == token.AND_ASSIGN && !ToBoolean(cur)) ||
+			(e.Op == token.OR_ASSIGN && ToBoolean(cur)) ||
+			(e.Op == token.NULLISH_ASSIGN && !IsNullish(cur))
+		if short {
+			return cur, nil
+		}
+		val, err := i.evalExprNamed(ctx, e.Value, env, bindingName(e.Target))
+		if err != nil {
+			return nil, err
+		}
+		if err := i.putRefValue(ctx, ref, val); err != nil {
+			return nil, err
+		}
+		return val, nil
+	}
+
+	// Arithmetic compound assignment.
 	rhs, err := i.evalExpr(ctx, e.Value, env)
 	if err != nil {
 		return nil, err
@@ -356,7 +364,7 @@ func (i *Interpreter) evalAssign(ctx context.Context, e *ast.AssignExpr, env *En
 	if err != nil {
 		return nil, err
 	}
-	if err := i.assignTo(ctx, e.Target, result, env); err != nil {
+	if err := i.putRefValue(ctx, ref, result); err != nil {
 		return nil, err
 	}
 	return result, nil
