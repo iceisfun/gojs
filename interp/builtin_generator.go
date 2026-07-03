@@ -97,7 +97,7 @@ func (i *Interpreter) startCoroutine(def *ast.FuncDef, closure *Environment, hom
 	// no aliasing to defer); a parameter named "arguments" shadows it, which
 	// bindParams applies by overwriting the binding below.
 	if !arrow {
-		env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+		env.vars["arguments"] = &binding{value: i.makeArguments(args, nil, env.strict || !simpleParameterList(def.Params)), mutable: true, initialized: true}
 	}
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
 		return nil, nil, err

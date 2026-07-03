@@ -239,7 +239,7 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		// A class constructor (like any ordinary function) has an `arguments`
 		// object. Class code is strict, so it is unmapped; a formal named
 		// "arguments" is a SyntaxError, so there is never a shadowing conflict.
-		env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+		env.vars["arguments"] = &binding{value: i.makeArguments(args, nil, true), mutable: true, initialized: true}
 
 		// With a superclass, `this` field/private init and body run after super()
 		// is called; a base class initializes everything up front.

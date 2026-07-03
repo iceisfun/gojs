@@ -182,9 +182,17 @@ func (i *Interpreter) initFunction() {
 	// and "arguments" as poison-pill accessors whose get and set both throw a
 	// TypeError. Ordinary, bound, and dynamic functions inherit these rather
 	// than owning them.
+	// The %ThrowTypeError% intrinsic (§10.2.4) is a single shared anonymous
+	// function defined once per realm. It is frozen: its "length" and "name"
+	// are non-writable/non-configurable and the object itself is non-extensible.
+	// The SAME object is the get AND set accessor for every poison pill.
 	thrower := i.newNativeFunc("", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
 		return nil, i.throwError(ctx, "TypeError", "'caller', 'callee', and 'arguments' properties may not be accessed on ordinary functions")
 	})
+	thrower.defineOwn(StrKey("length"), &Property{Value: Number(0), Writable: false, Enumerable: false, Configurable: false})
+	thrower.defineOwn(StrKey("name"), &Property{Value: String(""), Writable: false, Enumerable: false, Configurable: false})
+	thrower.extensible = false
+	i.throwTypeError = thrower
 	proto.defineOwn(StrKey("caller"), &Property{Get: thrower, Set: thrower, Accessor: true, Enumerable: false, Configurable: true})
 	proto.defineOwn(StrKey("arguments"), &Property{Get: thrower, Set: thrower, Accessor: true, Enumerable: false, Configurable: true})
 

@@ -195,6 +195,13 @@ type intrinsics struct {
 	// sloppy plain functions: it always returns null (never a strict function).
 	legacyNullGetter *Object
 
+	// throwTypeError is the shared %ThrowTypeError% intrinsic (§10.2.4): a single
+	// anonymous, frozen, non-constructor function that unconditionally throws a
+	// TypeError. It backs the poison-pill get AND set accessors for "caller"/
+	// "arguments" on %Function.prototype% and the "callee" accessor on unmapped
+	// (strict) arguments objects.
+	throwTypeError *Object
+
 	objectCtor      *Object
 	functionCtor    *Object
 	arrayCtor       *Object

@@ -121,7 +121,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// parameter (or lexical binding) literally named "arguments" shadows it,
 		// so bindParams below overwrites the binding when such a name exists.
 		if kind == kindNormal {
-			env.vars["arguments"] = &binding{value: i.makeArguments(args), mutable: true, initialized: true}
+			env.vars["arguments"] = &binding{value: i.makeArguments(args, fnObj, strict || !simpleParameterList(def.Params)), mutable: true, initialized: true}
 		}
 		if err := i.bindParams(ctx, def.Params, args, env); err != nil {
 			return nil, err
@@ -365,7 +365,16 @@ func collectParamNames(params []ast.Expr) []string {
 // and the corresponding named parameter (writes to one do not appear in the
 // other). See wontfix/function-code.md for the rationale and plan. Unmapped
 // behavior — where no such aliasing exists — is therefore exact.
-func (i *Interpreter) makeArguments(args []Value) *Object {
+//
+// The "callee" property distinguishes unmapped from mapped arguments objects
+// (§10.4.4.6/§10.4.4.7). An unmapped object — created whenever the function is
+// strict OR its parameter list is not simple — exposes "callee" as a poison-pill
+// accessor whose get and set are both %ThrowTypeError%; a mapped object exposes
+// it as a plain data property referring to the enclosing function. gojs treats
+// every arguments object as unmapped for element aliasing, but still models
+// "callee" per the unmapped flag so accessing it on a strict/non-simple function
+// yields %ThrowTypeError% (the canonical way test262 reaches that intrinsic).
+func (i *Interpreter) makeArguments(args []Value, callee Value, unmapped bool) *Object {
 	o := NewObject(i.objectProto)
 	o.class = "Arguments"
 	for idx, v := range args {
@@ -375,7 +384,27 @@ func (i *Interpreter) makeArguments(args []Value) *Object {
 	if it, ok := i.arrayProto.getOwn(StrKey("values")); ok {
 		o.defineOwn(SymKey(i.symIterator), &Property{Value: it.Value, Writable: true, Enumerable: false, Configurable: true})
 	}
+	if unmapped {
+		if tt := i.throwTypeError; tt != nil {
+			o.defineOwn(StrKey("callee"), &Property{Get: tt, Set: tt, Accessor: true, Enumerable: false, Configurable: false})
+		}
+	} else if callee != nil {
+		o.defineOwn(StrKey("callee"), &Property{Value: callee, Writable: true, Enumerable: false, Configurable: true})
+	}
 	return o
+}
+
+// simpleParameterList reports whether every formal is a plain BindingIdentifier
+// (no defaults, rest elements, or destructuring patterns). A non-simple list
+// forces an unmapped arguments object even in sloppy mode (§10.2.11 /
+// FunctionDeclarationInstantiation, "Let hasParameterExpressions ...").
+func simpleParameterList(params []ast.Expr) bool {
+	for _, p := range params {
+		if _, ok := p.(*ast.Ident); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // runFunctionBody hoists declarations in the body and executes it, translating a
