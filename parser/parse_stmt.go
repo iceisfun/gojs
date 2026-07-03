@@ -289,6 +289,10 @@ func (p *parser) parseFunctionBody() (*ast.BlockStmt, bool) {
 	}
 	strict := p.strict
 	blk := p.parseBraceBody()
+	// A function body uses top-level semantics (FunctionDeclarations are
+	// var-scoped), so its lexical/var conflicts are the top-level early errors,
+	// not the Block ones.
+	p.checkTopLevelEarlyErrors(blk.Body)
 	p.strict = prevStrict
 	p.inParams = prevParams
 	p.inFuncBody--

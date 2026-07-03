@@ -486,8 +486,9 @@ func (p *parser) parsePrimary() ast.Expr {
 		// A SuperCall (super(...)) is permitted only in a derived class
 		// constructor; a SuperProperty (super.x / super[x]) only where a
 		// [[HomeObject]] is in scope — a method, accessor, constructor, or field
-		// initializer (ECMA-262 13.3.7.1). Ordinary parsing leaves both permitted
-		// (runtime enforces); indirect/global eval forbids them.
+		// initializer (ECMA-262 13.3.7.1). Global script/module top level forbids
+		// both; a regular function or method re-enables SuperProperty as
+		// appropriate; indirect/global eval seeds the context via ParseEval.
 		switch {
 		case p.at(token.LPAREN) && !p.superCallOK:
 			p.errorAt(tk.Pos, "super() is only valid in a derived class constructor")
@@ -567,8 +568,16 @@ func (p *parser) parsePrimary() ast.Expr {
 	default:
 		// Contextual keywords (let, of, get, set, yield, await, static) used as
 		// plain identifiers. yield/await used here as an identifier reference are
-		// still reserved in a generator/async or strict context.
+		// still reserved in a generator/async or strict context. A genuine
+		// ReservedWord (case, catch, default, else, finally, in, instanceof, …)
+		// may never be an IdentifierReference (ECMA-262 §13.1.1, Identifier :
+		// IdentifierName but not ReservedWord), so it is an early SyntaxError here.
 		if tk.Type.IsKeyword() {
+			if !isContextualKeyword(tk.Type) {
+				p.errorf("unexpected token %s", tk.Type)
+				p.next()
+				return &ast.Ident{NamePos: tk.Pos}
+			}
 			p.next()
 			name := identText(tk)
 			p.checkReservedIdentifier(name, tk.Pos)

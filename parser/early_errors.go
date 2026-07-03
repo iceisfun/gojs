@@ -119,6 +119,95 @@ func (p *parser) checkBlockEarlyErrors(body []ast.Stmt) {
 	}
 }
 
+// checkTopLevelEarlyErrors enforces the LexicallyDeclaredNames static-semantics
+// early errors for a StatementList that uses top-level semantics: a Script's
+// top level (ECMA-262 §16.1.1) or a function/arrow/method body (§15.2.1 and the
+// FunctionBody productions). Unlike a Block, at this level a
+// FunctionDeclaration contributes a var-declared name rather than a lexical one,
+// so the Annex B relaxation for duplicate FunctionDeclarations does not apply
+// here. The two early errors are: the LexicallyDeclaredNames must contain no
+// duplicates, and must not intersect the VarDeclaredNames.
+func (p *parser) checkTopLevelEarlyErrors(body []ast.Stmt) {
+	if p.err != nil {
+		return
+	}
+
+	// TopLevelLexicallyDeclaredNames: names bound by a `let`/`const` or a class
+	// declaration appearing directly in this StatementList. A top-level
+	// FunctionDeclaration is deliberately excluded (it is var-scoped).
+	type lexInfo struct {
+		pos   token.Pos
+		count int
+	}
+	lex := map[string]*lexInfo{}
+	addLex := func(name string, pos token.Pos) {
+		li := lex[name]
+		if li == nil {
+			li = &lexInfo{pos: pos}
+			lex[name] = li
+		}
+		li.count++
+	}
+	for _, s := range body {
+		switch st := s.(type) {
+		case *ast.VarDecl:
+			if st.Kind == token.LET || st.Kind == token.CONST {
+				for _, d := range st.Decls {
+					forEachBindingName(d.Target, func(n string, pos token.Pos) {
+						addLex(n, pos)
+					})
+				}
+			}
+		case *ast.ClassDecl:
+			if st.Def.Name != nil {
+				addLex(st.Def.Name.Name, st.Def.Name.NamePos)
+			}
+		}
+	}
+
+	// Duplicate lexically declared names are always an error at this level.
+	for name, li := range lex {
+		if li.count > 1 {
+			p.errorAt(li.pos, "Identifier '%s' has already been declared", name)
+			return
+		}
+	}
+
+	// A lexically declared name may not also be a VarDeclaredName. The var names
+	// comprise the hoisted `var` declarations of the whole StatementList plus the
+	// names of the (var-scoped) top-level FunctionDeclarations.
+	varNames := map[string]bool{}
+	collectBlockVarNames(body, varNames)
+	collectTopLevelFuncNames(body, varNames)
+	for name, li := range lex {
+		if varNames[name] {
+			p.errorAt(li.pos, "Identifier '%s' has already been declared", name)
+			return
+		}
+	}
+}
+
+// collectTopLevelFuncNames records the names of the FunctionDeclarations that
+// appear directly in a top-level StatementList — including through a chain of
+// labels (`l: function f(){}`), whose TopLevelVarDeclaredNames also contribute a
+// var name — but not those nested inside blocks or other statements, which have
+// their own (block-level) scope.
+func collectTopLevelFuncNames(body []ast.Stmt, into map[string]bool) {
+	for _, s := range body {
+		st := s
+		for {
+			if lbl, ok := st.(*ast.LabeledStmt); ok {
+				st = lbl.Body
+				continue
+			}
+			break
+		}
+		if fd, ok := st.(*ast.FuncDecl); ok && fd.Def.Name != nil {
+			into[fd.Def.Name.Name] = true
+		}
+	}
+}
+
 // forEachBindingName invokes fn for each identifier bound by a binding target
 // (a plain identifier or a destructuring pattern), along with its position.
 func forEachBindingName(target ast.Expr, fn func(string, token.Pos)) {

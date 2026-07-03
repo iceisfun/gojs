@@ -263,9 +263,14 @@ func newParser(sourceName, source string) (*parser, error) {
 	if err := lex.Err(); err != nil {
 		return nil, err
 	}
-	// super.property and new.target default to permitted; only eval restricts
-	// them (see ParseEval).
-	return &parser{source: sourceName, toks: toks, superPropOK: true, newTargetOK: true}, nil
+	// Global script (and module) top-level code may not contain new.target or a
+	// SuperProperty (ECMA-262 §16.1.1 Script static semantics; a StatementList
+	// Contains NewTarget / super is a Syntax Error), so both default to
+	// forbidden. Entering a regular function or method re-enables them (see
+	// parseFunctionDecl / parseMethod); an arrow function inherits the enclosing
+	// setting, so a global arrow keeps them forbidden. Direct eval seeds the
+	// caller's context via ParseEval.
+	return &parser{source: sourceName, toks: toks}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +407,10 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 		prog.Body = append(prog.Body, stmt)
 	}
 	prog.EndPos = p.cur().Pos
+	// A Script's (or Module's) top level uses top-level semantics: its
+	// LexicallyDeclaredNames must not duplicate one another nor a VarDeclaredName
+	// (ECMA-262 §16.1.1). This is a parse-time early error, not a runtime one.
+	p.checkTopLevelEarlyErrors(prog.Body)
 	// Any ObjectLiteral early error (CoverInitializedName / duplicate __proto__)
 	// that was not cleared by refinement into a destructuring pattern is a real
 	// SyntaxError.
