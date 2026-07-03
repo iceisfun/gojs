@@ -268,7 +268,18 @@ func (i *Interpreter) initStringRegex() {
 func (i *Interpreter) getMethod(ctx context.Context, v Value, sym *Symbol) (*Object, error) {
 	o, ok := v.(*Object)
 	if !ok {
-		return nil, nil
+		// GetMethod is defined via GetV (§7.3.11), which boxes primitives with
+		// ToObject.  This lets well-known-symbol methods (e.g. a string's
+		// @@iterator) be found on the primitive's prototype.  Nullish values
+		// have no wrapper and thus no method.
+		if IsNullish(v) {
+			return nil, nil
+		}
+		boxed, err := i.ToObject(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		o = boxed
 	}
 	fn, err := o.Get(ctx, SymKey(sym))
 	if err != nil {

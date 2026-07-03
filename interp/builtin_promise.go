@@ -181,12 +181,22 @@ func (i *Interpreter) initPromise() {
 	callFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return nil, i.throwError(ctx, "TypeError", "Promise constructor must be called with new")
 	}
-	constructFn := func(ctx context.Context, _ Value, args []Value) (Value, error) {
+	constructFn := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
 		executor := arg(args, 0)
 		if fn, ok := executor.(*Object); !ok || !fn.IsCallable() {
 			return nil, i.throwError(ctx, "TypeError", "Promise resolver must be a function")
 		}
+		// OrdinaryCreateFromConstructor: derive the prototype from new.target
+		// (§27.2.3.1 step 3).  A throwing "prototype" getter must propagate
+		// before the executor runs.
+		proto, err := i.protoFromNewTarget(ctx, newTarget, i.promiseProto)
+		if err != nil {
+			return nil, err
+		}
 		pObj, resolve, reject := i.newPromise()
+		if proto != i.promiseProto {
+			pObj.SetProto(proto)
+		}
 		// The resolving functions are anonymous built-ins (name "") per
 		// CreateResolvingFunctions (§27.2.1.3).
 		resolveFn := i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
@@ -197,7 +207,7 @@ func (i *Interpreter) initPromise() {
 			reject(arg(args, 0))
 			return Undef, nil
 		})
-		_, err := i.call(ctx, executor, Undef, []Value{resolveFn, rejectFn})
+		_, err = i.call(ctx, executor, Undef, []Value{resolveFn, rejectFn})
 		if err != nil {
 			// If the executor threw, reject the promise with the thrown value.
 			if tv, ok := ThrownValue(err); ok {
@@ -443,12 +453,14 @@ func (i *Interpreter) newPromise() (pObj *Object, resolve func(Value), reject fu
 					capturedObj := obj
 					i.loop.pushMicro(func() error {
 						// Fresh resolving functions for the same promise, per spec.
+						// These are anonymous built-ins (name "") per
+						// CreateResolvingFunctions (§27.2.1.3).
 						innerRes, innerRej := makeResolvers()
-						innerResFn := i.newNativeFunc("resolve", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
+						innerResFn := i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
 							innerRes(arg(args, 0))
 							return Undef, nil
 						})
-						innerRejFn := i.newNativeFunc("reject", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
+						innerRejFn := i.newNativeFunc("", 1, func(_ context.Context, _ Value, args []Value) (Value, error) {
 							innerRej(arg(args, 0))
 							return Undef, nil
 						})
