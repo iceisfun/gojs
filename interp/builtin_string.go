@@ -2,8 +2,54 @@ package interp
 
 import (
 	"context"
+	"math"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
+
+// argInteger returns ToIntegerOrInfinity(args[n]) as a float64 (which may be
+// ±Inf), or def when the argument is absent or undefined. Unlike argIntOr it
+// propagates coercion errors (e.g. a throwing valueOf, or a Symbol/BigInt
+// operand) rather than swallowing them, as the spec requires for the position
+// arguments of String.prototype methods.
+func (i *Interpreter) argInteger(ctx context.Context, args []Value, n int, def float64) (float64, error) {
+	v := arg(args, n)
+	if IsUndefined(v) {
+		return def, nil
+	}
+	f, err := i.ToNumberV(ctx, v)
+	if err != nil {
+		return 0, err
+	}
+	return ToInteger(f), nil
+}
+
+// clampIndexF clamps a (possibly infinite) integer position into [0, n].
+func clampIndexF(x float64, n int) int {
+	if x <= 0 {
+		return 0
+	}
+	if x >= float64(n) {
+		return n
+	}
+	return int(x)
+}
+
+// relIndexF resolves a (possibly infinite) relative index (negative counts from
+// the end) into an absolute index clamped to [0, n]; used by slice.
+func relIndexF(x float64, n int) int {
+	if x < 0 {
+		x += float64(n)
+		if x < 0 {
+			return 0
+		}
+	}
+	if x >= float64(n) {
+		return n
+	}
+	return int(x)
+}
 
 // isECMAWhiteSpace reports whether r is in the union of the ECMAScript
 // WhiteSpace and LineTerminator code point sets (used by String.prototype
@@ -61,42 +107,69 @@ func (i *Interpreter) initString() {
 		})
 	}
 
-	m("toString", 0, func(ctx context.Context, s string, args []Value) (Value, error) { return String(s), nil })
-	m("valueOf", 0, func(ctx context.Context, s string, args []Value) (Value, error) { return String(s), nil })
+	// toString and valueOf are non-generic: thisStringValue accepts only a
+	// String primitive or a String wrapper object, otherwise a TypeError.
+	i.defineMethod(proto, "toString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		s, err := i.thisStringValue(ctx, this)
+		if err != nil {
+			return nil, err
+		}
+		return String(s), nil
+	})
+	i.defineMethod(proto, "valueOf", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		s, err := i.thisStringValue(ctx, this)
+		if err != nil {
+			return nil, err
+		}
+		return String(s), nil
+	})
 	m("charAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
-		idx, _ := i.argInt(ctx, args, 0)
-		if idx < 0 || idx >= len(rs) {
+		idx, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		if idx < 0 || idx >= float64(len(rs)) {
 			return String(""), nil
 		}
-		return String(string(rs[idx])), nil
+		return String(string(rs[int(idx)])), nil
 	})
 	m("charCodeAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
-		idx, _ := i.argInt(ctx, args, 0)
-		if idx < 0 || idx >= len(rs) {
+		idx, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		if idx < 0 || idx >= float64(len(rs)) {
 			return Number(nan()), nil
 		}
-		return Number(float64(rs[idx])), nil
+		return Number(float64(rs[int(idx)])), nil
 	})
 	m("codePointAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
-		idx, _ := i.argInt(ctx, args, 0)
-		if idx < 0 || idx >= len(rs) {
+		idx, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		if idx < 0 || idx >= float64(len(rs)) {
 			return Undef, nil
 		}
-		return Number(float64(rs[idx])), nil
+		return Number(float64(rs[int(idx)])), nil
 	})
 	m("at", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
-		idx, _ := i.argInt(ctx, args, 0)
-		if idx < 0 {
-			idx += len(rs)
+		n := len(rs)
+		idx, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
 		}
-		if idx < 0 || idx >= len(rs) {
+		if idx < 0 {
+			idx += float64(n)
+		}
+		if idx < 0 || idx >= float64(n) {
 			return Undef, nil
 		}
-		return String(string(rs[idx])), nil
+		return String(string(rs[int(idx)])), nil
 	})
 	// Search methods operate over runes (gojs indexes strings by code point) and
 	// honor their position/endPosition arguments.
@@ -105,8 +178,12 @@ func (i *Interpreter) initString() {
 		if err != nil {
 			return nil, err
 		}
+		pos, err := i.argInteger(ctx, args, 1, 0)
+		if err != nil {
+			return nil, err
+		}
 		rs, rsub := []rune(s), []rune(sub)
-		from := clampRange(argIntOr(ctx, i, args, 1, 0), len(rs))
+		from := clampIndexF(pos, len(rs))
 		return Number(float64(runeIndex(rs, rsub, from))), nil
 	})
 	m("lastIndexOf", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
@@ -114,13 +191,22 @@ func (i *Interpreter) initString() {
 		if err != nil {
 			return nil, err
 		}
-		rs, rsub := []rune(s), []rune(sub)
-		last := -1
-		limit := len(rs)
-		if !IsUndefined(arg(args, 1)) {
-			limit = clampRange(argIntOr(ctx, i, args, 1, len(rs)), len(rs)) + len(rsub)
+		// A NaN position means "search the whole string" (+Infinity), per
+		// §22.1.3.9 step 5; other values use ToIntegerOrInfinity.
+		pos := math.Inf(1)
+		if v := arg(args, 1); !IsUndefined(v) {
+			num, err := i.ToNumberV(ctx, v)
+			if err != nil {
+				return nil, err
+			}
+			if !math.IsNaN(num) {
+				pos = ToInteger(num)
+			}
 		}
-		for k := 0; k+len(rsub) <= len(rs) && k+len(rsub) <= limit; k++ {
+		rs, rsub := []rune(s), []rune(sub)
+		start := clampIndexF(pos, len(rs))
+		last := -1
+		for k := 0; k+len(rsub) <= len(rs) && k <= start; k++ {
 			if runeHasAt(rs, rsub, k) {
 				last = k
 			}
@@ -128,24 +214,40 @@ func (i *Interpreter) initString() {
 		return Number(float64(last)), nil
 	})
 	m("includes", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+		if err := i.rejectRegExpArg(ctx, args, "includes"); err != nil {
+			return nil, err
+		}
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
+		pos, err := i.argInteger(ctx, args, 1, 0)
+		if err != nil {
+			return nil, err
+		}
 		rs, rsub := []rune(s), []rune(sub)
-		from := clampRange(argIntOr(ctx, i, args, 1, 0), len(rs))
+		from := clampIndexF(pos, len(rs))
 		return Bool(runeIndex(rs, rsub, from) >= 0), nil
 	})
 	m("startsWith", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+		if err := i.rejectRegExpArg(ctx, args, "startsWith"); err != nil {
+			return nil, err
+		}
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
 		}
+		pos, err := i.argInteger(ctx, args, 1, 0)
+		if err != nil {
+			return nil, err
+		}
 		rs, rsub := []rune(s), []rune(sub)
-		pos := clampRange(argIntOr(ctx, i, args, 1, 0), len(rs))
-		return Bool(runeHasAt(rs, rsub, pos)), nil
+		return Bool(runeHasAt(rs, rsub, clampIndexF(pos, len(rs)))), nil
 	})
 	m("endsWith", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+		if err := i.rejectRegExpArg(ctx, args, "endsWith"); err != nil {
+			return nil, err
+		}
 		sub, err := i.argStr(ctx, args, 0)
 		if err != nil {
 			return nil, err
@@ -153,7 +255,11 @@ func (i *Interpreter) initString() {
 		rs, rsub := []rune(s), []rune(sub)
 		end := len(rs)
 		if !IsUndefined(arg(args, 1)) {
-			end = clampRange(argIntOr(ctx, i, args, 1, len(rs)), len(rs))
+			pos, err := i.argInteger(ctx, args, 1, float64(len(rs)))
+			if err != nil {
+				return nil, err
+			}
+			end = clampIndexF(pos, len(rs))
 		}
 		start := end - len(rsub)
 		return Bool(start >= 0 && runeHasAt(rs, rsub, start)), nil
@@ -161,10 +267,18 @@ func (i *Interpreter) initString() {
 	m("slice", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
 		n := len(rs)
-		start := relIndex(argIntOr(ctx, i, args, 0, 0), n)
+		startF, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		start := relIndexF(startF, n)
 		end := n
 		if !IsUndefined(arg(args, 1)) {
-			end = relIndex(argIntOr(ctx, i, args, 1, n), n)
+			endF, err := i.argInteger(ctx, args, 1, float64(n))
+			if err != nil {
+				return nil, err
+			}
+			end = relIndexF(endF, n)
 		}
 		if start > end {
 			return String(""), nil
@@ -174,10 +288,18 @@ func (i *Interpreter) initString() {
 	m("substring", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
 		n := len(rs)
-		a := clampRange(argIntOr(ctx, i, args, 0, 0), n)
+		aF, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		a := clampIndexF(aF, n)
 		b := n
 		if !IsUndefined(arg(args, 1)) {
-			b = clampRange(argIntOr(ctx, i, args, 1, n), n)
+			bF, err := i.argInteger(ctx, args, 1, float64(n))
+			if err != nil {
+				return nil, err
+			}
+			b = clampIndexF(bF, n)
 		}
 		if a > b {
 			a, b = b, a
@@ -187,18 +309,25 @@ func (i *Interpreter) initString() {
 	m("substr", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		rs := []rune(s)
 		n := len(rs)
-		start := argIntOr(ctx, i, args, 0, 0)
-		if start < 0 {
-			start = max(n+start, 0)
+		startF, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
 		}
-		length := n - start
+		start := clampIndexF(startF, n)
+		if startF < 0 {
+			start = clampIndexF(float64(n)+startF, n)
+		}
+		lengthF := float64(n - start)
 		if !IsUndefined(arg(args, 1)) {
-			length = argIntOr(ctx, i, args, 1, 0)
+			lengthF, err = i.argInteger(ctx, args, 1, 0)
+			if err != nil {
+				return nil, err
+			}
 		}
-		if start >= n || length <= 0 {
+		if start >= n || lengthF <= 0 {
 			return String(""), nil
 		}
-		end := min(start+length, n)
+		end := start + clampIndexF(lengthF, n-start)
 		return String(string(rs[start:end])), nil
 	})
 	m("toUpperCase", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
@@ -244,18 +373,48 @@ func (i *Interpreter) initString() {
 		}
 		return Number(0), nil
 	})
-	m("padStart", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(pad(s, argIntOr(ctx, i, args, 0, 0), padStr(ctx, i, args), true)), nil
+	m("normalize", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
+		// §22.1.3.13: default form is "NFC"; any other value is coerced with
+		// ToString and must name one of the four Unicode normalization forms,
+		// otherwise a RangeError.
+		form := "NFC"
+		if v := arg(args, 0); !IsUndefined(v) {
+			var err error
+			form, err = i.ToStringV(ctx, v)
+			if err != nil {
+				return nil, err
+			}
+		}
+		var f norm.Form
+		switch form {
+		case "NFC":
+			f = norm.NFC
+		case "NFD":
+			f = norm.NFD
+		case "NFKC":
+			f = norm.NFKC
+		case "NFKD":
+			f = norm.NFKD
+		default:
+			return nil, i.throwError(ctx, "RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD.")
+		}
+		return String(f.String(s)), nil
 	})
-	m("padEnd", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
-		return String(pad(s, argIntOr(ctx, i, args, 0, 0), padStr(ctx, i, args), false)), nil
+	m("padStart", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+		return i.stringPad(ctx, s, args, true)
+	})
+	m("padEnd", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+		return i.stringPad(ctx, s, args, false)
 	})
 	m("repeat", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		count, _ := i.argInt(ctx, args, 0)
-		if count < 0 {
+		count, err := i.argInteger(ctx, args, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		if count < 0 || math.IsInf(count, 1) {
 			return nil, i.throwError(ctx, "RangeError", "Invalid count value")
 		}
-		return String(strings.Repeat(s, count)), nil
+		return String(strings.Repeat(s, int(count))), nil
 	})
 	m("concat", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		var b strings.Builder
@@ -270,33 +429,7 @@ func (i *Interpreter) initString() {
 		return String(b.String()), nil
 	})
 	m("split", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
-		if IsUndefined(arg(args, 0)) {
-			return i.newArray([]Value{String(s)}), nil
-		}
-		sep, err := i.argStr(ctx, args, 0)
-		if err != nil {
-			return nil, err
-		}
-		var parts []string
-		if sep == "" {
-			for _, r := range s {
-				parts = append(parts, string(r))
-			}
-		} else {
-			parts = strings.Split(s, sep)
-		}
-		limit := -1
-		if !IsUndefined(arg(args, 1)) {
-			limit, _ = i.argInt(ctx, args, 1)
-		}
-		out := make([]Value, 0, len(parts))
-		for idx, p := range parts {
-			if limit >= 0 && idx >= limit {
-				break
-			}
-			out = append(out, String(p))
-		}
-		return i.newArray(out), nil
+		return i.stringSplitString(ctx, s, args)
 	})
 	m("replace", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return i.stringReplace(ctx, s, args, false)
@@ -431,17 +564,24 @@ func (i *Interpreter) stringReplace(ctx context.Context, s string, args []Value,
 	}
 	repl := arg(args, 1)
 	replFn, isFn := repl.(*Object)
+	isFn = isFn && replFn.IsCallable()
+	// A non-callable replacement is coerced to a String exactly once (§22.1.3.19
+	// step 5 / GetSubstitution), not per match.
+	var rs string
+	if !isFn {
+		var err error
+		rs, err = i.ToStringV(ctx, repl)
+		if err != nil {
+			return nil, err
+		}
+	}
 	doReplace := func(match string, idx int) (string, error) {
-		if isFn && replFn.IsCallable() {
+		if isFn {
 			r, err := replFn.fn.call(ctx, Undef, []Value{String(match), Number(float64(idx)), String(s)})
 			if err != nil {
 				return "", err
 			}
 			return i.ToStringV(ctx, r)
-		}
-		rs, err := i.ToStringV(ctx, repl)
-		if err != nil {
-			return "", err
 		}
 		// Expand the $ patterns for a string pattern: $$ -> $, $& -> match,
 		// $` -> portion before the match, $' -> portion after the match.
@@ -555,45 +695,65 @@ func runeIndex(rs, sub []rune, from int) int {
 	return -1
 }
 
-// clampRange clamps x into [0, n] (for substring).
-func clampRange(x, n int) int {
-	if x < 0 {
-		return 0
+// thisStringValue implements the abstraction of the same name (§22.1.3.3): it
+// accepts only a String primitive or a String wrapper object, otherwise it
+// throws a TypeError. Used by the non-generic toString/valueOf methods.
+func (i *Interpreter) thisStringValue(ctx context.Context, this Value) (string, error) {
+	switch x := this.(type) {
+	case String:
+		return string(x), nil
+	case *Object:
+		if s, ok := x.primitive.(String); ok {
+			return string(s), nil
+		}
 	}
-	if x > n {
-		return n
-	}
-	return x
+	return "", i.throwError(ctx, "TypeError", "String.prototype method requires that 'this' be a String")
 }
 
-// pad implements padStart/padEnd.
-func pad(s string, targetLen int, padding string, start bool) string {
-	cur := len([]rune(s))
-	if cur >= targetLen || padding == "" {
-		return s
+// rejectRegExpArg throws a TypeError when the search argument of includes /
+// startsWith / endsWith is a RegExp (per IsRegExp, §22.1.3.7/20/22).
+func (i *Interpreter) rejectRegExpArg(ctx context.Context, args []Value, method string) error {
+	isRe, err := i.isRegExpValue(ctx, arg(args, 0))
+	if err != nil {
+		return err
 	}
-	need := targetLen - cur
-	pr := []rune(padding)
+	if isRe {
+		return i.throwError(ctx, "TypeError", "First argument to String.prototype."+method+" must not be a regular expression")
+	}
+	return nil
+}
+
+// stringPad implements the StringPad abstraction (§22.1.3.16.1) for padStart /
+// padEnd: maxLength is coerced before the fill string, and the fill is repeated
+// over whole code points (never split mid-character).
+func (i *Interpreter) stringPad(ctx context.Context, s string, args []Value, start bool) (Value, error) {
+	maxF, err := i.argInteger(ctx, args, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	stringLength := len([]rune(s))
+	if maxF <= float64(stringLength) {
+		return String(s), nil
+	}
+	filler := " "
+	if v := arg(args, 1); !IsUndefined(v) {
+		filler, err = i.ToStringV(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if filler == "" {
+		return String(s), nil
+	}
+	need := int(maxF) - stringLength
+	fillRunes := []rune(filler)
 	var b strings.Builder
-	for b.Len() < need*4 && len([]rune(b.String())) < need {
-		b.WriteString(padding)
-		_ = pr
+	for j := 0; j < need; j++ {
+		b.WriteRune(fillRunes[j%len(fillRunes)])
 	}
-	padRunes := []rune(b.String())
-	if len(padRunes) > need {
-		padRunes = padRunes[:need]
-	}
+	padding := b.String()
 	if start {
-		return string(padRunes) + s
+		return String(padding + s), nil
 	}
-	return s + string(padRunes)
-}
-
-// padStr reads the optional pad-string argument (default a single space).
-func padStr(ctx context.Context, i *Interpreter, args []Value) string {
-	if IsUndefined(arg(args, 1)) {
-		return " "
-	}
-	s, _ := i.ToStringV(ctx, arg(args, 1))
-	return s
+	return String(s + padding), nil
 }

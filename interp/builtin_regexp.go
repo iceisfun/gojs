@@ -250,11 +250,9 @@ func (i *Interpreter) initStringRegex() {
 			if m, err := i.getMethod(ctx, separator, i.symSplit); err != nil {
 				return nil, err
 			} else if m != nil {
-				s, err := i.ToStringV(ctx, this)
-				if err != nil {
-					return nil, err
-				}
-				return i.call(ctx, m, separator, []Value{String(s), arg(args, 1)})
+				// §22.1.3.21 step 2: the @@split method receives the original
+				// receiver (ToString is not called on it here).
+				return i.call(ctx, m, separator, []Value{this, arg(args, 1)})
 			}
 		}
 		s, err := i.ToStringV(ctx, this)
@@ -518,12 +516,28 @@ func orderedGroupNames(names map[string]int) []string {
 
 // stringSplitString implements String.prototype.split with a string separator.
 func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Value) (Value, error) {
+	// §22.1.3.21: ToUint32(limit) (step 4) is evaluated before ToString of the
+	// separator (step 5), and a lim of 0 yields an empty array (step 6).
+	var lim int64 = 1<<32 - 1
+	if v := arg(args, 1); !IsUndefined(v) {
+		f, err := i.ToNumberV(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		lim = int64(ToUint32(f))
+	}
 	if IsUndefined(arg(args, 0)) {
+		if lim == 0 {
+			return i.newArray([]Value{}), nil
+		}
 		return i.newArray([]Value{String(s)}), nil
 	}
 	sep, err := i.argStr(ctx, args, 0)
 	if err != nil {
 		return nil, err
+	}
+	if lim == 0 {
+		return i.newArray([]Value{}), nil
 	}
 	var parts []string
 	if sep == "" {
@@ -533,13 +547,9 @@ func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Va
 	} else {
 		parts = strings.Split(s, sep)
 	}
-	limit := -1
-	if !IsUndefined(arg(args, 1)) {
-		limit, _ = i.argInt(ctx, args, 1)
-	}
 	out := make([]Value, 0, len(parts))
-	for idx, p := range parts {
-		if limit >= 0 && idx >= limit {
+	for _, p := range parts {
+		if int64(len(out)) >= lim {
 			break
 		}
 		out = append(out, String(p))
