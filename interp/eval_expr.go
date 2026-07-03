@@ -439,11 +439,23 @@ func (i *Interpreter) evalPropKey(ctx context.Context, prop *ast.Property, env *
 		return StrKey(k.Value), nil
 	case *ast.NumberLit:
 		return StrKey(NumberToString(k.Value)), nil
+	case *ast.BigIntLit:
+		return StrKey(bigIntLitKeyString(k.Digits)), nil
 	case *ast.PrivateIdent:
 		return StrKey(k.Name), nil
 	default:
 		return PropertyKey{}, i.throwError(ctx, "SyntaxError", "invalid property key")
 	}
+}
+
+// bigIntLitKeyString returns the property-key string named by a BigInt literal:
+// the BigInt value's canonical decimal representation (e.g. `0x10n` names "16").
+func bigIntLitKeyString(digits string) string {
+	n := new(big.Int)
+	if _, ok := n.SetString(digits, 0); !ok {
+		n.SetString(digits, 10)
+	}
+	return n.String()
 }
 
 // evalBigIntLit parses a BigInt literal.

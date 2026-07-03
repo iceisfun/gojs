@@ -89,9 +89,12 @@ func (p *parser) parseAssignExpr() ast.Expr {
 		return arrow
 	}
 
-	// yield expression (only meaningful inside a generator, but we parse it
-	// wherever `yield` appears as a leading keyword).
-	if p.at(token.YIELD) {
+	// `yield` begins a YieldExpression only where it is reserved: inside a
+	// generator (the [+Yield] grammar parameter), or in strict-mode code (where it
+	// is never a valid identifier and parseYield reports the error). In sloppy
+	// non-generator code `yield` is an ordinary IdentifierReference, so fall
+	// through to the normal expression path, which yields an Ident.
+	if p.at(token.YIELD) && (p.inGenerator || p.strict) {
 		return p.parseYield()
 	}
 
@@ -131,9 +134,14 @@ func (p *parser) parseYield() ast.Expr {
 		p.next()
 		y.Delegate = true
 	}
-	// A yield with no argument is legal; an argument follows only if one could
-	// begin on the same line and the next token can start an expression.
-	if !p.cur().NewlineBefore && canStartExpr(p.cur().Type) {
+	if y.Delegate {
+		// `yield * AssignmentExpression`: the operand is mandatory, and unlike the
+		// plain `yield` form it is not subject to a [no LineTerminator here]
+		// restriction — it may appear on the following line.
+		y.Argument = p.parseAssignExpr()
+	} else if !p.cur().NewlineBefore && canStartExpr(p.cur().Type) {
+		// A plain `yield` with no argument is legal; an argument follows only if one
+		// could begin on the same line and the next token can start an expression.
 		y.Argument = p.parseAssignExpr()
 	}
 	return y
@@ -208,11 +216,11 @@ func (p *parser) parseUnary() ast.Expr {
 		p.checkSimpleAssignmentTarget(operand)
 		return &ast.UpdateExpr{OpPos: op.Pos, Op: op.Type, Operand: operand, Prefix: true}
 	case token.AWAIT:
-		// `await` is reserved inside a class static initialization block: it is
-		// neither a valid AwaitExpression (a static block is not async) nor a
+		// `await` is reserved directly inside a class static initialization block:
+		// it is neither a valid AwaitExpression (a static block is not async) nor a
 		// valid identifier there (ECMA-262 ClassStaticBlockBody is parsed with
-		// [+Await]), so its use is an early error regardless of the outer context.
-		if p.inStaticBlock {
+		// [+Await]). The reservation does not cross a function/arrow boundary.
+		if p.staticBlockAwait {
 			op := p.next()
 			p.errorAt(op.Pos, "await is not allowed in a class static initialization block")
 			operand := p.parseUnary()
@@ -490,6 +498,9 @@ func (p *parser) parsePrimary() ast.Expr {
 	case token.IDENT:
 		p.next()
 		p.checkEscapedReserved(tk)
+		// A strict future reserved word (implements, public, …) is not a valid
+		// IdentifierReference in strict-mode code.
+		p.checkReservedIdentifier(tk.Literal, tk.Pos)
 		if p.inFieldInit && tk.Literal == "arguments" {
 			p.errorAt(tk.Pos, "'arguments' is not allowed in a class field initializer")
 		}

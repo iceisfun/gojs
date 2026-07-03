@@ -153,6 +153,11 @@ func (p *parser) tryParseArrow() ast.Expr {
 	if async {
 		p.inAsync = true
 	}
+	// An arrow is a function boundary for ContainsAwait, so the `await`
+	// reservation imposed by an enclosing class static initialization block does
+	// not reach into the arrow's parameters or body.
+	prevStaticAwait := p.staticBlockAwait
+	p.staticBlockAwait = false
 	if p.at(token.IDENT) {
 		id := p.next()
 		p.checkReservedIdentifier(id.Literal, id.Pos)
@@ -177,8 +182,12 @@ func (p *parser) tryParseArrow() ast.Expr {
 		p.inParams = prevParams
 	}
 	p.inAsync = prevAsync
+	p.staticBlockAwait = prevStaticAwait
 	// Arrow functions never permit duplicate parameter names.
 	p.checkParamDuplicates(arrow.Params, true)
+	if !arrow.Expression {
+		p.checkParamBodyLexicalConflict(arrow.Params, arrow.Body.(*ast.BlockStmt))
+	}
 	return arrow
 }
 
@@ -299,6 +308,42 @@ func (p *parser) checkParamDuplicates(params []ast.Expr, strict bool) {
 			return
 		}
 		seen[name] = true
+	}
+}
+
+// checkParamBodyLexicalConflict enforces the early error that a name bound by a
+// function's FormalParameters may not also be lexically declared at the top
+// level of its FunctionBody (ECMA-262 §15.2.1 and the analogous method/generator
+// static semantics: BoundNames of the parameters ∩ LexicallyDeclaredNames of the
+// body must be empty). Only let/const/class contribute lexical names; a top-level
+// FunctionDeclaration in a function body is var-scoped, not lexical.
+func (p *parser) checkParamBodyLexicalConflict(params []ast.Expr, body *ast.BlockStmt) {
+	if p.err != nil || body == nil {
+		return
+	}
+	lex := map[string]bool{}
+	for _, s := range body.Body {
+		switch st := s.(type) {
+		case *ast.VarDecl:
+			if st.Kind == token.LET || st.Kind == token.CONST {
+				for _, d := range st.Decls {
+					forEachBindingName(d.Target, func(n string, _ token.Pos) { lex[n] = true })
+				}
+			}
+		case *ast.ClassDecl:
+			if st.Def.Name != nil {
+				lex[st.Def.Name.Name] = true
+			}
+		}
+	}
+	if len(lex) == 0 {
+		return
+	}
+	for _, name := range paramBoundNames(params) {
+		if lex[name] {
+			p.errorAt(body.Pos(), "Identifier '%s' has already been declared", name)
+			return
+		}
 	}
 }
 
@@ -432,6 +477,39 @@ func (p *parser) checkReservedIdentifier(name string, pos token.Pos) {
 		if p.inAsync {
 			p.earlyError(pos, "'await' may not be used as an identifier in this context")
 		}
+		// Inside a class static initialization block `await` is reserved (the block
+		// is parsed with [+Await]) even though the block is not itself async. This
+		// reservation does not cross a function/arrow boundary.
+		if p.staticBlockAwait {
+			p.earlyError(pos, "'await' may not be used as an identifier in a class static initialization block")
+		}
+	case "implements", "interface", "package", "private", "protected", "public", "let", "static":
+		// The strict future reserved words are not valid Identifiers in strict-mode
+		// code (ECMA-262 §12.7.2, Identifier static semantics).
+		if p.strict {
+			p.earlyError(pos, "'"+name+"' may not be used as an identifier in strict mode")
+		}
+	}
+}
+
+// checkFuncExprName enforces the reserved-word early errors for a function
+// expression's BindingIdentifier, which is parsed in the function's own scope:
+// `yield` is reserved iff the function is a generator, `await` iff it is async,
+// and the strict future reserved words are reserved in strict-mode code.
+func (p *parser) checkFuncExprName(name string, pos token.Pos, generator, async bool) {
+	switch name {
+	case "yield":
+		if p.strict || generator {
+			p.earlyError(pos, "'yield' may not be used as an identifier in this context")
+		}
+	case "await":
+		if async {
+			p.earlyError(pos, "'await' may not be used as an identifier in this context")
+		}
+	case "implements", "interface", "package", "private", "protected", "public", "let", "static":
+		if p.strict {
+			p.earlyError(pos, "'"+name+"' may not be used as an identifier in strict mode")
+		}
 	}
 }
 
@@ -447,11 +525,16 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 		def.Generator = true
 	}
 	if p.at(token.IDENT) || (p.cur().Type.IsKeyword() && !p.at(token.LPAREN)) {
-		if p.at(token.IDENT) {
+		switch {
+		case p.at(token.IDENT):
 			id := p.next()
 			p.checkEscapedReserved(id)
 			def.Name = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
-		} else if requireName {
+		case requireName || isContextualKeyword(p.cur().Type):
+			// A function-expression name binds in the function's own scope, so a
+			// contextual keyword (e.g. `function yield(){}` inside a generator, in
+			// sloppy code) is a valid name there; its own-scope reservation is
+			// checked below.
 			id := p.next()
 			def.Name = &ast.Ident{NamePos: id.Pos, Name: identText(id)}
 		}
@@ -468,15 +551,22 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	// name binds in its own scope under different parameters, so it is excluded.
 	if requireName && def.Name != nil {
 		p.checkReservedIdentifier(def.Name.Name, def.Name.NamePos)
+	} else if def.Name != nil {
+		// A function *expression*'s name binds in the function's own scope, so
+		// `yield` is reserved only if this function is itself a generator and
+		// `await` only if it is async; the strict future reserved words remain
+		// reserved in strict-mode code.
+		p.checkFuncExprName(def.Name.Name, def.Name.NamePos, def.Generator, async)
 	}
 	// A regular function establishes its own arguments/super scope (so a field
 	// initializer's restrictions do not reach in) and its own yield/await
 	// reservation determined by whether it is a generator or async.
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
 	prevSuper, prevNT := p.superCallOK, p.newTargetOK
-	prevStatic := p.inStaticBlock
+	prevStatic, prevStaticAwait := p.inStaticBlock, p.staticBlockAwait
 	p.inFieldInit = false
 	p.inStaticBlock = false // a nested function has its own arguments scope
+	p.staticBlockAwait = false
 	p.inGenerator, p.inAsync = def.Generator, async
 	p.superCallOK = false // a nested regular function never permits super()
 	p.newTargetOK = true  // but new.target is valid in any function
@@ -488,10 +578,11 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
 	p.superCallOK, p.newTargetOK = prevSuper, prevNT
-	p.inStaticBlock = prevStatic
+	p.inStaticBlock, p.staticBlockAwait = prevStatic, prevStaticAwait
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	p.checkParamDuplicates(def.Params, def.Strict)
 	p.checkStrictParamNames(def.Params, def.Strict)
+	p.checkParamBodyLexicalConflict(def.Params, def.Body)
 	return def
 }
 
@@ -529,7 +620,85 @@ func (p *parser) parseObjectLit() ast.Expr {
 	}
 	rb := p.expect(token.RBRACE)
 	obj.Rbrace = rb.Pos
+	p.recordObjectLitEarlyErrors(obj)
 	return obj
+}
+
+// recordObjectLitEarlyErrors registers the ObjectLiteral early errors that are
+// suppressed when the object is refined into a destructuring pattern: a
+// CoverInitializedName (`{ a = 1 }`) and duplicate `__proto__:` data properties
+// (ECMA-262 §13.2.5.1, §B.3.1). They are deferred (keyed by the opening brace)
+// so a subsequent `= ...` assignment or binding-pattern use can clear them.
+func (p *parser) recordObjectLitEarlyErrors(obj *ast.ObjectLit) {
+	protoCount := 0
+	for _, prop := range obj.Properties {
+		// CoverInitializedName: a shorthand written with an initializer.
+		if prop.Shorthand {
+			if _, ok := prop.Value.(*ast.AssignPattern); ok {
+				p.recordDeferredObjErr(obj.Lbrace, prop.KeyPos,
+					"Invalid shorthand property initializer")
+			}
+		}
+		// A `__proto__:` special form is only the data property PropertyName :
+		// AssignmentExpression — not a shorthand, method, accessor, or computed key.
+		if prop.Kind == ast.PropInit && !prop.Method && !prop.Shorthand && !prop.Computed {
+			if isProtoKey(prop.Key) {
+				protoCount++
+			}
+		}
+	}
+	if protoCount >= 2 {
+		p.recordDeferredObjErr(obj.Lbrace, obj.Lbrace,
+			"Duplicate __proto__ fields are not allowed in object literals")
+	}
+}
+
+// isProtoKey reports whether a (non-computed) property key is the literal name
+// `__proto__`, whether written as an identifier or a string literal.
+func isProtoKey(key ast.Expr) bool {
+	switch k := key.(type) {
+	case *ast.Ident:
+		return k.Name == "__proto__"
+	case *ast.StringLit:
+		return k.Value == "__proto__"
+	}
+	return false
+}
+
+// recordDeferredObjErr notes an ObjectLiteral early error that is suppressed if
+// the owning object is later refined into a destructuring pattern (see
+// deferredObjErrs).
+func (p *parser) recordDeferredObjErr(owner, pos token.Pos, msg string) {
+	p.deferredObjErrs = append(p.deferredObjErrs, deferredObjErr{owner: owner, pos: pos, msg: msg})
+}
+
+// clearDeferredObjErrs discards the pending ObjectLiteral early errors owned by
+// the object whose opening brace is at owner. It is called when that object is
+// validated as a destructuring assignment/binding pattern, where a
+// CoverInitializedName and a duplicate `__proto__` are both permitted.
+func (p *parser) clearDeferredObjErrs(owner token.Pos) {
+	if len(p.deferredObjErrs) == 0 {
+		return
+	}
+	kept := p.deferredObjErrs[:0]
+	for _, e := range p.deferredObjErrs {
+		if e.owner != owner {
+			kept = append(kept, e)
+		}
+	}
+	p.deferredObjErrs = kept
+}
+
+// flushDeferredObjErrs reports the first surviving deferred ObjectLiteral early
+// error (one that was never cleared by pattern refinement).
+func (p *parser) flushDeferredObjErrs() {
+	if p.err != nil {
+		return
+	}
+	for _, e := range p.deferredObjErrs {
+		p.errorAt(e.pos, "%s", e.msg)
+		return
+	}
 }
 
 // parseProperty parses one object-literal member: spread, shorthand, key:value,
@@ -556,7 +725,9 @@ func (p *parser) parseProperty() *ast.Property {
 				kind = ast.PropSet
 			}
 			key, computed := p.parsePropertyKey()
+			p.checkNoPrivateKey(key)
 			fn := p.parseMethodBody(false, false)
+			p.checkObjectAccessorArity(kind, key.Pos(), fn)
 			return &ast.Property{KeyPos: tk.Pos, Key: key, Value: fn, Kind: kind, Computed: computed, Method: true}
 		}
 	}
@@ -577,26 +748,100 @@ func (p *parser) parseProperty() *ast.Property {
 
 	switch {
 	case p.at(token.LPAREN):
-		// Method definition.
+		// Method definition. A private name (#x) is never a valid method key in an
+		// object literal (ECMA-262 §13.2.5.1: PrivateBoundNames must be empty).
+		p.checkNoPrivateKey(key)
 		fn := p.parseMethodBody(async, generator)
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: fn, Kind: ast.PropInit, Computed: computed, Method: true}
 	case p.accept(token.COLON):
+		// `async`/`*` are only valid as a method-definition prefix; before a
+		// PropertyName : AssignmentExpression they are a SyntaxError.
+		p.checkNoMethodPrefix(tk, async, generator)
+		p.checkNoPrivateKey(key)
 		val := p.parseAssignExpr()
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: val, Kind: ast.PropInit, Computed: computed}
 	case p.at(token.ASSIGN):
-		// Shorthand with default, only valid in destructuring: { x = 1 }.
-		// The shorthand name is an IdentifierReference/BindingIdentifier, so an
-		// escaped reserved word (e.g. { break = 1 }) is an early error.
-		p.checkEscapedReserved(tk)
+		// Shorthand with default (CoverInitializedName), only valid when the object
+		// is later refined into a destructuring pattern: { x = 1 }. The name is an
+		// IdentifierReference, so a non-identifier key, an escaped reserved word, or
+		// a strict-reserved word is an early error, as is a stray method prefix.
+		p.checkNoMethodPrefix(tk, async, generator)
+		p.checkShorthandIdentifier(tk, key, computed)
 		p.next()
 		def := p.parseAssignExpr()
 		val := &ast.AssignPattern{Target: key, Default: def}
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: val, Kind: ast.PropInit, Shorthand: true}
 	default:
-		// Shorthand: { x } — the name is both key and reference/binding, so an
-		// escaped reserved word ({ break }) is an early error.
-		p.checkEscapedReserved(tk)
+		// Shorthand: { x } — the name is both key and IdentifierReference, so it
+		// must be a plain identifier (not a number, string, computed, or reserved
+		// word) and no method prefix may precede it.
+		p.checkNoMethodPrefix(tk, async, generator)
+		p.checkShorthandIdentifier(tk, key, computed)
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: key, Kind: ast.PropInit, Shorthand: true}
+	}
+}
+
+// checkNoMethodPrefix reports a SyntaxError when an `async` or `*` (generator)
+// prefix was consumed but the member is not a method definition. Such a prefix
+// is only valid immediately before a MethodDefinition's PropertyName ( ... ).
+func (p *parser) checkNoMethodPrefix(tk token.Token, async, generator bool) {
+	if async || generator {
+		p.errorAt(tk.Pos, "Unexpected token in object literal")
+	}
+}
+
+// checkNoPrivateKey reports the early error for a private name (#x) used as an
+// object-literal property key, which is never permitted (private names exist
+// only in class bodies).
+func (p *parser) checkNoPrivateKey(key ast.Expr) {
+	if priv, ok := key.(*ast.PrivateIdent); ok {
+		p.errorAt(priv.Pos(), "Private names are not allowed in object literals")
+	}
+}
+
+// checkShorthandIdentifier validates the key of a shorthand property
+// (`{ x }` or `{ x = 1 }`): it must be an IdentifierReference — a plain
+// (non-computed) identifier, not a number/string literal or a reserved word.
+func (p *parser) checkShorthandIdentifier(tk token.Token, key ast.Expr, computed bool) {
+	if computed {
+		p.errorAt(tk.Pos, "Unexpected token in object literal shorthand")
+		return
+	}
+	if _, ok := key.(*ast.Ident); !ok {
+		p.errorAt(tk.Pos, "Unexpected token in object literal shorthand")
+		return
+	}
+	// A hard ReservedWord (if, for, function, true, …) is never an
+	// IdentifierReference; the contextual keywords (let, static, yield, …) are,
+	// subject to their own strict/generator/async reservations below.
+	if tk.Type.IsKeyword() && !isContextualKeyword(tk.Type) {
+		p.errorAt(tk.Pos, "Unexpected reserved word in object literal shorthand")
+		return
+	}
+	p.checkReservedIdentifier(identText(tk), tk.Pos)
+	p.checkEscapedReserved(tk)
+}
+
+// checkObjectAccessorArity enforces the getter/setter parameter-count early
+// errors on an object-literal accessor: a getter declares no parameters and a
+// setter declares exactly one non-rest parameter (ECMA-262 §13.2.5.1).
+func (p *parser) checkObjectAccessorArity(kind ast.PropertyKind, pos token.Pos, fn *ast.FuncExpr) {
+	if fn == nil {
+		return
+	}
+	params := fn.Def.Params
+	if kind == ast.PropGet {
+		if len(params) != 0 {
+			p.errorAt(pos, "getter functions must have no arguments")
+		}
+		return
+	}
+	if len(params) != 1 {
+		p.errorAt(pos, "setter functions must have exactly one argument")
+		return
+	}
+	if _, isRest := params[0].(*ast.RestElement); isRest {
+		p.errorAt(pos, "setter function argument must not be a rest parameter")
 	}
 }
 
@@ -607,7 +852,13 @@ func (p *parser) parsePropertyKey() (ast.Expr, bool) {
 	switch tk.Type {
 	case token.LBRACKET:
 		p.next()
+		// A ComputedPropertyName is a full AssignmentExpression; the `in` operator
+		// is always permitted inside it, even when the object literal appears in a
+		// for-statement header (where the surrounding noIn restriction applies).
+		saveNoIn := p.noIn
+		p.noIn = false
 		expr := p.parseAssignExpr()
+		p.noIn = saveNoIn
 		p.expect(token.RBRACKET)
 		return expr, true
 	case token.STRING:
@@ -616,6 +867,11 @@ func (p *parser) parsePropertyKey() (ast.Expr, bool) {
 	case token.NUMBER:
 		p.next()
 		return &ast.NumberLit{ValuePos: tk.Pos, Value: parseNumber(tk.Literal), Raw: tk.Raw}, false
+	case token.BIGINT:
+		// A BigInt literal is a valid LiteralPropertyName; its property key is the
+		// BigInt's decimal string value (e.g. `1n` names the property "1").
+		p.next()
+		return &ast.BigIntLit{ValuePos: tk.Pos, Raw: tk.Raw, Digits: tk.Literal}, false
 	case token.PRIVATE:
 		p.next()
 		return &ast.PrivateIdent{NamePos: tk.Pos, Name: tk.Literal}, false
@@ -642,9 +898,10 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	// reservation (see parseFuncDef).
 	prevField, prevGen, prevAsync := p.inFieldInit, p.inGenerator, p.inAsync
 	prevSuper, prevProp, prevNT := p.superCallOK, p.superPropOK, p.newTargetOK
-	prevStatic := p.inStaticBlock
+	prevStatic, prevStaticAwait := p.inStaticBlock, p.staticBlockAwait
 	p.inFieldInit = false
 	p.inStaticBlock = false // a method has its own arguments scope
+	p.staticBlockAwait = false
 	p.inGenerator, p.inAsync = generator, async
 	// A SuperCall is permitted only in the derived constructor; parseClassMember
 	// signals that via pendingSuperCall for exactly that one method body. Super
@@ -660,11 +917,12 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	p.inFunction--
 	p.inFieldInit, p.inGenerator, p.inAsync = prevField, prevGen, prevAsync
 	p.superCallOK, p.superPropOK, p.newTargetOK = prevSuper, prevProp, prevNT
-	p.inStaticBlock = prevStatic
+	p.inStaticBlock, p.staticBlockAwait = prevStatic, prevStaticAwait
 	p.checkStrictSimpleParams(paramsPos, bodyUseStrict, def.Params)
 	// A concise method's parameter list must never contain duplicates.
 	p.checkParamDuplicates(def.Params, true)
 	p.checkStrictParamNames(def.Params, def.Strict)
+	p.checkParamBodyLexicalConflict(def.Params, def.Body)
 	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
 }
 
@@ -1005,6 +1263,7 @@ func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
 	// scope (super() forbidden, super.property allowed, new.target allowed) and
 	// its own generator/async context.
 	prevField, prevStatic := p.inFieldInit, p.inStaticBlock
+	prevStaticAwait := p.staticBlockAwait
 	prevGen, prevAsync, prevParams := p.inGenerator, p.inAsync, p.inParams
 	prevSuperCall, prevSuperProp := p.superCallOK, p.superPropOK
 	// A static initialization block is a break/continue/return boundary just like
@@ -1014,6 +1273,7 @@ func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
 	prevLabels, prevPending := p.labelSet, p.pendingLabels
 	p.inFieldInit = false
 	p.inStaticBlock = true
+	p.staticBlockAwait = true
 	p.inGenerator, p.inAsync, p.inParams = false, false, false
 	p.superCallOK = false
 	p.superPropOK = true
@@ -1021,6 +1281,7 @@ func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
 	p.labelSet, p.pendingLabels = nil, nil
 	m.StaticBlock = p.parseBlock()
 	p.inFieldInit, p.inStaticBlock = prevField, prevStatic
+	p.staticBlockAwait = prevStaticAwait
 	p.inGenerator, p.inAsync, p.inParams = prevGen, prevAsync, prevParams
 	p.superCallOK, p.superPropOK = prevSuperCall, prevSuperProp
 	p.inLoop, p.inSwitch = prevLoop, prevSwitch

@@ -636,6 +636,8 @@ func (i *Interpreter) classMemberKey(ctx context.Context, cd *classData, m *ast.
 		return StrKey(k.Value), nil
 	case *ast.NumberLit:
 		return StrKey(NumberToString(k.Value)), nil
+	case *ast.BigIntLit:
+		return StrKey(bigIntLitKeyString(k.Digits)), nil
 	default:
 		return PropertyKey{}, i.throwError(ctx, "SyntaxError", "invalid class member key")
 	}

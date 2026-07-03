@@ -307,6 +307,8 @@ func (i *Interpreter) propertyKeyName(ctx context.Context, prop *ast.Property, e
 		return k.Value, nil
 	case *ast.NumberLit:
 		return NumberToString(k.Value), nil
+	case *ast.BigIntLit:
+		return bigIntLitKeyString(k.Digits), nil
 	default:
 		return "", i.throwError(ctx, "SyntaxError", "invalid property key in pattern")
 	}

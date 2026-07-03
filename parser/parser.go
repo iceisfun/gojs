@@ -89,6 +89,14 @@ type parser struct {
 	// SuperCall, and additionally `await` is treated as a reserved word. It is
 	// reset at every regular function/method boundary.
 	inStaticBlock bool
+	// staticBlockAwait is true where `await` is a reserved word solely because the
+	// code is (directly) within a class static initialization block, which is
+	// parsed with [+Await]. Unlike inStaticBlock (which governs `arguments` and
+	// `super`, and stays in effect across arrow boundaries), this reservation does
+	// NOT cross a function boundary — including an arrow — because ContainsAwait
+	// stops at every function boundary. It is therefore reset when entering any
+	// function, method, or arrow body.
+	staticBlockAwait bool
 	// inGenerator/inAsync track whether the function whose parameters or body is
 	// currently being parsed is a generator or async. They gate the reserved-word
 	// treatment of `yield` (in a generator) and `await` (in an async function),
@@ -131,6 +139,22 @@ type parser struct {
 	// single-statement position under Annex B, binding `eval`/`arguments`, or a
 	// LegacyOctalIntegerLiteral / octal string escape).
 	strict bool
+	// deferredObjErrs holds early errors that apply to an ObjectLiteral only when
+	// it is a genuine expression, not when it is later refined into an
+	// ObjectAssignmentPattern or ObjectBindingPattern (ECMA-262 §13.2.5.1). The two
+	// cases are CoverInitializedName (`{ a = 1 }`) and a duplicate `__proto__:`
+	// data property. Each error is keyed by the owning ObjectLiteral's opening
+	// brace position; when that object is validated as a destructuring pattern the
+	// matching entry is cleared, and any entry that survives to the end of the
+	// parse is reported.
+	deferredObjErrs []deferredObjErr
+}
+
+// deferredObjErr is a pending ObjectLiteral early error (see deferredObjErrs).
+type deferredObjErr struct {
+	owner token.Pos // opening-brace position of the owning ObjectLiteral
+	pos   token.Pos // position to report the error at
+	msg   string
 }
 
 // labelInfo records an enclosing statement label and whether it directly labels
@@ -378,6 +402,10 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 		prog.Body = append(prog.Body, stmt)
 	}
 	prog.EndPos = p.cur().Pos
+	// Any ObjectLiteral early error (CoverInitializedName / duplicate __proto__)
+	// that was not cleared by refinement into a destructuring pattern is a real
+	// SyntaxError.
+	p.flushDeferredObjErrs()
 	// All private-name declarations are now known; validate every reference.
 	p.checkPrivateRefs()
 	if p.err != nil {

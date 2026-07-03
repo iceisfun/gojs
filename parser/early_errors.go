@@ -551,6 +551,9 @@ func (p *parser) checkBindingPattern(target ast.Expr) {
 			p.checkBindingPattern(stripDefault(el))
 		}
 	case *ast.ObjectLit:
+		// Refining this object into a binding pattern clears its deferred
+		// ObjectLiteral early errors (CoverInitializedName, duplicate __proto__).
+		p.clearDeferredObjErrs(t.Lbrace)
 		for idx, prop := range t.Properties {
 			if prop.Kind == ast.PropSpread {
 				if idx != len(t.Properties)-1 {
@@ -657,6 +660,10 @@ func (p *parser) checkArrayAssignmentPattern(arr *ast.ArrayLit) {
 // checkObjectAssignmentPattern validates an object destructuring assignment
 // pattern used as a for-in/of target.
 func (p *parser) checkObjectAssignmentPattern(obj *ast.ObjectLit) {
+	// This object is being refined into a destructuring pattern, so its deferred
+	// ObjectLiteral early errors (CoverInitializedName, duplicate __proto__) do
+	// not apply.
+	p.clearDeferredObjErrs(obj.Lbrace)
 	for idx, prop := range obj.Properties {
 		if prop.Kind == ast.PropSpread {
 			if idx != len(obj.Properties)-1 {
