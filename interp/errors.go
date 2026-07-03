@@ -66,6 +66,19 @@ func isSignal(err error) bool {
 	return false
 }
 
+// isAbruptSignal reports whether err is a non-throw abrupt completion: a
+// control-flow signal or a generator return() unwinding a suspended `yield`
+// (*genReturn). Such completions are abrupt but are NOT throw completions, so
+// IteratorClose still calls return() and lets its result (a throw, or a
+// non-Object TypeError) supersede them (§7.4.11 steps 5-7).
+func isAbruptSignal(err error) bool {
+	if isSignal(err) {
+		return true
+	}
+	_, ok := err.(*genReturn)
+	return ok
+}
+
 // ownDataOnChain returns the value of a data property found on obj or its
 // prototype chain, without invoking accessors or a context.
 func ownDataOnChain(obj *Object, name string) (Value, bool) {

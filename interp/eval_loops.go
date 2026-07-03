@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/iceisfun/gojs/ast"
+	"github.com/iceisfun/gojs/token"
 )
 
 // This file implements loop evaluation with correct labeled break/continue
@@ -184,7 +185,23 @@ func (i *Interpreter) evalForIn(ctx context.Context, s *ast.ForInStmt, env *Envi
 }
 
 func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Environment, label string) (Value, error) {
-	rhs, err := i.evalExpr(ctx, s.Right, env)
+	// ForIn/OfHeadEvaluation (§14.7.5.11): a lexical ForDeclaration (let/const)
+	// puts its bound names in a Temporal Dead Zone — an environment where they are
+	// declared but uninitialized — while the iterable expression is evaluated, so
+	// the RHS cannot observe the outer binding of the same name, and a closure it
+	// creates captures the TDZ binding (accessing it later throws ReferenceError).
+	rhsEnv := env
+	if vd, ok := s.Left.(*ast.VarDecl); ok && (vd.Kind == token.LET || vd.Kind == token.CONST) {
+		tdz := NewEnvironment(env, false)
+		mutable := vd.Kind == token.LET
+		for _, d := range vd.Decls {
+			forEachPatternName(d.Target, func(n string) {
+				tdz.vars[n] = &binding{mutable: mutable, initialized: false}
+			})
+		}
+		rhsEnv = tdz
+	}
+	rhs, err := i.evalExpr(ctx, s.Right, rhsEnv)
 	if err != nil {
 		return nil, err
 	}

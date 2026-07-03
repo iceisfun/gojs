@@ -289,12 +289,14 @@ func (p *parser) checkForInLeft(left ast.Node) {
 	switch l := left.(type) {
 	case *ast.VarDecl:
 		p.checkForDeclaration(l)
-		if p.strict && len(l.Decls) > 0 {
+		// Inside a generator, `yield` in the head is a valid YieldExpression, so
+		// the reserved-word check applies only in strict non-generator code.
+		if p.strict && !p.inGenerator && len(l.Decls) > 0 {
 			p.checkNoYieldInStrict(l.Decls[0].Target)
 		}
 	case ast.Expr:
 		p.checkAssignmentTarget(l)
-		if p.strict {
+		if p.strict && !p.inGenerator {
 			p.checkNoYieldInStrict(l)
 		}
 	}
@@ -644,6 +646,9 @@ func (p *parser) checkArrayAssignmentPattern(arr *ast.ArrayLit) {
 		if isRest(el) {
 			if idx != len(arr.Elements)-1 {
 				p.earlyError(el.Pos(), "Rest element must be last element")
+			} else if arr.TrailingComma {
+				// `[...x,]`: an elision may not follow an AssignmentRestElement.
+				p.earlyError(el.Pos(), "Rest element may not be followed by a comma")
 			}
 			if hasDefault(el) {
 				p.earlyError(el.Pos(), "Rest element may not have a default initializer")

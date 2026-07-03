@@ -596,6 +596,12 @@ func (p *parser) parseParenExpr() ast.Expr {
 // elements.
 func (p *parser) parseArrayLit() ast.Expr {
 	lb := p.next() // [
+	// Brackets open a fresh expression context: the `in` operator is permitted
+	// inside element expressions (e.g. default initializers) even within a
+	// for-statement header, where the top-level `in` is otherwise suppressed.
+	saveNoIn := p.noIn
+	p.noIn = false
+	defer func() { p.noIn = saveNoIn }()
 	arr := &ast.ArrayLit{Lbracket: lb.Pos}
 	for !p.at(token.RBRACKET) && !p.at(token.EOF) {
 		if p.at(token.COMMA) {
@@ -613,6 +619,12 @@ func (p *parser) parseArrayLit() ast.Expr {
 		}
 		if !p.accept(token.COMMA) {
 			break
+		}
+		// A comma was consumed; if the next token closes the literal it was a
+		// trailing comma (an elision that the ArrayAssignmentPattern refinement
+		// forbids after a rest element).
+		if p.at(token.RBRACKET) {
+			arr.TrailingComma = true
 		}
 	}
 	rb := p.expect(token.RBRACKET)

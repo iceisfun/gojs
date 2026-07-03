@@ -405,11 +405,23 @@ func (p *parser) parseFor() ast.Stmt {
 		initNode = vd
 	default:
 		// Expression initializer, possibly a for-in/of left-hand side.
+		startTok := p.cur()
 		p.noIn = true
 		expr := p.parseExpression()
 		p.noIn = false
 		if p.at(token.IN) || p.at(token.OF) {
 			isOf := p.at(token.OF)
+			// The for-of LeftHandSideExpression may not begin with a bare `async`
+			// token (grammar lookahead ≠ `async of`), so `for (async of x)` is a
+			// SyntaxError. A parenthesized `(async)` (the leading token is `(`, at a
+			// different position than the identifier) or an escaped `async`
+			// (Escaped) is not the `async` keyword and remains valid (§14.7.5.1).
+			if isOf {
+				if id, ok := expr.(*ast.Ident); ok && id.Name == "async" &&
+					startTok.Pos == id.NamePos && !startTok.Escaped {
+					p.errorAt(id.NamePos, "'async' is not a valid for-of left-hand side")
+				}
+			}
 			p.next()
 			right := p.forRight(isOf)
 			p.expect(token.RPAREN)

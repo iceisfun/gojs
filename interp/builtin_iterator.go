@@ -101,13 +101,19 @@ func (i *Interpreter) iteratorStepValue(ctx context.Context, rec *iterRecord) (V
 }
 
 // iteratorClose implements IteratorClose (§7.4.11). pending is the completion to
-// preserve: a non-nil error means the surrounding completion is abrupt (a throw)
-// and takes precedence over anything the return method does.
+// preserve. Only a throw completion (a *Throw, or a host error) short-circuits
+// the algorithm before the return()-result checks (spec step 5); a control-flow
+// signal completion (return/break/continue, e.g. from a `yield` receiving a
+// return completion) is abrupt but NOT a throw, so return() is still called and
+// a non-Object result or a throwing return() replaces that signal (steps 6-7).
 func (i *Interpreter) iteratorClose(ctx context.Context, rec *iterRecord, pending error) error {
+	// A throw (or host) completion takes precedence over any error from looking
+	// up or calling return(); only a control-flow signal — including a generator
+	// return() delivered to a suspended `yield` (*genReturn) — yields to those.
+	throwCompletion := pending != nil && !isAbruptSignal(pending)
 	returnMethod, err := i.getMethodStr(ctx, rec.iterator, "return")
 	if err != nil {
-		// GetMethod threw. If the surrounding completion is a throw, it wins.
-		if pending != nil {
+		if throwCompletion {
 			return pending
 		}
 		return err
@@ -116,7 +122,7 @@ func (i *Interpreter) iteratorClose(ctx context.Context, rec *iterRecord, pendin
 		return pending
 	}
 	res, cerr := returnMethod.fn.call(ctx, rec.iterator, nil)
-	if pending != nil {
+	if throwCompletion {
 		return pending
 	}
 	if cerr != nil {
@@ -125,7 +131,7 @@ func (i *Interpreter) iteratorClose(ctx context.Context, rec *iterRecord, pendin
 	if _, ok := res.(*Object); !ok {
 		return i.throwError(ctx, "TypeError", "iterator return method returned a non-object")
 	}
-	return nil
+	return pending
 }
 
 // getIteratorFlattenable implements GetIteratorFlattenable (§7.4.3).

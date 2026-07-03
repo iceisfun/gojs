@@ -150,6 +150,10 @@ type ArrayLit struct {
 	Lbracket token.Pos
 	Rbracket token.Pos
 	Elements []Expr // element may be nil (hole) or *SpreadElement
+	// TrailingComma is set when the literal ends with a comma (e.g. `[a,]`). It
+	// is benign for an array expression but, when the literal is refined into an
+	// ArrayAssignmentPattern, an elision/comma may not follow a rest element.
+	TrailingComma bool
 }
 
 func (e *ArrayLit) Pos() token.Pos { return e.Lbracket }

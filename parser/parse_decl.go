@@ -611,6 +611,12 @@ func (p *parser) parseFunctionDecl(async bool) *ast.FuncDecl {
 // destructuring pattern.
 func (p *parser) parseObjectLit() ast.Expr {
 	lb := p.expect(token.LBRACE)
+	// Braces open a fresh expression context: the `in` operator is permitted
+	// inside property-value expressions (e.g. default initializers) even within a
+	// for-statement header, where the top-level `in` is otherwise suppressed.
+	saveNoIn := p.noIn
+	p.noIn = false
+	defer func() { p.noIn = saveNoIn }()
 	obj := &ast.ObjectLit{Lbrace: lb.Pos}
 	for !p.at(token.RBRACE) && !p.at(token.EOF) {
 		obj.Properties = append(obj.Properties, p.parseProperty())

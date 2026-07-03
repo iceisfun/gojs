@@ -545,37 +545,36 @@ func (i *Interpreter) assignBinding(env *Environment, name string, value Value) 
 }
 
 // destructureAssign performs assignment-context destructuring (no new bindings;
-// each leaf is an assignment target).
+// each leaf is an assignment target). It implements DestructuringAssignmentEvaluation
+// (§13.15.5): unlike binding destructuring, each leaf's target reference is
+// resolved through the Reference machinery (so `for ({x} of …)` on an
+// unresolvable name in strict mode throws a ReferenceError, and an assignment to
+// a read-only property is rejected), and array patterns resolve each element's
+// reference before stepping the iterator, closing it on any abrupt completion.
 func (i *Interpreter) destructureAssign(ctx context.Context, pattern ast.Expr, value Value, env *Environment) error {
-	assign := func(name string, v Value) {
-		_ = i.assignIdent(ctx, name, v, env)
-	}
-	// For member targets inside the pattern we need the full assignTo path;
-	// bindPattern only handles name binding, so we special-case simple names
-	// and fall back to assignTo for members via a wrapper pattern walk.
-	return i.assignPattern(ctx, pattern, value, env, assign)
+	return i.assignPattern(ctx, pattern, value, env)
 }
 
-// assignPattern is like bindPattern but assigns to existing references and
-// supports member targets.
-func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value Value, env *Environment, bindName func(string, Value)) error {
+// assignPattern assigns value to an assignment-context destructuring target: a
+// simple reference (identifier or member), a defaulted target, or a nested
+// array/object pattern.
+func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value Value, env *Environment) error {
 	switch t := target.(type) {
-	case *ast.Ident:
-		return i.assignIdent(ctx, t.Name, value, env)
-	case *ast.MemberExpr:
-		return i.assignTo(ctx, t, value, env)
+	case *ast.Ident, *ast.MemberExpr:
+		ref, err := i.evalRef(ctx, t, env)
+		if err != nil {
+			return err
+		}
+		return i.putRefValue(ctx, ref, value)
 	case *ast.AssignPattern:
 		if IsUndefined(value) {
-			// NamedEvaluation: an anonymous function default whose target is a
-			// plain identifier reference gets the target's name (bindingName
-			// returns "" for member/pattern targets, so no name is applied).
 			def, err := i.evalExprNamed(ctx, t.Default, env, bindingName(t.Target))
 			if err != nil {
 				return err
 			}
 			value = def
 		}
-		return i.assignPattern(ctx, t.Target, value, env, bindName)
+		return i.assignPattern(ctx, t.Target, value, env)
 	case *ast.AssignExpr:
 		// A default in a destructuring-assignment pattern, e.g. [a = 1], parses
 		// as a plain assignment expression rather than an AssignPattern.
@@ -587,62 +586,231 @@ func (i *Interpreter) assignPattern(ctx context.Context, target ast.Expr, value 
 				}
 				value = def
 			}
-			return i.assignPattern(ctx, t.Target, value, env, bindName)
+			return i.assignPattern(ctx, t.Target, value, env)
 		}
 		return i.throwError(ctx, "SyntaxError", "invalid assignment target")
 	case *ast.ArrayLit:
-		return i.iterArrayPattern(ctx, t.Elements, value,
-			func(el ast.Expr, v Value) error { return i.assignPattern(ctx, el, v, env, bindName) },
-			func(target ast.Expr, rest []Value) error {
-				return i.assignPattern(ctx, target, i.newArray(rest), env, bindName)
-			})
+		return i.assignArrayPattern(ctx, t, value, env)
 	case *ast.ObjectLit:
-		obj, err := i.ToObject(ctx, value)
-		if err != nil {
-			return err
-		}
-		taken := map[string]bool{}
-		for _, prop := range t.Properties {
-			if prop.Kind == ast.PropSpread {
-				rest := NewObject(i.objectProto)
-				for _, name := range obj.OwnKeys() {
-					if taken[name] {
-						continue
-					}
-					if p, ok := obj.getOwn(StrKey(name)); ok && p.Enumerable {
-						v, err := obj.GetStr(ctx, name)
-						if err != nil {
-							return err
-						}
-						rest.SetData(name, v)
-					}
-				}
-				if err := i.assignPattern(ctx, prop.Value, rest, env, bindName); err != nil {
-					return err
-				}
-				continue
-			}
-			key, err := i.propertyKeyName(ctx, prop, env)
-			if err != nil {
-				return err
-			}
-			taken[key] = true
-			v, err := obj.GetStr(ctx, key)
-			if err != nil {
-				return err
-			}
-			tgt := prop.Value
-			if tgt == nil {
-				tgt = prop.Key
-			}
-			if err := i.assignPattern(ctx, tgt, v, env, bindName); err != nil {
-				return err
-			}
-		}
-		return nil
+		return i.assignObjectPattern(ctx, t, value, env)
 	default:
 		return i.throwError(ctx, "SyntaxError", "invalid assignment target")
 	}
+}
+
+// assignArrayPattern implements IteratorDestructuringAssignmentEvaluation for an
+// ArrayAssignmentPattern (§13.15.5.3). Each non-nested element resolves its
+// target Reference *before* the iterator is stepped, and any abrupt completion
+// while the iterator is not done triggers IteratorClose — matching the observable
+// next()/return() call counts the spec prescribes.
+func (i *Interpreter) assignArrayPattern(ctx context.Context, pat *ast.ArrayLit, value Value, env *Environment) error {
+	rec, err := i.getIterator(ctx, value)
+	if err != nil {
+		return err
+	}
+	// stepValue pulls the next value, reporting done once the iterator is
+	// exhausted. A step that itself throws leaves the record done (never closed).
+	stepValue := func() (v Value, done bool, err error) {
+		if rec.done {
+			return Undef, true, nil
+		}
+		if err := i.checkContext(); err != nil {
+			rec.done = true
+			return nil, true, err
+		}
+		return i.iteratorStepValue(ctx, rec)
+	}
+	// closeOnAbrupt runs IteratorClose for an abrupt completion, preserving the
+	// original error and skipping the close when the iterator is already done.
+	closeOnAbrupt := func(pending error) error {
+		if rec.done {
+			return pending
+		}
+		return i.iteratorClose(ctx, rec, pending)
+	}
+
+	for _, el := range pat.Elements {
+		if el == nil {
+			if _, _, err := stepValue(); err != nil {
+				return err
+			}
+			continue
+		}
+		if restTgt := restTargetOf(el); restTgt != nil {
+			return i.assignRestElement(ctx, restTgt, stepValue, closeOnAbrupt, env)
+		}
+		tgt, def := splitAssignElement(el)
+		if isDestructuringPattern(tgt) {
+			// A nested pattern: the value is pulled first, then destructured.
+			v, done, err := stepValue()
+			if err != nil {
+				return err
+			}
+			if done {
+				v = Undef
+			}
+			if def != nil && IsUndefined(v) {
+				dv, derr := i.evalExprNamed(ctx, def, env, "")
+				if derr != nil {
+					return closeOnAbrupt(derr)
+				}
+				v = dv
+			}
+			if aerr := i.assignPattern(ctx, tgt, v, env); aerr != nil {
+				return closeOnAbrupt(aerr)
+			}
+			continue
+		}
+		// A simple reference: resolve it before stepping the iterator.
+		ref, err := i.evalRef(ctx, tgt, env)
+		if err != nil {
+			return closeOnAbrupt(err)
+		}
+		v, done, err := stepValue()
+		if err != nil {
+			return err
+		}
+		if done {
+			v = Undef
+		}
+		if def != nil && IsUndefined(v) {
+			dv, derr := i.evalExprNamed(ctx, def, env, bindingName(tgt))
+			if derr != nil {
+				return closeOnAbrupt(derr)
+			}
+			v = dv
+		}
+		if perr := i.putRefValue(ctx, ref, v); perr != nil {
+			return closeOnAbrupt(perr)
+		}
+	}
+	if !rec.done {
+		return i.iteratorClose(ctx, rec, nil)
+	}
+	return nil
+}
+
+// assignRestElement implements the AssignmentRestElement case: for a non-pattern
+// target the Reference is resolved before the iterator is drained; the remaining
+// values are collected into an array and assigned (or destructured for a nested
+// pattern). Abrupt completions close the iterator when it is not done.
+func (i *Interpreter) assignRestElement(ctx context.Context, target ast.Expr, stepValue func() (Value, bool, error), closeOnAbrupt func(error) error, env *Environment) error {
+	if isDestructuringPattern(target) {
+		rest, err := drainRest(stepValue)
+		if err != nil {
+			return err
+		}
+		if aerr := i.assignPattern(ctx, target, i.newArray(rest), env); aerr != nil {
+			return closeOnAbrupt(aerr)
+		}
+		return nil
+	}
+	// Simple target: resolve the Reference before draining the iterator.
+	ref, err := i.evalRef(ctx, target, env)
+	if err != nil {
+		return closeOnAbrupt(err)
+	}
+	rest, err := drainRest(stepValue)
+	if err != nil {
+		return err
+	}
+	if perr := i.putRefValue(ctx, ref, i.newArray(rest)); perr != nil {
+		return closeOnAbrupt(perr)
+	}
+	return nil
+}
+
+// drainRest collects the remaining iterator values into a slice, stopping once
+// the iterator reports done. A step that throws propagates (leaving the record
+// done); no IteratorClose is required in that case.
+func drainRest(stepValue func() (Value, bool, error)) ([]Value, error) {
+	var rest []Value
+	for {
+		v, done, err := stepValue()
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return rest, nil
+		}
+		rest = append(rest, v)
+	}
+}
+
+// assignObjectPattern implements the assignment-context ObjectAssignmentPattern
+// (§13.15.5.4/5): each property's value is read via [[Get]] and assigned to its
+// (reference-resolved) target, and a rest target receives a fresh object of the
+// remaining own enumerable properties (including symbol keys).
+func (i *Interpreter) assignObjectPattern(ctx context.Context, pat *ast.ObjectLit, value Value, env *Environment) error {
+	if IsNullish(value) {
+		return i.throwError(ctx, "TypeError", "Cannot destructure "+briefValue(value))
+	}
+	obj, err := i.ToObject(ctx, value)
+	if err != nil {
+		return err
+	}
+	taken := map[PropertyKey]bool{}
+	for _, prop := range pat.Properties {
+		if prop.Kind == ast.PropSpread {
+			rest := NewObject(i.objectProto)
+			for _, k := range obj.ownPropertyKeys() {
+				if taken[k] {
+					continue
+				}
+				if p, ok := obj.getOwn(k); ok && p.Enumerable {
+					v, gerr := i.getProperty(ctx, obj, k)
+					if gerr != nil {
+						return gerr
+					}
+					rest.defineOwn(k, &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
+				}
+			}
+			if aerr := i.assignPattern(ctx, prop.Value, rest, env); aerr != nil {
+				return aerr
+			}
+			continue
+		}
+		pk, err := i.patternPropertyKey(ctx, prop, env)
+		if err != nil {
+			return err
+		}
+		taken[pk] = true
+		v, err := i.getProperty(ctx, obj, pk)
+		if err != nil {
+			return err
+		}
+		tgt := prop.Value
+		if tgt == nil {
+			tgt = prop.Key
+		}
+		if err := i.assignPattern(ctx, tgt, v, env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitAssignElement separates a destructuring array element into its target and
+// optional default initializer.
+func splitAssignElement(el ast.Expr) (target ast.Expr, def ast.Expr) {
+	switch e := el.(type) {
+	case *ast.AssignPattern:
+		return e.Target, e.Default
+	case *ast.AssignExpr:
+		if e.Op == token.ASSIGN {
+			return e.Target, e.Value
+		}
+	}
+	return el, nil
+}
+
+// isDestructuringPattern reports whether target is itself a nested pattern.
+func isDestructuringPattern(target ast.Expr) bool {
+	switch target.(type) {
+	case *ast.ArrayLit, *ast.ObjectLit:
+		return true
+	}
+	return false
 }
 
 // restTargetOf returns the underlying target of a rest/spread element, or nil

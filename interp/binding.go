@@ -141,104 +141,26 @@ func (i *Interpreter) iterArrayPattern(ctx context.Context, elements []ast.Expr,
 }
 
 // patternIterator returns a stepping function and a close function for
-// destructuring value as an array pattern. Arrays and strings are stepped
-// directly from their backing storage (finite, and their native iterators have
-// no observable return), so only a generic object drives the full
-// Symbol.iterator protocol with IteratorClose support.
+// consuming value via the iteration protocol. Every iterable — arrays and
+// strings included — is driven through GetIterator (§7.4.2, sync hint) so that a
+// user-overridden Symbol.iterator (e.g. a replaced Array.prototype[@@iterator])
+// is honored, and closeIter runs the canonical IteratorClose (§7.4.11): it
+// forwards a throwing return(), and throws a TypeError when return() yields a
+// non-Object or the "return" property is present but not callable.
 func (i *Interpreter) patternIterator(ctx context.Context, value Value) (step func() (Value, bool, error), closeIter func() error, err error) {
-	noClose := func() error { return nil }
-	switch v := value.(type) {
-	case *Object:
-		if v.isArray {
-			idx := 0
-			return func() (Value, bool, error) {
-				if idx >= len(v.elems) {
-					return Undef, true, nil
-				}
-				val := undefIfHole(v.elems[idx])
-				idx++
-				return val, false, nil
-			}, noClose, nil
-		}
-		return i.protocolIterator(ctx, v)
-	case String:
-		runes := []rune(string(v))
-		idx := 0
-		return func() (Value, bool, error) {
-			if idx >= len(runes) {
-				return Undef, true, nil
-			}
-			val := String(string(runes[idx]))
-			idx++
-			return val, false, nil
-		}, noClose, nil
-	case Undefined, Null:
-		return nil, nil, i.throwError(ctx, "TypeError", briefValue(value)+" is not iterable")
-	default:
-		return nil, nil, i.throwError(ctx, "TypeError", briefValue(value)+" is not iterable")
-	}
-}
-
-// protocolIterator obtains an iterator via Symbol.iterator and returns step and
-// close functions driving next() and return() per the iteration protocol.
-func (i *Interpreter) protocolIterator(ctx context.Context, obj *Object) (step func() (Value, bool, error), closeIter func() error, err error) {
-	itFn, ok := i.methodBySymbol(obj, i.symIterator)
-	if !ok {
-		return nil, nil, i.throwError(ctx, "TypeError", briefValue(obj)+" is not iterable")
-	}
-	iterator, err := itFn.fn.call(ctx, obj, nil)
+	rec, err := i.getIterator(ctx, value)
 	if err != nil {
 		return nil, nil, err
-	}
-	itObj, ok := iterator.(*Object)
-	if !ok {
-		return nil, nil, i.throwError(ctx, "TypeError", "iterator is not an object")
-	}
-	nextV, err := itObj.GetStr(ctx, "next")
-	if err != nil {
-		return nil, nil, err
-	}
-	next, ok := nextV.(*Object)
-	if !ok || !next.IsCallable() {
-		return nil, nil, i.throwError(ctx, "TypeError", "iterator.next is not a function")
 	}
 	step = func() (Value, bool, error) {
 		if err := i.checkContext(); err != nil {
+			rec.done = true
 			return Undef, true, err
 		}
-		resV, err := next.fn.call(ctx, itObj, nil)
-		if err != nil {
-			return Undef, true, err
-		}
-		res, ok := resV.(*Object)
-		if !ok {
-			return Undef, true, i.throwError(ctx, "TypeError", "iterator result is not an object")
-		}
-		doneV, err := res.GetStr(ctx, "done")
-		if err != nil {
-			return Undef, true, err
-		}
-		if ToBoolean(doneV) {
-			return Undef, true, nil
-		}
-		val, err := res.GetStr(ctx, "value")
-		if err != nil {
-			return Undef, true, err
-		}
-		return val, false, nil
+		return i.iteratorStepValue(ctx, rec)
 	}
 	closeIter = func() error {
-		retV, err := itObj.GetStr(ctx, "return")
-		if err != nil {
-			return err
-		}
-		ret, ok := retV.(*Object)
-		if !ok || !ret.IsCallable() {
-			// A missing or null return method means there is nothing to close.
-			return nil
-		}
-		_, err = ret.fn.call(ctx, itObj, nil)
-		return err
+		return i.iteratorClose(ctx, rec, nil)
 	}
 	return step, closeIter, nil
 }
@@ -312,6 +234,24 @@ func (i *Interpreter) propertyKeyName(ctx context.Context, prop *ast.Property, e
 	default:
 		return "", i.throwError(ctx, "SyntaxError", "invalid property key in pattern")
 	}
+}
+
+// patternPropertyKey computes the PropertyKey of an object-pattern property,
+// preserving a symbol key from a computed name (ToPropertyKey rather than the
+// ToString of propertyKeyName) so symbol-keyed destructuring targets resolve.
+func (i *Interpreter) patternPropertyKey(ctx context.Context, prop *ast.Property, env *Environment) (PropertyKey, error) {
+	if prop.Computed {
+		k, err := i.evalExpr(ctx, prop.Key, env)
+		if err != nil {
+			return PropertyKey{}, err
+		}
+		return i.ToPropertyKey(ctx, k)
+	}
+	name, err := i.propertyKeyName(ctx, prop, env)
+	if err != nil {
+		return PropertyKey{}, err
+	}
+	return StrKey(name), nil
 }
 
 // countParams returns the arity (number of parameters before the first default
