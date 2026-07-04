@@ -29,8 +29,13 @@ func (i *Interpreter) initArray() {
 	linkCtor(ctor, proto)
 	i.defineSpeciesGetter(ctor)
 	i.defineMethod(ctor, "isArray", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		o, ok := arg(args, 0).(*Object)
-		return Bool(ok && o.isArray), nil
+		// IsArray (§7.2.2): recurse through a Proxy to its target, throwing on a
+		// revoked proxy — isArrayV implements the full algorithm.
+		isArr, err := i.isArrayV(ctx, arg(args, 0))
+		if err != nil {
+			return nil, err
+		}
+		return Bool(isArr), nil
 	})
 	i.defineMethod(ctor, "of", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		// Array.of (§23.1.2.3): when the `this` value is a constructor, build the
