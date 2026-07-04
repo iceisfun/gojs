@@ -222,6 +222,7 @@ type intrinsics struct {
 	asyncFuncProto         *Object // %AsyncFunction.prototype%
 	asyncFuncCtor          *Object // %AsyncFunction%
 	arrayValuesFn          *Object // %Array.prototype.values% (== Array.prototype[Symbol.iterator])
+	arrayIterNextFn        *Object // original %ArrayIteratorPrototype%.next
 	dateProto              *Object
 	arrayBufferProto       *Object // %ArrayBuffer.prototype%
 	sharedArrayBufferProto *Object // %SharedArrayBuffer.prototype%

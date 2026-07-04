@@ -106,7 +106,7 @@ func (i *Interpreter) newArrayIteratorObj(next func(ctx context.Context) (Value,
 // receiver lacking that slot — a plain object, the prototype itself, an array, or
 // undefined/null — throws a TypeError (§23.1.5.1 steps 2-3).
 func (i *Interpreter) defineArrayIteratorNext() {
-	i.defineMethod(i.arrayIteratorProto, "next", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	i.arrayIterNextFn = i.defineMethod(i.arrayIteratorProto, "next", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		o, ok := this.(*Object)
 		var gen func(ctx context.Context) (Value, bool, error)
 		if ok && o.internal != nil {
@@ -131,13 +131,39 @@ func (i *Interpreter) defineArrayIteratorNext() {
 	})
 }
 
+// arrayIterationIntact reports whether iterating v would be observably identical
+// to driving the pristine array-iteration protocol — i.e. v resolves @@iterator
+// to %Array.prototype.values% (no override on the instance or its prototype
+// chain) and %ArrayIteratorPrototype%.next is unmodified. Only then may the
+// dense fast path in iterate skip the real iterator; a user who replaces either
+// method (a common feature-detection / instrumentation trick) must see it run.
+func (i *Interpreter) arrayIterationIntact(v *Object) bool {
+	if i.arrayValuesFn == nil || i.arrayIterNextFn == nil {
+		return false
+	}
+	if p, ok := i.arrayIteratorProto.getOwn(StrKey("next")); !ok || p.Accessor || p.Value != Value(i.arrayIterNextFn) {
+		return false
+	}
+	for cur := v; cur != nil; cur = cur.proto {
+		p, ok := cur.getOwn(SymKey(i.symIterator))
+		if !ok {
+			continue
+		}
+		return !p.Accessor && p.Value == Value(i.arrayValuesFn)
+	}
+	return false
+}
+
 // iterate consumes an iterable, invoking fn for each produced value. It fast-
 // paths arrays and strings, and otherwise drives the Symbol.iterator protocol.
 func (i *Interpreter) iterate(ctx context.Context, iterable Value, fn func(Value) error) error {
 	switch v := flattenRope(iterable).(type) {
 	case *Object:
-		if v.isArray {
-			// Snapshot length to mirror spec-ish behavior on mutation.
+		if v.isArray && i.arrayIterationIntact(v) {
+			// Snapshot length to mirror spec-ish behavior on mutation. This dense
+			// read is observably identical to driving the iterator only while the
+			// array-iteration protocol is pristine; a user-modified @@iterator or
+			// %ArrayIteratorPrototype%.next must be driven through the real protocol.
 			for j := 0; j < len(v.elems); j++ {
 				// The array iterator reads via [[Get]], so holes densify to undefined.
 				if err := fn(undefIfHole(v.elems[j])); err != nil {
