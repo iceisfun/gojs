@@ -429,11 +429,14 @@ func (p *parser) parseFor() ast.Stmt {
 		if p.at(token.IN) || p.at(token.OF) {
 			isOf := p.at(token.OF)
 			// The for-of LeftHandSideExpression may not begin with a bare `async`
-			// token (grammar lookahead ≠ `async of`), so `for (async of x)` is a
-			// SyntaxError. A parenthesized `(async)` (the leading token is `(`, at a
-			// different position than the identifier) or an escaped `async`
-			// (Escaped) is not the `async` keyword and remains valid (§14.7.5.1).
-			if isOf {
+			// token (grammar lookahead ∉ { async of }), so `for (async of x)` is a
+			// SyntaxError. This restriction applies only to the non-await for-of;
+			// the `for await` production restricts only `let`, so
+			// `for await (async of x)` is valid. A parenthesized `(async)` (the
+			// leading token is `(`, at a different position than the identifier) or
+			// an escaped `async` (Escaped) is not the `async` keyword and remains
+			// valid (§14.7.5.1).
+			if isOf && !await {
 				if id, ok := expr.(*ast.Ident); ok && id.Name == "async" &&
 					startTok.Pos == id.NamePos && !startTok.Escaped {
 					p.errorAt(id.NamePos, "'async' is not a valid for-of left-hand side")

@@ -104,7 +104,21 @@ func (i *Interpreter) asyncFromSyncContinuation(ctx context.Context, result Valu
 		}
 		return nil, err
 	}
-	valueWrapper := i.promiseResolveValue(value)
+	// step 5: valueWrapper = PromiseResolve(%Promise%, value). This performs the
+	// spec's Get(value, "constructor") / native-promise short-circuit, so a
+	// thrown constructor getter surfaces here. step 7: if it is abrupt, done is
+	// false, and closeOnRejection, close the sync iterator before rejecting.
+	valueWrapperV, err := i.promiseResolve(ctx, i.promiseCtor, value)
+	if err != nil {
+		if tv, ok := ThrownValue(err); ok {
+			if !done && closeOnRejection {
+				_ = i.iteratorClose(ctx, syncRec, NewThrow(tv))
+			}
+			return i.rejectedPromiseVal(tv), nil
+		}
+		return nil, err
+	}
+	valueWrapper := valueWrapperV.(*Object)
 	onFulfilled := i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
 		return i.createIterResult(arg(a, 0), done), nil
 	})

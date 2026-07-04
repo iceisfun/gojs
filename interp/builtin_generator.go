@@ -637,9 +637,12 @@ func (i *Interpreter) evalYieldDelegateAsync(ctx context.Context, iterable Value
 				return nil, err
 			}
 			if throwMethod == nil {
-				// The iterator has no throw: close it, then report the protocol
-				// violation as a TypeError (§14.4.14 step for throw completions).
-				i.asyncIteratorClose(ctx, gs, iter)
+				// The iterator has no throw: close it with a normal completion,
+				// then report the protocol violation as a TypeError (§15.5.5). An
+				// abrupt result from return() propagates ahead of the TypeError.
+				if cerr := i.asyncIteratorClose(ctx, gs, iter, nil); cerr != nil {
+					return nil, cerr
+				}
 				return nil, i.throwError(ctx, "TypeError", "The iterator does not provide a throw method")
 			}
 			done, value, err := step(throwMethod, rc.Value)
