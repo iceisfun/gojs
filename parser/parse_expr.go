@@ -391,6 +391,12 @@ func (p *parser) parseMemberTail(expr ast.Expr) ast.Expr {
 			idx := p.parseExpression()
 			rb := p.expect(token.RBRACKET)
 			expr = &ast.MemberExpr{Object: expr, Property: idx, Computed: true, EndPos: rb.End}
+		case token.TEMPLATE_NOSUB, token.TEMPLATE_HEAD:
+			// A tagged template is part of MemberExpression (MemberExpression
+			// TemplateLiteral), so it binds to the new-expression callee before the
+			// `new`: `new tag`x`` is `new (tag`x`)`, not `(new tag)`x``.
+			quasi := p.parseTemplate()
+			expr = &ast.TaggedTemplateExpr{Tag: expr, Quasi: quasi}
 		default:
 			return expr
 		}
