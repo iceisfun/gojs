@@ -145,6 +145,44 @@ func canonicalizeWTF8(s string) string {
 	return s
 }
 
+// compareUTF16 orders a and b by their UTF-16 code-unit sequences — the ordering
+// ECMAScript's IsLessThan (§7.2.13) requires for two String operands — returning
+// -1, 0, or +1. It differs from Go's native string comparison (which is
+// code-point / UTF-8-byte order) only when an astral character, whose leading
+// code unit is a high surrogate in 0xD800..0xDBFF, is compared against a BMP
+// character in 0xE000..0xFFFF: code-point order ranks the astral char higher,
+// but code-unit order ranks it lower (0xD800.. < 0xE000..).
+func compareUTF16(a, b string) int {
+	if a == b {
+		return 0
+	}
+	// ASCII is the overwhelming common case and its byte order is already
+	// code-unit order, so compare the bytes directly with no allocation.
+	if isASCIIStr(a) && isASCIIStr(b) {
+		return strings.Compare(a, b)
+	}
+	va, vb := viewOf(a), viewOf(b)
+	n := va.Len()
+	if vb.Len() < n {
+		n = vb.Len()
+	}
+	for k := 0; k < n; k++ {
+		if ca, cb := va.At(k), vb.At(k); ca != cb {
+			if ca < cb {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case va.Len() < vb.Len():
+		return -1
+	case va.Len() > vb.Len():
+		return 1
+	}
+	return 0
+}
+
 // ---------------------------------------------------------------------------
 // utf16View: the canonical code-unit view of a String.
 // ---------------------------------------------------------------------------

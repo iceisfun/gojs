@@ -492,7 +492,7 @@ func (i *Interpreter) abstractLessThan(ctx context.Context, px, py Value) (bool,
 	ls, lok := px.(String)
 	rs, rok := py.(String)
 	if lok && rok {
-		return string(ls) < string(rs), false, nil
+		return compareUTF16(string(ls), string(rs)) < 0, false, nil
 	}
 	lb, lbok := px.(*BigInt)
 	rb, rbok := py.(*BigInt)
