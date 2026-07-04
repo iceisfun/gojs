@@ -592,6 +592,9 @@ func (i *Interpreter) initTypedArray() {
 
 		i.setGlobalHidden(info.name, ctor)
 	}
+
+	// Uint8Array-only base64/hex conversion methods (the base64 proposal).
+	i.initUint8Base64()
 }
 
 // ---------------------------------------------------------------------------

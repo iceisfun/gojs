@@ -62,6 +62,9 @@ var unsupportedFeatures = map[string]bool{
 	"tail-call-optimization": true, "import-assertions": true,
 	"decorators": true, "explicit-resource-management": true,
 	"IsHTMLDDA": true, "__proto__": false,
+	// immutable-arraybuffer (ArrayBuffer.prototype.transferToImmutable) is a
+	// separate proposal gojs does not implement; skip its tests rather than fail.
+	"immutable-arraybuffer": true,
 }
 
 // ParseMeta extracts the frontmatter metadata from a test's source.
