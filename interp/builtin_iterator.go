@@ -312,12 +312,11 @@ func (i *Interpreter) initIterator() {
 		if !ok || nt == i.iteratorCtor {
 			return nil, i.throwError(ctx, "TypeError", "Abstract class Iterator not directly constructable")
 		}
-		// OrdinaryCreateFromConstructor(newTarget, "%Iterator.prototype%").
-		p := proto
-		if pv, err := nt.GetStr(ctx, "prototype"); err == nil {
-			if po, ok := pv.(*Object); ok {
-				p = po
-			}
+		// OrdinaryCreateFromConstructor(newTarget, "%Iterator.prototype%"): the
+		// default prototype comes from newTarget's own realm.
+		p, err := i.protoFromConstructor(ctx, nt, func(r *Interpreter) *Object { return r.iteratorProto })
+		if err != nil {
+			return nil, err
 		}
 		return NewObject(p), nil
 	}
