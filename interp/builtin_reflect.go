@@ -206,6 +206,21 @@ func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKe
 	if !ok {
 		return false, nil
 	}
+	// A TypedArray *receiver* completes OrdinarySetWithOwnDescriptor through its
+	// exotic [[DefineOwnProperty]] (§10.4.5.3), not the plain data write below:
+	// the receiver's own descriptor for a canonical numeric index is fetched via
+	// its [[GetOwnProperty]] and the value stored via its [[DefineOwnProperty]].
+	// A valid index is always a writable data property, so the write proceeds
+	// (coercing V through TypedArraySetElement); an out-of-bounds index makes the
+	// CreateDataProperty step fail (returning false) WITHOUT coercing V.
+	if recv.typedArray != nil && !key.IsSymbol() {
+		if n, ok := canonicalNumericIndex(key.Str); ok {
+			if _, valid := recv.typedArray.validIndex(n); !valid {
+				return false, nil
+			}
+			return i.typedArraySetElement(ctx, recv.typedArray, n, v)
+		}
+	}
 	// An Array's own "length" [[Set]] on the receiver routes through
 	// ArraySetLength (coercing/validating the value, reporting RangeError and the
 	// success flag) rather than the plain data-property write below.
