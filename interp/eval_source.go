@@ -171,6 +171,20 @@ func (i *Interpreter) evalDeclarationInstantiation(ctx context.Context, stmts []
 				}
 			}
 		}
+		// The VariableEnvironment itself may hold a top-level lexical binding: a
+		// non-strict function keeps its body's let/const/class in a lexical
+		// Environment Record layered on the variable environment (§10.2.11 step
+		// "lexEnv = NewDeclarativeEnvironment(varEnv)"), but gojs stores both in the
+		// one function-scope record, distinguished by binding.lexical. A hoisted
+		// var may not shadow such a lexical binding (`function f(){ let x;
+		// eval('var x'); }`). The global scope's lexical names are handled above.
+		if !global {
+			for name := range variableNames {
+				if b, bound := varEnv.vars[name]; bound && b.lexical {
+					return i.throwError(ctx, "SyntaxError", "Identifier '"+name+"' has already been declared")
+				}
+			}
+		}
 	}
 
 	// funcsToInitialize: the top-level function declarations, deduplicated so that
