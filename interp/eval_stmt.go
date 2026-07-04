@@ -282,7 +282,7 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 	case *ast.FuncDecl:
 		return Undef, nil // already bound during hoisting
 	case *ast.ClassDecl:
-		cls, err := i.evalClass(ctx, s.Def, env)
+		cls, err := i.evalClass(ctx, s.Def, env, "")
 		if err != nil {
 			return nil, err
 		}

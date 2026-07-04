@@ -70,18 +70,14 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.ArrowFunc:
 		return i.evalArrow(ctx, e, env, name), nil
 	case *ast.ClassExpr:
-		v, err := i.evalClass(ctx, e.Def, env)
-		if err == nil && e.Def.Name == nil && name != "" {
-			if o, ok := v.(*Object); ok {
-				// Named evaluation supplies a name to an anonymous class, but a
-				// static member named "name" (part of the class body) takes
-				// precedence — so only fill in the empty-string default.
-				if cur, ok := o.getOwn(StrKey("name")); !ok || cur.Value == String("") {
-					setFuncNameProp(o, name)
-				}
-			}
+		// NamedEvaluation supplies the inferred name to an anonymous class; it is
+		// applied inside evalClass before static initializers run, so this.name is
+		// observable there. A named class expression ignores the inferred name.
+		inferred := ""
+		if e.Def.Name == nil {
+			inferred = name
 		}
-		return v, err
+		return i.evalClass(ctx, e.Def, env, inferred)
 	case *ast.UnaryExpr:
 		return i.evalUnary(ctx, e, env)
 	case *ast.UpdateExpr:

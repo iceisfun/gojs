@@ -30,8 +30,13 @@ type classData struct {
 	sharedPrivate map[*PrivateName]*Property
 }
 
-// evalClass evaluates a class definition to its constructor object.
-func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Environment) (Value, error) {
+// evalClass evaluates a class definition to its constructor object. inferredName
+// is the NamedEvaluation name for an anonymous class expression (e.g. "C" in
+// `const C = class {}`); it is applied as the class name so it is observable
+// (via this.name) inside static field initializers and static blocks, which run
+// during this evaluation (ClassDefinitionEvaluation sets the name at step 18,
+// before running static elements).
+func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Environment, inferredName string) (Value, error) {
 	// The class body runs in its own scope so the class name is in scope inside
 	// methods (for recursion) and so `extends` can be evaluated.
 	classEnv := NewEnvironment(env, false)
@@ -109,7 +114,11 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 		}
 	}
 
-	ctor := i.makeClassConstructor(def, cd, ctorDef, classEnv, proto)
+	className := inferredName
+	if def.Name != nil {
+		className = def.Name.Name
+	}
+	ctor := i.makeClassConstructor(def, cd, ctorDef, classEnv, proto, className)
 	ctor.internal = map[string]any{"class": cd}
 	if superCtor != nil {
 		ctor.SetProto(superCtor)
@@ -196,11 +205,7 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 }
 
 // makeClassConstructor builds the constructor callable for a class.
-func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, ctorDef *ast.FuncDef, classEnv *Environment, proto *Object) *Object {
-	name := ""
-	if def.Name != nil {
-		name = def.Name.Name
-	}
+func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, ctorDef *ast.FuncDef, classEnv *Environment, proto *Object, name string) *Object {
 	fnObj := NewObject(i.functionProto)
 	fnObj.class = "Function"
 
