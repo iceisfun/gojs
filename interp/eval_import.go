@@ -83,6 +83,13 @@ func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier strin
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
 	}
 
+	// Link phase: validate the module graph's indirect exports before evaluating.
+	// An ambiguous or unresolvable (missing / circular) `export … from` binding is
+	// a SyntaxError that rejects the import (ECMA-262 §16.2.1.6.3 ResolveExport).
+	if err := i.validateModuleLinks(ctx, id); err != nil {
+		return nil, err
+	}
+
 	// Flatten export declarations into ordinary statements, recording the
 	// exported-name -> local-name mapping so the namespace can bind live getters.
 	body, exports := i.flattenModuleExports(prog.Body)

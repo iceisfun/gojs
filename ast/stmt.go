@@ -159,7 +159,14 @@ type ExportStmt struct {
 	DefaultExpr Expr               // `export default <expr>`; nil otherwise
 	Specifiers  []*ExportSpecifier // `export { … }` entries
 	Default     bool               // true for `export default …`
-	EndPos      token.Pos
+	// Source is the decoded `from` module specifier of a re-export
+	// (`export { … } from 'src'`, `export * from 'src'`), or "" when absent.
+	Source string
+	// Star is true for `export * [as name] from 'src'`; StarName holds the
+	// namespace alias of `export * as name from 'src'` ("" for a bare `export *`).
+	Star     bool
+	StarName string
+	EndPos   token.Pos
 }
 
 func (s *ExportStmt) Pos() token.Pos { return s.Keyword }

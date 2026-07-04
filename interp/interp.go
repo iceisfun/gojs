@@ -79,6 +79,10 @@ type Interpreter struct {
 	// imported via dynamic import(), so a module is evaluated at most once and
 	// repeated imports share the same namespace.
 	moduleNamespaces map[string]*Object
+	// linkedModules caches the export structure extracted from each parsed module
+	// (by id), so the linker can run ResolveExport for indirect-export validation
+	// without re-parsing; see module_link.go.
+	linkedModules map[string]*linkedModule
 
 	// templateCache is the realm's [[TemplateMap]] (§13.2.8.4 GetTemplateObject).
 	// It canonicalizes tagged-template objects by source location: each distinct

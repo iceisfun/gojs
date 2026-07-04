@@ -173,22 +173,29 @@ func (p *parser) parseExport() ast.Stmt {
 			}
 		}
 		p.expect(token.RBRACE)
-		// An optional `from ModuleSpecifier` re-export clause is consumed but not
-		// resolved by the loader.
+		// An optional `from ModuleSpecifier` re-export clause: record the specifier
+		// so the linker can resolve the indirect exports it introduces.
 		if p.at(token.IDENT) && p.cur().Literal == "from" {
 			p.next()
+			if p.at(token.STRING) {
+				es.Source = p.cur().Literal
+			}
 			p.accept(token.STRING)
 		}
 		p.expectSemicolon()
 	case p.at(token.STAR):
-		// export * [as name] from '…' — consumed but not resolved.
+		// export * [as name] from '…'
 		p.next()
+		es.Star = true
 		if p.at(token.IDENT) && p.cur().Literal == "as" {
 			p.next()
-			p.parseModuleExportName()
+			es.StarName = p.parseModuleExportName()
 		}
 		if p.at(token.IDENT) && p.cur().Literal == "from" {
 			p.next()
+			if p.at(token.STRING) {
+				es.Source = p.cur().Literal
+			}
 			p.accept(token.STRING)
 		}
 		p.expectSemicolon()
