@@ -257,7 +257,10 @@ func (p *parser) parseUnary() ast.Expr {
 			// node's type, so `delete x`, `delete (x)`, and `delete ((x))` are all
 			// rejected, while `delete x.y`, `delete (x, y)`, and `delete f()` are not.
 			if p.strict {
-				if id, ok := operand.(*ast.Ident); ok {
+				// new.target is a MetaProperty, not an IdentifierReference, so
+				// `delete new.target` is permitted (and evaluates to true) even in
+				// strict mode.
+				if id, ok := operand.(*ast.Ident); ok && id.Name != "new.target" {
 					p.errorAt(id.NamePos, "Delete of an unqualified identifier in strict mode")
 				}
 			}

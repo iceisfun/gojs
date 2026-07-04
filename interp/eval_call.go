@@ -326,8 +326,10 @@ func (i *Interpreter) evalCall(ctx context.Context, e *ast.CallExpr, env *Enviro
 		return nil, i.throwError(ctx, "TypeError", i.calleeName(e.Callee)+" is not a function")
 	}
 	// A direct eval — the callee is the identifier `eval` resolving to the
-	// %eval% intrinsic — runs in the caller's lexical context.
-	if fnObj == i.evalFn {
+	// %eval% intrinsic — runs in the caller's lexical context. An optional call
+	// `eval?.(x)` uses the OptionalChain production, which is never a direct eval,
+	// so it evaluates in the global scope like an indirect eval (§19.2.1.1).
+	if fnObj == i.evalFn && !e.Optional {
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "eval" {
 			return i.directEval(ctx, arg(args, 0), env)
 		}

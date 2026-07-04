@@ -76,7 +76,10 @@ func (i *Interpreter) applyUnaryValue(ctx context.Context, op token.Type, v Valu
 // evalTypeof implements the typeof operator, which yields "undefined" for an
 // unresolved identifier rather than throwing.
 func (i *Interpreter) evalTypeof(ctx context.Context, operand ast.Expr, env *Environment) (Value, error) {
-	if id, ok := operand.(*ast.Ident); ok {
+	if id, ok := operand.(*ast.Ident); ok && id.Name != "new.target" {
+		// new.target is a meta-property, not an identifier reference — it never
+		// throws and `typeof new.target` must report its real value, so it is
+		// excluded from the unresolved-identifier short-circuit below.
 		// A `with`-bound name resolves to a real value, so typeof must not report
 		// "undefined" for it; fall through to the general [[Get]] path.
 		bound := false
