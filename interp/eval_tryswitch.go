@@ -31,19 +31,26 @@ func (i *Interpreter) evalTry(ctx context.Context, s *ast.TryStmt, env *Environm
 
 // evalCatch runs a catch clause, binding the caught value to its parameter.
 func (i *Interpreter) evalCatch(ctx context.Context, handler *ast.CatchClause, caught Value, env *Environment) (Value, error) {
-	scope := NewEnvironment(env, false)
+	// CatchClauseEvaluation (§14.15.3): the catch parameter is bound in its own
+	// declarative environment (catchEnv), and its BindingInitialization — which
+	// may run default-value initializers that create closures — happens there.
+	catchEnv := NewEnvironment(env, false)
 	if handler.Param != nil {
 		bind := func(name string, v Value) {
-			scope.vars[name] = &binding{value: v, mutable: true, initialized: true}
+			catchEnv.vars[name] = &binding{value: v, mutable: true, initialized: true}
 		}
-		if err := i.bindPattern(ctx, handler.Param, caught, scope, bind); err != nil {
+		if err := i.bindPattern(ctx, handler.Param, caught, catchEnv, bind); err != nil {
 			return nil, err
 		}
 	}
-	if err := i.hoistDeclarations(ctx, handler.Body.Body, scope, false); err != nil {
+	// The Block then evaluates in a *fresh* environment nested inside catchEnv
+	// (Block : { StatementList }), so a let/const in the body is neither observed
+	// by nor colliding with the catch parameter's initializer closures.
+	blockEnv := NewEnvironment(catchEnv, false)
+	if err := i.hoistDeclarations(ctx, handler.Body.Body, blockEnv, false); err != nil {
 		return nil, err
 	}
-	return i.execStmts(ctx, handler.Body.Body, scope)
+	return i.execStmts(ctx, handler.Body.Body, blockEnv)
 }
 
 // evalSwitch evaluates a switch statement. Matching uses strict equality; once a

@@ -100,16 +100,11 @@ func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *E
 		}
 	}
 	env.gen = gs
-	// A named generator/async(-generator) function *expression* can refer to
-	// itself by name through an immutable binding in its body scope (mirroring the
-	// plain named-function-expression case in makeFunction). A declaration reaches
-	// its mutable enclosing-scope binding instead, so selfBind gates this. Methods
-	// (homeObj != nil) and arrows never create this binding.
-	if selfBind && def.Name != nil && !arrow && homeObj == nil && fnObj != nil {
-		if _, exists := closure.vars[def.Name.Name]; !exists {
-			env.vars[def.Name.Name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
-		}
-	}
+	// A named generator/async(-generator) function *expression* refers to itself
+	// through an immutable binding in a dedicated funcEnv wrapping its closure,
+	// established at creation time (see the FuncExpr case in evalExpr); no per-call
+	// self-binding is required here.
+	_ = selfBind
 	// Establish the arguments object before binding parameters so it is visible
 	// to default-value initializers (gojs uses an unmapped snapshot, so there is
 	// no aliasing to defer); a parameter named "arguments" shadows it, which

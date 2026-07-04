@@ -284,6 +284,22 @@ func (i *Interpreter) evalCallee(ctx context.Context, callee ast.Expr, env *Envi
 	if _, ok := callee.(*ast.SuperExpr); ok {
 		return i.resolveSuperCall(ctx, env)
 	}
+	// EvaluateCall (§13.3.6.2): when the callee is an identifier reference whose
+	// base is an object Environment Record (a `with` binding), the call's this
+	// value is that record's WithBaseObject — so `with (o) { m(); }` calls o.m
+	// with this === o. A declarative binding gives an undefined this. The value
+	// and the with-base are resolved in one walk so a Proxy `has` trap on the
+	// with-object is observed exactly once.
+	if id, ok := callee.(*ast.Ident); ok {
+		fn, base, err := i.resolveIdentForCall(ctx, id.Name, env)
+		if err != nil {
+			return fn, Undef, err
+		}
+		if base != nil {
+			return fn, base, nil
+		}
+		return fn, Undef, nil
+	}
 	fn, err := i.evalExprNamed(ctx, callee, env, "")
 	return fn, Undef, err
 }

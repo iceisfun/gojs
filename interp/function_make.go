@@ -123,16 +123,12 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 				env.newTgt = Undef
 			}
 		}
-		// A named function *expression* refers to itself through a fresh immutable
-		// binding of its own name (§15.2.5). A function declaration does not: its
-		// name is a mutable binding in the enclosing scope, so the body reaches
-		// that binding and may reassign it (`function f(){ f = 1 }` — legal even in
-		// strict mode). selfBind is therefore true only for the FuncExpr path.
-		if selfBind && def.Name != nil && kind == kindNormal {
-			if _, exists := closure.vars[name]; !exists {
-				env.vars[name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
-			}
-		}
+		// A named function *expression* refers to itself by name through an
+		// immutable binding in a dedicated environment that wraps its closure; that
+		// funcEnv is established at function-creation time (see the FuncExpr case in
+		// evalExpr), so no per-call self-binding is needed here. A function
+		// declaration's name is instead a mutable binding in the enclosing scope.
+		_ = selfBind
 		// Slot-eligible compiled body: params and vars live in frame slots, so skip
 		// the arguments object, parameter binding into env, and var hoisting — the
 		// slot prologue handles them. env is kept (this/globals/self-name).

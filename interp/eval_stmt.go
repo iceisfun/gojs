@@ -455,6 +455,31 @@ func (i *Interpreter) withSetMutableBinding(ctx context.Context, obj *Object, na
 // evalVarDecl evaluates a var/let/const declaration, assigning initializers.
 func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *Environment) error {
 	for _, d := range decl.Decls {
+		// A simple `var x [= init]` assigns via PutValue(ResolveBinding(x), value)
+		// (§14.3.2.1): ResolveBinding runs BEFORE the initializer, so an enclosing
+		// `with` object that owns x at resolve time receives the write — even if
+		// the initializer (e.g. `delete obj.x`) removes that property in between.
+		if id, ok := d.Target.(*ast.Ident); ok && decl.Kind == token.VAR {
+			if d.Init == nil {
+				continue // bare `var x;` keeps any existing hoisted value
+			}
+			base, err := i.identWithBase(ctx, id.Name, env)
+			if err != nil {
+				return err
+			}
+			value, err := i.evalExprNamed(ctx, d.Init, env, id.Name)
+			if err != nil {
+				return err
+			}
+			if obj, ok := base.(*Object); ok {
+				if err := i.withSetMutableBinding(ctx, obj, id.Name, value, env.isStrict()); err != nil {
+					return err
+				}
+			} else if err := i.assignIdent(ctx, id.Name, value, env); err != nil {
+				return err
+			}
+			continue
+		}
 		var value Value = Undef
 		if d.Init != nil {
 			v, err := i.evalExprNamed(ctx, d.Init, env, bindingName(d.Target))
@@ -491,16 +516,6 @@ func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *E
 			// live binding initialized to undefined.
 			if decl.Kind != token.VAR {
 				forEachPatternName(d.Target, func(n string) { bind(n, Undef) })
-			}
-			continue
-		}
-		// A `var x = init` with a simple BindingIdentifier target assigns via
-		// PutValue(ResolveBinding(x), value) (§14.3.2.1), so an enclosing `with`
-		// object that has an own `x` property receives the write instead of the
-		// hoisted var binding.
-		if id, ok := d.Target.(*ast.Ident); ok && decl.Kind == token.VAR {
-			if err := i.assignIdent(ctx, id.Name, value, env); err != nil {
-				return err
 			}
 			continue
 		}

@@ -62,8 +62,24 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.ObjectLit:
 		return i.evalObjectLit(ctx, e, env)
 	case *ast.FuncExpr:
-		fn := i.makeFunction(e.Def, env, kindNormal, nil, true)
-		if e.Def.Name == nil && name != "" {
+		if e.Def.Name != nil {
+			// A named function *expression* binds its own name in a dedicated
+			// immutable environment that wraps the closure — the "funcEnv" of
+			// InstantiateOrdinaryFunctionExpression (§15.2.5). Because that binding
+			// lives one scope out from the function's variable environment, a `var`
+			// or parameter in the body with the same name shadows it (so
+			// `function n(){ var n; }`'s inner n is a fresh, undefined binding),
+			// while recursion still resolves the function through the scope chain.
+			funcEnv := NewEnvironment(env, false)
+			b := &binding{mutable: false, weakImmutable: true, initialized: false}
+			funcEnv.vars[e.Def.Name.Name] = b
+			fn := i.makeFunction(e.Def, funcEnv, kindNormal, nil, false)
+			b.value = fn
+			b.initialized = true
+			return fn, nil
+		}
+		fn := i.makeFunction(e.Def, env, kindNormal, nil, false)
+		if name != "" {
 			setFuncNameProp(fn, name)
 		}
 		return fn, nil
@@ -112,6 +128,67 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	default:
 		return nil, i.throwError(ctx, "SyntaxError", "unsupported expression")
 	}
+}
+
+// resolveIdentForCall looks up an identifier used as a call target, returning
+// both its value and — when it resolves through a `with` object environment
+// record — that record's binding object (the call's `this` value per
+// EvaluateCall, §13.3.6.2). It performs a SINGLE interleaved walk so an
+// observable [[HasProperty]] (a Proxy `has` trap) on a with-object runs exactly
+// once, matching resolveIdent's traversal.
+func (i *Interpreter) resolveIdentForCall(ctx context.Context, name string, env *Environment) (Value, Value, error) {
+	if name == "undefined" {
+		return Undef, nil, nil
+	}
+	if name == "new.target" {
+		return env.newTarget(), nil, nil
+	}
+	for e := env; e != nil; e = e.parent {
+		if e.withObj != nil {
+			obj, ok, err := i.withHasBinding(ctx, e.withObj, name)
+			if err != nil {
+				return nil, nil, err
+			}
+			if ok {
+				v, err := i.withGetBindingValue(ctx, obj, name, env.isStrict())
+				return v, obj, err
+			}
+		}
+		if b, ok := e.vars[name]; ok {
+			if !b.initialized {
+				return nil, nil, i.throwError(ctx, "ReferenceError", "Cannot access '"+name+"' before initialization")
+			}
+			return b.value, nil, nil
+		}
+	}
+	if i.global.HasOwn(StrKey(name)) || i.global.Has(StrKey(name)) {
+		v, err := i.global.GetStr(ctx, name)
+		return v, nil, err
+	}
+	return nil, nil, i.throwError(ctx, "ReferenceError", name+" is not defined")
+}
+
+// identWithBase returns the `with` binding object through which name resolves,
+// or nil when name resolves to a declarative binding (or the global object)
+// first. Unlike resolveIdentForCall it does not read the binding's value — it
+// implements only the HasBinding half of ResolveBinding, used where a reference
+// is resolved before (or without) a GetValue (e.g. a `var x = init` LHS).
+func (i *Interpreter) identWithBase(ctx context.Context, name string, env *Environment) (Value, error) {
+	for e := env; e != nil; e = e.parent {
+		if e.withObj != nil {
+			obj, ok, err := i.withHasBinding(ctx, e.withObj, name)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return obj, nil
+			}
+		}
+		if _, ok := e.vars[name]; ok {
+			return nil, nil
+		}
+	}
+	return nil, nil
 }
 
 // resolveIdent looks up an identifier, falling back to the global object and
