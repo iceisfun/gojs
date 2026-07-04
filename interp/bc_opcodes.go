@@ -40,10 +40,11 @@ const (
 	opPushThis      // GetThisBinding(env)
 	opPushNewTarget // env.newTarget()
 
-	// Identifier reads/writes (name-based; reuse resolveIdent / assignIdent).
-	opLoadName   // a=name index → push resolveIdent(name)
-	opStoreName  // a=name index → assignIdent(name, pop) (leaves nothing)
-	opTypeofName // a=name index → typeof, but undefined-safe for an unresolved name
+	// Identifier reads/writes (name-based; reuse resolveIdent / references).
+	opLoadName    // a=name index → push resolveIdent(name)
+	opResolveName // a=name index → push a target Reference (assignment, resolved first)
+	opPutRef      // pop value + Reference → PutValue; push value back (assignment result)
+	opTypeofName  // a=name index → typeof, but undefined-safe for an unresolved name
 
 	// Operators.
 	opBinop     // a=token.Type → push applyBinary(op, a:=pop2, b:=pop1)

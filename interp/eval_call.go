@@ -137,11 +137,20 @@ func (i *Interpreter) evalMember(ctx context.Context, e *ast.MemberExpr, env *En
 		}
 		return val, base, nil
 	}
-	key, err := i.memberKey(ctx, e, env)
-	if err != nil {
-		return nil, nil, err
+	// Resolve through a property Reference so a nullish base rejects (ToObject)
+	// BEFORE a computed key is coerced (ToPropertyKey) — §13.3.3 / GetValue. So
+	// `null[{toString(){throw}}]` throws TypeError, not the key's toString error.
+	ref := &reference{kind: refProp, strict: env.isStrict(), base: base}
+	if e.Computed {
+		kv, err := i.evalExpr(ctx, e.Property, env)
+		if err != nil {
+			return nil, nil, err
+		}
+		ref.keyVal = kv
+	} else {
+		ref.key, ref.keyDone = StrKey(e.Property.(*ast.Ident).Name), true
 	}
-	val, err := i.getProperty(ctx, base, key)
+	val, err := i.getRefValue(ctx, ref)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -333,13 +342,16 @@ func (i *Interpreter) evalNew(ctx context.Context, e *ast.NewExpr, env *Environm
 	if err != nil {
 		return nil, err
 	}
-	ctor, ok := callee.(*Object)
-	if !ok || !ctor.IsConstructor() {
-		return nil, i.throwError(ctx, "TypeError", i.calleeName(e.Callee)+" is not a constructor")
-	}
+	// EvaluateNew (§13.3.5.1): ArgumentListEvaluation happens BEFORE the
+	// IsConstructor check, so `new x(x = Array)` evaluates the argument (mutating
+	// x) and only then throws for the original non-constructor value.
 	args, err := i.evalArgs(ctx, e.Arguments, env)
 	if err != nil {
 		return nil, err
+	}
+	ctor, ok := callee.(*Object)
+	if !ok || !ctor.IsConstructor() {
+		return nil, i.throwError(ctx, "TypeError", i.calleeName(e.Callee)+" is not a constructor")
 	}
 	return ctor.fn.construct(ctx, ctor, args)
 }

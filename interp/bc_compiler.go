@@ -486,15 +486,14 @@ func (c *bcCompiler) arrayLit(ex *ast.ArrayLit) {
 }
 
 func (c *bcCompiler) template(ex *ast.TemplateLit) {
-	// Build ((((q0 + e0) + q1) + e1) ... ) — string-prefixed `+` matches the
-	// ToString-and-concatenate semantics of an untagged template.
-	c.emit(opPushConst, c.code.constIndex(String(ex.Quasis[0].Cooked)), 0)
-	for idx, sub := range ex.Exprs {
+	// Evaluate each interpolation, then opTemplate applies ToString to each and
+	// interleaves the cooked quasis into a flat string — matching evalTemplate
+	// exactly. (A `+`-chain would instead use ToPrimitive(default) and yield a
+	// rope, both observably different.)
+	for _, sub := range ex.Exprs {
 		c.expr(sub)
-		c.emit(opBinop, int32(token.PLUS), 0)
-		c.emit(opPushConst, c.code.constIndex(String(ex.Quasis[idx+1].Cooked)), 0)
-		c.emit(opBinop, int32(token.PLUS), 0)
 	}
+	c.emit(opTemplate, c.code.nodeIndex(ex), 0)
 }
 
 func (c *bcCompiler) assign(ex *ast.AssignExpr, _ string) {
@@ -506,15 +505,19 @@ func (c *bcCompiler) assign(ex *ast.AssignExpr, _ string) {
 	}
 	switch tgt := ex.Target.(type) {
 	case *ast.Ident:
-		// NamedEvaluation applies only to a bare identifier target, not a covered
-		// `(x) = fn` (§13.15.2), so suppress the name hint when parenthesized.
+		// Resolve the target Reference BEFORE the RHS (§13.15.2): a with-record in
+		// the runtime scope chain (not lexically in this function) can have its
+		// binding deleted by the RHS, and a resolve-first reference then throws the
+		// correct ReferenceError on PutValue. NamedEvaluation applies only to a bare
+		// identifier target, not a covered `(x) = fn`, so suppress the name hint when
+		// parenthesized.
 		inferName := tgt.Name
 		if tgt.Parenthesized {
 			inferName = ""
 		}
+		c.emit(opResolveName, c.code.nameIndex(tgt.Name), 0)
 		c.exprNamed(ex.Value, inferName)
-		c.emit(opDup, 0, 0)
-		c.emit(opStoreName, c.code.nameIndex(tgt.Name), 0)
+		c.emit(opPutRef, 0, 0)
 	case *ast.MemberExpr:
 		_, super := tgt.Object.(*ast.SuperExpr)
 		_, priv := tgt.Property.(*ast.PrivateIdent)

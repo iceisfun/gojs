@@ -1,9 +1,52 @@
 # gojs — Bytecode VM design report
 
-Status: design study, 2026-07-03. No code changes proposed here; this is an
-analysis of what a bytecode VM for gojs would look like, whether it could host
-`tsc`, and what it buys us. Grounded in the current tree-walker (files cited
-inline).
+Status: design study + working prototype, 2026-07-03. The `bytecode` branch now
+carries a functioning opt-in VM (see "Prototype status" below); the rest of this
+document is the design analysis it was built from — what a bytecode VM for gojs
+looks like, whether it could host `tsc`, and what it buys us. Grounded in the
+current tree-walker (files cited inline).
+
+---
+
+## Prototype status (bytecode branch, 2026-07-03)
+
+A first working slice exists behind `WithBytecode()` — off by default, tree-walker
+unchanged as the reference. Files: `interp/bc_opcodes.go`, `bc_compiler.go`,
+`bc_vm.go`, `bc_vm_test.go`, `bc_bench_test.go`.
+
+**What it does.** Eligible (non-generator, non-async) function bodies are compiled
+once in `makeFunction` to a ~55-opcode stack machine and executed by `execCode`.
+The compiler lowers the hot structural nodes — control flow, operators, calls,
+member access, closures, templates, `new` — to real opcodes and emits an
+`opEvalNode`/`opEvalStmt` escape hatch that runs any not-yet-native subtree on the
+tree-walker with the frame's live env. So a compiled body is **always correct**:
+unimplemented nodes fall back per-subtree, and labels / direct `eval` fall back the
+whole function. Goroutine coroutines are untouched (generators/async never
+compile). Scopes are still name-based in this slice (the same `*Environment` ops
+the tree-walker uses) — slot-based locals are the next layer.
+
+**Correctness.** Validated differentially: a 60-case unit test asserts bytecode
+output == tree-walker output, and a Test262 harness toggle (`GOJS_T262_BYTECODE=1`)
+runs the whole suite on the VM. A ~70k-test broad pass (all of `language/*` +
+23 built-in domains) reduced to **zero divergence** after fixing the handful the
+diff surfaced — three of which were latent **tree-walker** bugs the VM exposed and
+that are now fixed for both engines (`new` arg-vs-isConstructor order §13.3.5.1;
+`null[key]` ToObject-before-ToPropertyKey §13.3.3; and templates now flat-string +
+ToString-correct).
+
+**Performance (tree-walker vs VM, same programs; dispatch-only, no slots yet):**
+
+| workload | tree-walker | bytecode | speedup |
+|---|---|---|---|
+| `fib(27)` (recursion) | 1723 ms | 1242 ms | **1.39×** |
+| 200k arithmetic loop | 254 ms | 159 ms | **1.60×** |
+| 400×400 nested loop | 182 ms | 118 ms | **1.54×** |
+| 100k method calls | 241 ms | 184 ms | **1.31×** |
+
+Allocations are ~unchanged (name-based scopes still allocate env maps), so the
+**1.3–1.6× is pure dispatch win** — exactly what §0 predicted from the
+architecture, no profiler needed. The next lever (slot-based locals) is the one
+that attacks the allocation count.
 
 ---
 

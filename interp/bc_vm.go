@@ -22,6 +22,10 @@ type bcFrame struct {
 	stack []Value
 	env   *Environment
 	loops []bcLoopRT
+	// refs is a side stack of assignment target References resolved by
+	// opResolveName before their RHS runs (kept off the Value stack so it needs no
+	// boxing). opPutRef pops one.
+	refs []*reference
 }
 
 // bcLoopRT records a live loop so break/continue (native, or an unlabeled signal
@@ -104,19 +108,22 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 				return nil, err
 			}
 			fr.push(v)
-		case opStoreName:
-			// Assignment (not declaration): resolve the target reference and
-			// PutValue, so strict writes to an unresolved name throw ReferenceError,
-			// const reassignment throws TypeError, and a with/global record is
-			// honored — exactly as evalAssign's simple-identifier path. (In compiled
-			// code no with/eval can run between the RHS and this resolution — both
-			// force a fallback — so resolving here matches the spec's resolve-first
-			// ordering observably.)
-			value := fr.pop()
+		case opResolveName:
+			// Resolve an assignment target reference BEFORE its RHS is evaluated
+			// (§13.15.2). Kept on the side ref-stack so the RHS's operands sit
+			// undisturbed on the Value stack.
 			ref, err := i.resolveIdentRef(ctx, code.names[in.a], fr.env)
 			if err != nil {
 				return nil, err
 			}
+			fr.refs = append(fr.refs, ref)
+		case opPutRef:
+			// PutValue with assignment semantics: strict write to an unresolved name
+			// throws ReferenceError, const reassignment throws TypeError, a with /
+			// global record is honored. Leaves the assigned value (assignment result).
+			value := fr.stack[len(fr.stack)-1]
+			ref := fr.refs[len(fr.refs)-1]
+			fr.refs = fr.refs[:len(fr.refs)-1]
 			if err := i.putRefValue(ctx, ref, value); err != nil {
 				return nil, err
 			}
@@ -289,6 +296,22 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 			fr.env = lp.env
 			fr.stack = fr.stack[:lp.stackLen]
 			fr.ip = lp.contIP
+
+		case opTemplate:
+			tl := code.nodes[in.a].(*ast.TemplateLit)
+			vals := fr.popN(len(tl.Exprs))
+			var b []byte
+			for idx, quasi := range tl.Quasis {
+				b = append(b, quasi.Cooked...)
+				if idx < len(vals) {
+					s, err := i.ToStringV(ctx, vals[idx])
+					if err != nil {
+						return nil, err
+					}
+					b = append(b, s...)
+				}
+			}
+			fr.push(String(string(b)))
 
 		case opClosure:
 			node := code.nodes[in.a].(ast.Expr)

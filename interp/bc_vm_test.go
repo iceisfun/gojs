@@ -118,6 +118,17 @@ var bcDiffCases = []string{
 	`class A{constructor(){this.x=1}} class B extends A{constructor(){ (()=>{ super() })(); this.y=2 }} function f(){ var b=new B(); return b.x+b.y } f()`,
 	// regression: parenthesized assignment target suppresses NamedEvaluation
 	`function f(){ var g; (g) = function(){}; return g.name } f()`,
+	// regression: template must ToString each part into a flat string (not a
+	// ToPrimitive-default `+`-chain rope) — object with asymmetric valueOf/toString
+	"function f(){ var o={valueOf(){return 1}, toString(){return 's'}}; return `${o}` } f()",
+	// regression: a template result is a real string accepted by String-strict
+	// builtins (RegExp.escape rejected a rope)
+	"function f(){ return RegExp.escape(`.${'a'}`) } f()",
+	"function f(){ return `n=${1+2} b=${true} u=${undefined} nil=${null}` } f()",
+	// regression: new evaluates args before the isConstructor check
+	`var x = {}; function f(){ try { new x(x = Array) } catch(e){} return x === Array } f()`,
+	// regression: null[key] throws TypeError before the key's toString runs
+	`function f(){ var hit=0; var k={toString(){hit=1;return "p"}}; try { (null)[k] } catch(e){} return hit + ":" + (typeof null) } f()`,
 }
 
 func TestBytecodeDiff(t *testing.T) {
