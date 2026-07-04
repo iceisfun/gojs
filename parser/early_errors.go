@@ -364,6 +364,75 @@ func isLabeledFunction(stmt ast.Stmt) bool {
 	}
 }
 
+// checkCatchParam enforces the CatchParameter static-semantics early errors
+// (ECMA-262 §14.15.1):
+//
+//   - BoundNames of CatchParameter must contain no duplicate elements (a
+//     destructuring pattern such as `catch ([x, x])`).
+//   - No element of BoundNames of CatchParameter may also occur in the
+//     LexicallyDeclaredNames of the catch Block (`catch (x) { let x; }`, or a
+//     directly-nested FunctionDeclaration `catch (e) { function e(){} }`, which
+//     is a lexically declared name of the block).
+//
+// Both hold in strict and sloppy code. The separate restriction against
+// intersecting the block's VarDeclaredNames (with the Annex B §B.3.5 relaxation
+// for a single-identifier CatchParameter) is not enforced here.
+func (p *parser) checkCatchParam(cc *ast.CatchClause) {
+	if p.err != nil || cc == nil || cc.Param == nil {
+		return
+	}
+	seen := map[string]bool{}
+	var dupName string
+	var dupPos token.Pos
+	dup := false
+	p.collectBindingNames(cc.Param, func(name string, pos token.Pos) {
+		if seen[name] && !dup {
+			dup, dupName, dupPos = true, name, pos
+		}
+		seen[name] = true
+	})
+	if dup {
+		p.earlyError(dupPos, "Duplicate binding '"+dupName+"' in catch parameter")
+		return
+	}
+	if cc.Body == nil {
+		return
+	}
+	// LexicallyDeclaredNames of the catch Block: let/const bindings, class
+	// declarations, and (unlike a function body's top level) block-level
+	// FunctionDeclarations, which are lexically scoped within a Block.
+	lex := map[string]token.Pos{}
+	addLex := func(name string, pos token.Pos) {
+		if _, ok := lex[name]; !ok {
+			lex[name] = pos
+		}
+	}
+	for _, s := range cc.Body.Body {
+		switch st := s.(type) {
+		case *ast.VarDecl:
+			if st.Kind == token.LET || st.Kind == token.CONST {
+				for _, d := range st.Decls {
+					forEachBindingName(d.Target, addLex)
+				}
+			}
+		case *ast.ClassDecl:
+			if st.Def.Name != nil {
+				addLex(st.Def.Name.Name, st.Def.Name.NamePos)
+			}
+		case *ast.FuncDecl:
+			if st.Def.Name != nil {
+				addLex(st.Def.Name.Name, st.Def.Name.NamePos)
+			}
+		}
+	}
+	for name := range seen {
+		if pos, ok := lex[name]; ok {
+			p.earlyError(pos, "Identifier '"+name+"' has already been declared")
+			return
+		}
+	}
+}
+
 // earlyError records a SyntaxError at pos (only the first is kept).
 func (p *parser) earlyError(pos token.Pos, msg string) {
 	if p.err == nil {

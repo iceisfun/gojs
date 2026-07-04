@@ -121,13 +121,16 @@ func (p *parser) tryParseArrow() ast.Expr {
 		}
 	}
 
-	switch p.peek(base).Type {
-	case token.IDENT:
-		// single-identifier arrow: x => …
+	switch {
+	case p.peek(base).Type == token.IDENT || isContextualKeyword(p.peek(base).Type):
+		// single-identifier arrow: x => … . A contextual keyword (yield, await,
+		// let, of, get, set, static) may serve as the sole BindingIdentifier
+		// parameter (`yield => 1` in sloppy code); its context-sensitive
+		// reservation is enforced when the parameter is committed below.
 		if p.peek(base+1).Type != token.ARROW || p.peek(base+1).NewlineBefore {
 			return nil
 		}
-	case token.LPAREN:
+	case p.peek(base).Type == token.LPAREN:
 		// (params) => … — verify the matching paren is followed by =>.
 		close := p.matchParen(p.idx + base)
 		if close < 0 {
@@ -153,18 +156,24 @@ func (p *parser) tryParseArrow() ast.Expr {
 	if async {
 		p.inAsync = true
 	}
-	// An arrow is a function boundary for ContainsAwait, so the `await`
-	// reservation imposed by an enclosing class static initialization block does
-	// not reach into the arrow's parameters or body.
+	// ArrowParameters are still parsed with the enclosing [Await] parameter, so
+	// the `await` reservation imposed by an enclosing class static initialization
+	// block reaches into the arrow's *parameter list* (both a BindingIdentifier
+	// named `await` and an `await` reference inside a default initializer are
+	// early errors). The reservation is a function boundary only for the arrow's
+	// *body* — a ConciseBody carries no [Await] parameter — so staticBlockAwait is
+	// cleared just before the body below.
 	prevStaticAwait := p.staticBlockAwait
-	p.staticBlockAwait = false
-	if p.at(token.IDENT) {
+	if p.at(token.IDENT) || isContextualKeyword(p.cur().Type) {
 		id := p.next()
-		p.checkReservedIdentifier(id.Literal, id.Pos)
-		arrow.Params = []ast.Expr{&ast.Ident{NamePos: id.Pos, Name: id.Literal}}
+		name := identText(id)
+		p.checkReservedIdentifier(name, id.Pos)
+		p.checkStrictBindingName(name, id.Pos, p.strict)
+		arrow.Params = []ast.Expr{&ast.Ident{NamePos: id.Pos, Name: name}}
 	} else {
 		arrow.Params = p.parseParams()
 	}
+	p.staticBlockAwait = false
 	p.expect(token.ARROW)
 	if p.at(token.LBRACE) {
 		bodyUseStrict := p.scanUseStrict(p.idx + 1)
@@ -185,6 +194,10 @@ func (p *parser) tryParseArrow() ast.Expr {
 	p.staticBlockAwait = prevStaticAwait
 	// Arrow functions never permit duplicate parameter names.
 	p.checkParamDuplicates(arrow.Params, true)
+	// The strict BindingIdentifier restriction (no `eval`/`arguments`) applies
+	// under the arrow's effective strictness, which a block body's own "use
+	// strict" directive can turn on even in sloppy surrounding code.
+	p.checkStrictParamNames(arrow.Params, arrow.Strict)
 	if !arrow.Expression {
 		p.checkParamBodyLexicalConflict(arrow.Params, arrow.Body.(*ast.BlockStmt))
 	}
@@ -404,6 +417,7 @@ func (p *parser) parseBindingTarget() ast.Expr {
 	case token.IDENT:
 		id := p.next()
 		p.checkReservedIdentifier(id.Literal, id.Pos)
+		p.checkStrictBindingName(id.Literal, id.Pos, p.strict)
 		p.checkEscapedReserved(id)
 		return &ast.Ident{NamePos: id.Pos, Name: id.Literal}
 	default:
@@ -460,6 +474,23 @@ func (p *parser) checkEscapedReserved(tk token.Token) {
 		if p.inAsync {
 			p.errorAt(tk.Pos, "'await' may not be used as an identifier in this context")
 		}
+	}
+}
+
+// checkStrictBindingName reports the strict-mode BindingIdentifier early error
+// (ECMA-262 §13.1.1): a name that is *bound* — a var/let/const binding, a
+// function/arrow parameter, a catch parameter, or a function declaration name —
+// may not be `eval` or `arguments` in strict-mode code. Unlike an
+// IdentifierReference (`eval(...)`, `arguments[0]`), which remains legal in
+// strict code, this restriction applies only where the name is introduced as a
+// new binding, so it is deliberately separate from checkReservedIdentifier
+// (which is shared with reference contexts). The strict flag is passed
+// explicitly because a binding's effective strictness may come from a
+// function/arrow body's own "use strict" directive, which is not yet reflected
+// in p.strict while the enclosing parameter list or name is being parsed.
+func (p *parser) checkStrictBindingName(name string, pos token.Pos, strict bool) {
+	if strict && (name == "eval" || name == "arguments") {
+		p.earlyError(pos, "'"+name+"' may not be used as a binding identifier in strict mode")
 	}
 }
 
@@ -590,6 +621,15 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	p.checkParamDuplicates(def.Params, def.Strict)
 	p.checkStrictParamNames(def.Params, def.Strict)
 	p.checkParamBodyLexicalConflict(def.Params, def.Body)
+	// A function named `eval`/`arguments` is an early error when the function is
+	// strict-mode code — which includes strictness inherited from a "use strict"
+	// directive in its own body (§13.1.1's BindingIdentifier restriction sees the
+	// whole function's strictness). This is checked here, after the body has
+	// determined def.Strict, for both declarations and named expressions;
+	// checkFuncExprName above only observes the enclosing strictness.
+	if def.Name != nil {
+		p.checkStrictBindingName(def.Name.Name, def.Name.NamePos, def.Strict)
+	}
 	return def
 }
 

@@ -814,6 +814,7 @@ func (p *parser) parseTry() ast.Stmt {
 			p.expect(token.RPAREN)
 		}
 		cc.Body = p.parseBlock()
+		p.checkCatchParam(cc)
 		stmt.Handler = cc
 	}
 	if p.accept(token.FINALLY) {
