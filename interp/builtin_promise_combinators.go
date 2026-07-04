@@ -310,6 +310,129 @@ func (i *Interpreter) performPromiseAllSettled(ctx context.Context, ir *iterReco
 }
 
 // ---------------------------------------------------------------------------
+// Promise.allKeyed / allSettledKeyed  (await-dictionary proposal)
+// ---------------------------------------------------------------------------
+//
+// Like all/allSettled, but the input is an OBJECT: its own ENUMERABLE properties
+// (in [[OwnPropertyKeys]] order, symbol keys included) are each resolved through
+// C.resolve, and the combined promise fulfills with a null-prototype object
+// mapping every key to its settled value — in key order, not settlement order.
+
+func (i *Interpreter) promiseAllKeyedStatic(ctx context.Context, this, obj Value) (Value, error) {
+	return i.promiseKeyedCombinator(ctx, this, obj, false)
+}
+
+func (i *Interpreter) promiseAllSettledKeyedStatic(ctx context.Context, this, obj Value) (Value, error) {
+	return i.promiseKeyedCombinator(ctx, this, obj, true)
+}
+
+// promiseKeyedCombinator is the shared prologue (NewPromiseCapability,
+// GetPromiseResolve) plus PerformPromiseAllKeyed. There is no iterator to close,
+// so an abrupt PerformPromiseAllKeyed simply rejects via IfAbruptRejectPromise.
+func (i *Interpreter) promiseKeyedCombinator(ctx context.Context, this, obj Value, settled bool) (Value, error) {
+	c, ok := this.(*Object)
+	if !ok {
+		return nil, i.throwError(ctx, "TypeError", "Promise combinator called on non-object")
+	}
+	cap, err := i.newPromiseCapability(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	promiseResolve, err := i.getPromiseResolve(ctx, c)
+	if err != nil {
+		return i.ifAbruptRejectPromise(ctx, cap, err)
+	}
+	if perr := i.performPromiseAllKeyed(ctx, obj, c, cap, promiseResolve, settled); perr != nil {
+		return i.ifAbruptRejectPromise(ctx, cap, perr)
+	}
+	return cap.promise, nil
+}
+
+func (i *Interpreter) performPromiseAllKeyed(ctx context.Context, obj Value, c *Object, cap *promiseCapability, promiseResolve Value, settled bool) error {
+	o, ok := obj.(*Object)
+	if !ok {
+		return i.throwError(ctx, "TypeError", briefValue(obj)+" is not an object")
+	}
+	// [[OwnPropertyKeys]] up front (a Proxy ownKeys trap may throw → reject).
+	allKeys, err := i.ownKeysV(ctx, o)
+	if err != nil {
+		return err
+	}
+	var keys []PropertyKey
+	var values []Value
+	remaining := 1
+	resolveResult := func() error {
+		remaining--
+		if remaining != 0 {
+			return nil
+		}
+		// CreateKeyedPromiseCombinatorResultObject: a null-prototype object with a
+		// data property per key, in the order the keys were appended.
+		result := NewObject(nil)
+		for idx, k := range keys {
+			result.defineOwn(k, &Property{Value: values[idx], Writable: true, Enumerable: true, Configurable: true})
+		}
+		_, e := i.call(ctx, cap.resolve, Undef, []Value{result})
+		return e
+	}
+	for _, key := range allKeys {
+		// [[GetOwnProperty]] for every key, but [[Get]] only for enumerable ones.
+		desc, ok, err := i.getOwnPropertyV(ctx, o, key)
+		if err != nil {
+			return err
+		}
+		if !ok || !desc.Enumerable {
+			continue
+		}
+		val, err := i.getV(ctx, o, key, o)
+		if err != nil {
+			return err
+		}
+		nextPromise, err := i.call(ctx, promiseResolve, c, []Value{val})
+		if err != nil {
+			return err
+		}
+		j := len(keys)
+		keys = append(keys, key)
+		values = append(values, Undef)
+		alreadyCalled := false
+		if !settled {
+			onFulfilled := i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
+				if alreadyCalled {
+					return Undef, nil
+				}
+				alreadyCalled = true
+				values[j] = arg(a, 0)
+				return Undef, resolveResult()
+			})
+			remaining++
+			if err := i.invokeThen(ctx, nextPromise, onFulfilled, cap.reject); err != nil {
+				return err
+			}
+		} else {
+			mk := func(status, field string) *Object {
+				return i.newNativeFunc("", 1, func(_ context.Context, _ Value, a []Value) (Value, error) {
+					if alreadyCalled {
+						return Undef, nil
+					}
+					alreadyCalled = true
+					d := NewObject(i.objectProto)
+					d.SetData("status", String(status))
+					d.SetData(field, arg(a, 0))
+					values[j] = d
+					return Undef, resolveResult()
+				})
+			}
+			remaining++
+			if err := i.invokeThen(ctx, nextPromise, mk("fulfilled", "value"), mk("rejected", "reason")); err != nil {
+				return err
+			}
+		}
+	}
+	return resolveResult()
+}
+
+// ---------------------------------------------------------------------------
 // Promise.race
 // ---------------------------------------------------------------------------
 

@@ -270,6 +270,14 @@ func (i *Interpreter) initPromise() {
 	i.defineMethod(ctor, "allSettled", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return i.promiseAllSettledStatic(ctx, this, arg(args, 0))
 	})
+	// Promise.allKeyed / allSettledKeyed (await-dictionary proposal): the same
+	// combinators over an object's own enumerable keys instead of an iterable.
+	i.defineMethod(ctor, "allKeyed", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.promiseAllKeyedStatic(ctx, this, arg(args, 0))
+	})
+	i.defineMethod(ctor, "allSettledKeyed", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.promiseAllSettledKeyedStatic(ctx, this, arg(args, 0))
+	})
 	i.defineMethod(ctor, "race", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return i.promiseRaceStatic(ctx, this, arg(args, 0))
 	})
