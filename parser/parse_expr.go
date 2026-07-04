@@ -616,6 +616,12 @@ func (p *parser) parsePrimary() ast.Expr {
 		// `meta` contextual keyword is a fixed token and may not be escaped.
 		if p.peek(1).Type == token.DOT && p.peek(2).Type == token.IDENT &&
 			p.peek(2).Literal == "meta" && !p.peek(2).Escaped {
+			// It is an early Syntax Error for import.meta to appear unless the
+			// syntactic goal symbol is Module (ECMA-262 §13.3.12.1). A Script — and
+			// a body/params parsed by the Function constructor — is not a Module.
+			if !p.moduleMode {
+				p.errorAt(tk.Pos, "import.meta is only allowed in a module")
+			}
 			p.next() // import
 			return &ast.Ident{NamePos: tk.Pos, Name: "import"}
 		}
