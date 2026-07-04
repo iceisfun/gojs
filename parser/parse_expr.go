@@ -202,6 +202,19 @@ func (p *parser) parseBinary(minPrec int) ast.Expr {
 		}
 		right := p.parseBinary(nextMin)
 		if opType == token.AND || opType == token.OR || opType == token.NULLISH {
+			// CoalesceExpression (§13.13): `??` may not be combined with `||` or `&&`
+			// without parentheses. Its operands are BitwiseORExpressions, and a
+			// CoalesceExpression is not a valid operand of `||`/`&&`, so the two
+			// families never mix at the same unparenthesized level. Parenthesizing an
+			// operand severs it (tracked via p.parenthesized), so `(a ?? b) || c` and
+			// `a ?? (b && c)` remain legal.
+			if opType == token.NULLISH {
+				p.checkNotLogicalOperand(left)
+				p.checkNotLogicalOperand(right)
+			} else {
+				p.checkNotCoalesceOperand(left)
+				p.checkNotCoalesceOperand(right)
+			}
 			left = &ast.LogicalExpr{Left: left, OpPos: opTok.Pos, Op: opType, Right: right}
 		} else {
 			left = &ast.BinaryExpr{Left: left, OpPos: opTok.Pos, Op: opType, Right: right}
@@ -402,6 +415,12 @@ func (p *parser) parseCallMemberTail(expr ast.Expr) ast.Expr {
 			args, rparen := p.parseArguments()
 			expr = &ast.CallExpr{Callee: expr, Arguments: args, Rparen: rparen.Pos}
 		case token.TEMPLATE_NOSUB, token.TEMPLATE_HEAD:
+			// A tagged template's tag may not be an optional chain (§13.3.1 early
+			// error): `a?.b`x`` and `a?.fn`x`` are SyntaxErrors. Parenthesizing the
+			// chain severs it, so `(a?.b)`x`` remains legal.
+			if p.isUnparenthesizedOptionalChain(expr) {
+				p.errorAt(p.cur().Pos, "Tagged template may not follow an optional chain")
+			}
 			quasi := p.parseTemplate()
 			expr = &ast.TaggedTemplateExpr{Tag: expr, Quasi: quasi}
 		default:
@@ -618,6 +637,11 @@ func (p *parser) parseParenExpr() ast.Expr {
 	expr := p.parseExpression()
 	p.noIn = saveNoIn
 	p.expect(token.RPAREN)
+	// Record that this node was parenthesized. The parser keeps no distinct paren
+	// AST node, so this is how later early-error checks tell `({})`/`(a?.b)` from a
+	// bare `{}`/`a?.b`: parenthesization changes AssignmentTargetType and severs an
+	// optional chain for tagged-template and coalesce-mixing purposes.
+	p.parenthesized[expr] = true
 	return expr
 }
 

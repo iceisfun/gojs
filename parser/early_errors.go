@@ -695,7 +695,9 @@ func (p *parser) checkSimpleAssignmentTarget(expr ast.Expr) {
 			p.earlyError(e.NamePos, "Assignment to '"+e.Name+"' in strict mode")
 		}
 	case *ast.MemberExpr:
-		if containsOptional(e) {
+		if isImportMeta(e) {
+			p.earlyError(e.Pos(), "import.meta is not a valid assignment target")
+		} else if containsOptional(e) {
 			p.earlyError(e.Pos(), "Optional chain may not be an assignment target")
 		}
 	default:
@@ -713,16 +715,37 @@ func (p *parser) checkAssignmentTarget(expr ast.Expr) {
 			p.earlyError(e.NamePos, "Assignment to '"+e.Name+"' in strict mode")
 		}
 	case *ast.MemberExpr:
-		if containsOptional(e) {
+		if isImportMeta(e) {
+			p.earlyError(e.Pos(), "import.meta is not a valid assignment target")
+		} else if containsOptional(e) {
 			p.earlyError(e.Pos(), "Optional chain may not be an assignment target")
 		}
 	case *ast.ArrayLit:
+		// A parenthesized array literal is a ParenthesizedExpression, not a
+		// refinable AssignmentPattern: `([]) = x` is a Syntax Error, whereas the
+		// bare `[] = x` refines into a destructuring pattern.
+		if p.parenthesized[e] {
+			p.earlyError(e.Pos(), "Invalid left-hand side in assignment")
+			return
+		}
 		p.checkArrayAssignmentPattern(e)
 	case *ast.ObjectLit:
+		if p.parenthesized[e] {
+			p.earlyError(e.Pos(), "Invalid left-hand side in assignment")
+			return
+		}
 		p.checkObjectAssignmentPattern(e)
 	default:
 		p.earlyError(expr.Pos(), "Invalid left-hand side in for-loop")
 	}
+}
+
+// isImportMeta reports whether e is the `import.meta` meta-property. The parser
+// represents it as a MemberExpr whose object is the reserved-word Ident `import`
+// (which can never be an ordinary IdentifierReference), so this is unambiguous.
+func isImportMeta(e *ast.MemberExpr) bool {
+	obj, ok := e.Object.(*ast.Ident)
+	return ok && obj.Name == "import"
 }
 
 // checkArrayAssignmentPattern validates an array destructuring assignment
@@ -852,6 +875,54 @@ func stripDefault(el ast.Expr) ast.Expr {
 
 // containsOptional reports whether a member-access chain includes an optional
 // (?.) link, which disqualifies it as an assignment target.
+// checkNotLogicalOperand reports the §13.13 early error when a `??` operand is
+// an unparenthesized `||` or `&&` expression (e.g. `a ?? b || c`, `a ?? b && c`).
+func (p *parser) checkNotLogicalOperand(e ast.Expr) {
+	if p.parenthesized[e] {
+		return
+	}
+	if le, ok := e.(*ast.LogicalExpr); ok && (le.Op == token.OR || le.Op == token.AND) {
+		p.earlyError(le.OpPos, "Cannot mix '??' with '||' or '&&' without parentheses")
+	}
+}
+
+// checkNotCoalesceOperand reports the §13.13 early error when a `||`/`&&` operand
+// is an unparenthesized `??` expression (e.g. `a || b ?? c`, `a && b ?? c`).
+func (p *parser) checkNotCoalesceOperand(e ast.Expr) {
+	if p.parenthesized[e] {
+		return
+	}
+	if le, ok := e.(*ast.LogicalExpr); ok && le.Op == token.NULLISH {
+		p.earlyError(le.OpPos, "Cannot mix '??' with '||' or '&&' without parentheses")
+	}
+}
+
+// isUnparenthesizedOptionalChain reports whether e is an OptionalExpression whose
+// optional link is not severed by parentheses. It walks the member/call spine,
+// stopping at any node that was parenthesized (which begins a fresh
+// PrimaryExpression, e.g. `(a?.b).c` is a plain — non-optional — MemberExpression).
+func (p *parser) isUnparenthesizedOptionalChain(e ast.Expr) bool {
+	for {
+		if p.parenthesized[e] {
+			return false
+		}
+		switch n := e.(type) {
+		case *ast.MemberExpr:
+			if n.Optional {
+				return true
+			}
+			e = n.Object
+		case *ast.CallExpr:
+			if n.Optional {
+				return true
+			}
+			e = n.Callee
+		default:
+			return false
+		}
+	}
+}
+
 func containsOptional(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.MemberExpr:

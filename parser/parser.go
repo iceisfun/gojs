@@ -148,6 +148,15 @@ type parser struct {
 	// matching entry is cleared, and any entry that survives to the end of the
 	// parse is reported.
 	deferredObjErrs []deferredObjErr
+	// parenthesized records every expression node that was the immediate content
+	// of a ParenthesizedExpression `( Expression )`. The parser does not keep a
+	// distinct paren AST node, so this set preserves the one piece of information
+	// that survives the cover grammar and matters for early errors: whether a
+	// node was parenthesized. It distinguishes a refinable destructuring target
+	// (`[a] = 1`, `{a} = 1`) from an invalid parenthesized literal target
+	// (`({}) = 1`), and it bounds the "is this an unparenthesized optional chain"
+	// walk used by the coalesce-mixing and tagged-template early errors.
+	parenthesized map[ast.Expr]bool
 }
 
 // deferredObjErr is a pending ObjectLiteral early error (see deferredObjErrs).
@@ -275,7 +284,7 @@ func newParser(sourceName, source string) (*parser, error) {
 	// parseFunctionDecl / parseMethod); an arrow function inherits the enclosing
 	// setting, so a global arrow keeps them forbidden. Direct eval seeds the
 	// caller's context via ParseEval.
-	return &parser{source: sourceName, toks: toks}, nil
+	return &parser{source: sourceName, toks: toks, parenthesized: map[ast.Expr]bool{}}, nil
 }
 
 // ---------------------------------------------------------------------------
