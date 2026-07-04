@@ -366,19 +366,15 @@ func (i *Interpreter) newIterResult(v Value, done bool) *Object {
 }
 
 // initRegExpStringIterator builds %RegExpStringIteratorPrototype% (§22.2.9.3).
-// Its [[Prototype]] is Object.prototype (a sibling of the engine's bare
-// iteratorProto), which keeps ancestry consistent with the array iterator.
+// Its [[Prototype]] is %IteratorPrototype%, so it inherits [ @@iterator ]
+// (returning this) and shares the ancestry the array iterator has one level up.
+// Its only own properties are "next" and @@toStringTag.
 func (i *Interpreter) initRegExpStringIterator() {
-	proto := NewObject(i.objectProto)
+	proto := NewObject(i.iteratorProto)
 	i.regexpStringIteratorProto = proto
 
 	i.defineMethod(proto, "next", 0, i.regexpStringIteratorNext)
 
-	proto.defineOwn(SymKey(i.symIterator), &Property{
-		Value: i.newNativeFunc("[Symbol.iterator]", 0,
-			func(ctx context.Context, this Value, args []Value) (Value, error) { return this, nil }),
-		Writable: true, Enumerable: false, Configurable: true,
-	})
 	proto.defineOwn(SymKey(i.symToStringTag), &Property{
 		Value: String("RegExp String Iterator"), Writable: false, Enumerable: false, Configurable: true,
 	})
