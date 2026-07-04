@@ -19,10 +19,10 @@ import (
 // linkedModule is the export structure extracted from one parsed module.
 type linkedModule struct {
 	id       string
-	local    map[string]bool  // names exported from a local binding (incl. "default")
-	indirect []indirectExport // `export { importName as exportName } from moduleID`
-	stars    []string         // resolved ids of `export * from …`
-	ok       bool             // false when the module could not be loaded/parsed
+	local    map[string]string // export name -> local binding name (incl. "default")
+	indirect []indirectExport  // `export { importName as exportName } from moduleID`
+	stars    []string          // resolved ids of `export * from …`
+	ok       bool              // false when the module could not be loaded/parsed
 }
 
 // indirectExport is one re-exported binding: exportName is the name this module
@@ -101,7 +101,7 @@ func (i *Interpreter) loadLinked(ctx context.Context, id string) *linkedModule {
 	if lm, ok := i.linkedModules[id]; ok {
 		return lm
 	}
-	lm := &linkedModule{id: id, local: map[string]bool{}}
+	lm := &linkedModule{id: id, local: map[string]string{}}
 	i.linkedModules[id] = lm // cache before extracting so cycles terminate
 
 	src, err := i.moduleProvider.Load(ctx, id)
@@ -131,14 +131,23 @@ func (i *Interpreter) extractExportEntries(ctx context.Context, id string, stmts
 			// naming local bindings.
 			switch {
 			case es.Default:
-				lm.local["default"] = true
+				// `export default` binds *default* unless it is a *named* function
+				// or class declaration, whose own name is the local binding — the
+				// same mapping flattenModuleExports uses when evaluating the body.
+				local := defaultLocal
+				if es.Decl != nil {
+					if n := declBindingName(es.Decl); n != "" {
+						local = n
+					}
+				}
+				lm.local["default"] = local
 			case es.Decl != nil:
 				for _, n := range declBindingNames(es.Decl) {
-					lm.local[n] = true
+					lm.local[n] = n
 				}
 			default:
 				for _, sp := range es.Specifiers {
-					lm.local[sp.Exported] = true
+					lm.local[sp.Exported] = sp.Local
 				}
 			}
 		case es.Star && es.StarName == "":
@@ -170,6 +179,43 @@ func (i *Interpreter) resolveModuleID(ctx context.Context, specifier, referrer s
 	return mid, true
 }
 
+// getExportedNames implements GetExportedNames (§16.2.1.6.2): the set of names a
+// module exports, following `export *` re-exports (which never contribute
+// "default"). starSet breaks cycles among star re-exports. The result is
+// de-duplicated but unordered; the caller sorts it.
+func (i *Interpreter) getExportedNames(ctx context.Context, id string, starSet map[string]bool) []string {
+	if starSet[id] {
+		return nil
+	}
+	starSet[id] = true
+	lm := i.loadLinked(ctx, id)
+	if !lm.ok {
+		return nil
+	}
+	set := map[string]bool{}
+	var names []string
+	add := func(n string) {
+		if !set[n] {
+			set[n] = true
+			names = append(names, n)
+		}
+	}
+	for name := range lm.local {
+		add(name)
+	}
+	for _, ie := range lm.indirect {
+		add(ie.exportName)
+	}
+	for _, s := range lm.stars {
+		for _, n := range i.getExportedNames(ctx, s, starSet) {
+			if n != "default" {
+				add(n)
+			}
+		}
+	}
+	return names
+}
+
 // resolveExport implements ResolveExport (§16.2.1.6.3): it resolves exportName as
 // seen by module id, returning the resolved binding, or ambiguous=true when the
 // name is provided by two different star re-exports, or (nil,false,nil) when the
@@ -188,9 +234,9 @@ func (i *Interpreter) resolveExport(ctx context.Context, id, exportName string, 
 	if !lm.ok {
 		return nil, false, nil
 	}
-	// A locally-bound export resolves to this module's binding.
-	if lm.local[exportName] {
-		return &resolvedBinding{id, exportName}, false, nil
+	// A locally-bound export resolves to this module's local binding.
+	if localName, ok := lm.local[exportName]; ok {
+		return &resolvedBinding{id, localName}, false, nil
 	}
 	// An indirect export forwards to the source module (or is a namespace binding).
 	for _, ie := range lm.indirect {

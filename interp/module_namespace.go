@@ -26,29 +26,31 @@ type nsExotic struct {
 	read  map[string]func(context.Context) (Value, error)
 }
 
-// newModuleNamespace builds a Module Namespace exotic object over the given
-// export bindings, each reading its live value from env's module scope.
-func (i *Interpreter) newModuleNamespace(exports []moduleExport, env *Environment) *Object {
+// newModuleNamespace builds the Module Namespace exotic object for module id.
+// Its keys are the module's unambiguous exported names (GetExportedNames filtered
+// by ResolveExport); each key's reader resolves the export to the module and
+// local binding that actually declares it and reads that live value — a
+// namespace binding (`export * as ns`) reads the source module's namespace,
+// yielding a nested namespace object.
+func (i *Interpreter) newModuleNamespace(ctx context.Context, id string) *Object {
 	ns := NewObject(nil) // [[Prototype]] is null (§10.4.6.2)
 	ns.extensible = false // [[IsExtensible]] is always false (§10.4.6.4)
 	ns.immutableProto = true // [[SetPrototypeOf]] succeeds only for null (§10.4.6.3)
 
 	nx := &nsExotic{read: make(map[string]func(context.Context) (Value, error))}
-	for _, ex := range exports {
-		if _, dup := nx.read[ex.exported]; dup {
-			continue // a well-formed module has no duplicate export names
+	for _, name := range i.getExportedNames(ctx, id, map[string]bool{}) {
+		res, ambiguous, err := i.resolveExport(ctx, id, name, nil)
+		if err != nil || ambiguous || res == nil {
+			continue // an ambiguous or unresolvable name is not a namespace key
 		}
-		local := ex.local
-		nx.read[ex.exported] = func(ctx context.Context) (Value, error) {
-			if b := env.lookup(local); b != nil {
-				if !b.initialized {
-					return nil, i.throwError(ctx, "ReferenceError", "Cannot access '"+local+"' before initialization")
-				}
-				return b.value, nil
-			}
-			return Undef, nil
+		if _, dup := nx.read[name]; dup {
+			continue
 		}
-		nx.names = append(nx.names, ex.exported)
+		binding := *res // capture the resolved (module, local binding)
+		nx.read[name] = func(ctx context.Context) (Value, error) {
+			return i.readModuleBinding(ctx, binding)
+		}
+		nx.names = append(nx.names, name)
 	}
 	sortCodeUnits(nx.names)
 	ns.namespace = nx
@@ -58,6 +60,32 @@ func (i *Interpreter) newModuleNamespace(exports []moduleExport, env *Environmen
 	// "[object Module]" and the tag cannot be redefined or deleted.
 	ns.defineOwn(SymKey(i.symToStringTag), &Property{Value: String("Module")})
 	return ns
+}
+
+// readModuleBinding reads the live value of a resolved export binding. A
+// namespace binding (`export * as ns`) yields the source module's namespace
+// object (a nested namespace); an ordinary binding evaluates the declaring
+// module (once, cached) and reads its local, throwing a ReferenceError for a
+// still-uninitialized (TDZ) binding.
+func (i *Interpreter) readModuleBinding(ctx context.Context, b resolvedBinding) (Value, error) {
+	if b.bindingName == starNamespace {
+		return i.importByID(ctx, b.moduleID)
+	}
+	if _, err := i.importByID(ctx, b.moduleID); err != nil {
+		return nil, err
+	}
+	env := i.moduleEnvs[b.moduleID]
+	if env == nil {
+		return Undef, nil
+	}
+	bind := env.lookup(b.bindingName)
+	if bind == nil {
+		return Undef, nil
+	}
+	if !bind.initialized {
+		return nil, i.throwError(ctx, "ReferenceError", "Cannot access '"+b.bindingName+"' before initialization")
+	}
+	return bind.value, nil
 }
 
 // namespaceDefineOwn implements the Module Namespace [[DefineOwnProperty]]

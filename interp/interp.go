@@ -83,6 +83,10 @@ type Interpreter struct {
 	// (by id), so the linker can run ResolveExport for indirect-export validation
 	// without re-parsing; see module_link.go.
 	linkedModules map[string]*linkedModule
+	// moduleEnvs holds each evaluated module's top-level scope by id, so a
+	// re-exported binding served through another module's namespace can read the
+	// live local value from the module that actually declares it.
+	moduleEnvs map[string]*Environment
 
 	// templateCache is the realm's [[TemplateMap]] (§13.2.8.4 GetTemplateObject).
 	// It canonicalizes tagged-template objects by source location: each distinct

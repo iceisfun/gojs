@@ -57,10 +57,8 @@ func (i *Interpreter) evalImportCall(ctx context.Context, e *ast.ImportCall, env
 	return pObj, nil
 }
 
-// importModuleNamespace resolves, loads (once), evaluates, and caches an ES
-// module, returning its namespace object. The namespace exposes each export as
-// a live accessor binding onto the module's top-level scope, so a later
-// mutation of an exported variable is observed through the namespace.
+// importModuleNamespace resolves a specifier to a module id and returns that
+// module's namespace object, loading and evaluating it (once) if needed.
 func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier string) (Value, error) {
 	if i.moduleProvider == nil {
 		return nil, i.throwError(ctx, "TypeError", "Cannot import module '"+specifier+"': no module provider is configured")
@@ -69,6 +67,15 @@ func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier strin
 	if err != nil {
 		return nil, i.throwError(ctx, "TypeError", "Cannot find module '"+specifier+"': "+err.Error())
 	}
+	return i.importByID(ctx, id)
+}
+
+// importByID loads (once), links, evaluates, and caches the ES module with the
+// given canonical id, returning its Module Namespace object. The namespace
+// exposes every unambiguous export — local, re-exported (`export … from`), and
+// star-re-exported — as a live binding read from the module that actually
+// declares it, so a later mutation is observed through the namespace.
+func (i *Interpreter) importByID(ctx context.Context, id string) (Value, error) {
 	if ns, ok := i.moduleNamespaces[id]; ok {
 		return ns, nil
 	}
@@ -90,18 +97,22 @@ func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier strin
 		return nil, err
 	}
 
-	// Flatten export declarations into ordinary statements, recording the
-	// exported-name -> local-name mapping so the namespace can bind live getters.
-	body, exports := i.flattenModuleExports(prog.Body)
+	// Flatten export declarations into ordinary statements for evaluation (the
+	// namespace's exported names come from the linker, not this list).
+	body, _ := i.flattenModuleExports(prog.Body)
 
 	// Evaluate the module body in its own function-scoped environment. Top-level
-	// var/let/const/function bindings live here, giving the namespace getters a
+	// var/let/const/function bindings live here, giving the namespace readers a
 	// stable target that reflects later mutations.
 	env := NewEnvironment(i.globalEnv, true)
 	env.strict = true
 	if i.moduleProvider != nil {
 		env.vars["require"] = &binding{value: i.makeRequire(id), mutable: true, initialized: true}
 	}
+	if i.moduleEnvs == nil {
+		i.moduleEnvs = map[string]*Environment{}
+	}
+	i.moduleEnvs[id] = env
 
 	// Build the Module Namespace exotic object and cache it BEFORE evaluating the
 	// body, so a module that imports itself (directly or through a cycle) observes
@@ -109,16 +120,18 @@ func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier strin
 	// ReferenceError for any export not yet initialized — rather than re-loading
 	// and re-evaluating the module forever. On an evaluation error the entry is
 	// dropped so a later import re-runs the module.
-	ns := i.newModuleNamespace(exports, env)
+	ns := i.newModuleNamespace(ctx, id)
 	i.moduleNamespaces[id] = ns
 
 	if err := i.hoistDeclarations(ctx, body, env, true); err != nil {
 		delete(i.moduleNamespaces, id)
+		delete(i.moduleEnvs, id)
 		return nil, err
 	}
 	if _, err := i.execStmts(ctx, body, env); err != nil {
 		if _, ok := err.(*returnSignal); !ok {
 			delete(i.moduleNamespaces, id)
+			delete(i.moduleEnvs, id)
 			return nil, err
 		}
 	}
