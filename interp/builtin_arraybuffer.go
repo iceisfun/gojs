@@ -193,7 +193,7 @@ func (i *Interpreter) initArrayBuffer() {
 	// get ArrayBuffer.prototype.byteLength — §25.1.6.1.
 	i.defineGetter(proto, "byteLength", func(ctx context.Context, this Value, _ []Value) (Value, error) {
 		ab, ok := arrayBufferOf(this)
-		if !ok {
+		if !ok || ab.shared {
 			return nil, i.throwError(ctx, "TypeError", "get ArrayBuffer.prototype.byteLength called on incompatible receiver")
 		}
 		if ab.detached {
@@ -205,7 +205,7 @@ func (i *Interpreter) initArrayBuffer() {
 	// get ArrayBuffer.prototype.detached — §25.1.6.3.
 	i.defineGetter(proto, "detached", func(ctx context.Context, this Value, _ []Value) (Value, error) {
 		ab, ok := arrayBufferOf(this)
-		if !ok {
+		if !ok || ab.shared {
 			return nil, i.throwError(ctx, "TypeError", "get ArrayBuffer.prototype.detached called on incompatible receiver")
 		}
 		return Boolean(ab.detached), nil
@@ -214,7 +214,7 @@ func (i *Interpreter) initArrayBuffer() {
 	// get ArrayBuffer.prototype.maxByteLength — §25.1.6.4.
 	i.defineGetter(proto, "maxByteLength", func(ctx context.Context, this Value, _ []Value) (Value, error) {
 		ab, ok := arrayBufferOf(this)
-		if !ok {
+		if !ok || ab.shared {
 			return nil, i.throwError(ctx, "TypeError", "get ArrayBuffer.prototype.maxByteLength called on incompatible receiver")
 		}
 		if ab.detached {
@@ -229,7 +229,7 @@ func (i *Interpreter) initArrayBuffer() {
 	// get ArrayBuffer.prototype.resizable — §25.1.6.5.
 	i.defineGetter(proto, "resizable", func(ctx context.Context, this Value, _ []Value) (Value, error) {
 		ab, ok := arrayBufferOf(this)
-		if !ok {
+		if !ok || ab.shared {
 			return nil, i.throwError(ctx, "TypeError", "get ArrayBuffer.prototype.resizable called on incompatible receiver")
 		}
 		return Boolean(ab.resizable), nil
@@ -238,7 +238,7 @@ func (i *Interpreter) initArrayBuffer() {
 	// ArrayBuffer.prototype.resize(newLength) — §25.1.6.6.
 	i.defineMethod(proto, "resize", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		ab, ok := arrayBufferOf(this)
-		if !ok || !ab.resizable {
+		if !ok || ab.shared || !ab.resizable {
 			return nil, i.throwError(ctx, "TypeError", "ArrayBuffer.prototype.resize called on non-resizable ArrayBuffer")
 		}
 		newByteLength, err := i.toIndex(ctx, arg(args, 0))
@@ -281,7 +281,7 @@ func (i *Interpreter) initArrayBuffer() {
 // arrayBufferSlice implements ArrayBuffer.prototype.slice (§25.1.6.7).
 func (i *Interpreter) arrayBufferSlice(ctx context.Context, this Value, args []Value) (Value, error) {
 	ab, ok := arrayBufferOf(this)
-	if !ok {
+	if !ok || ab.shared {
 		return nil, i.throwError(ctx, "TypeError", "ArrayBuffer.prototype.slice called on incompatible receiver")
 	}
 	if ab.detached {
@@ -375,7 +375,7 @@ func (i *Interpreter) relativeIndex(ctx context.Context, v Value, length, def in
 // backing ArrayBuffer.prototype.transfer / transferToFixedLength.
 func (i *Interpreter) arrayBufferCopyAndDetach(ctx context.Context, this Value, newLength Value, preserveResizability bool) (Value, error) {
 	ab, ok := arrayBufferOf(this)
-	if !ok {
+	if !ok || ab.shared {
 		return nil, i.throwError(ctx, "TypeError", "ArrayBuffer.prototype.transfer called on incompatible receiver")
 	}
 	var newByteLength int

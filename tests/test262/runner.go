@@ -57,7 +57,12 @@ type Result struct {
 // noise.
 var unsupportedFeatures = map[string]bool{
 	"Proxy": false, "Reflect": false, "TypedArray": false, "ArrayBuffer": false,
-	"SharedArrayBuffer": true, "Atomics": true, "WeakRef": false,
+	// SharedArrayBuffer + the Atomics operations are implemented for a single
+	// agent (no worker threads). The multi-agent tests — which need a real
+	// $262.agent host to spawn a second thread over the same buffer — are skipped
+	// separately by hostFeatureSkip (a $262.agent reference) and by the
+	// CanBlock* flags in skipReason.
+	"SharedArrayBuffer": false, "Atomics": false, "WeakRef": false,
 	"FinalizationRegistry": false, "Temporal": true, "Intl": true,
 	"tail-call-optimization": true, "import-assertions": true,
 	"decorators": true, "explicit-resource-management": true,
@@ -212,6 +217,14 @@ func skipReason(m Meta) string {
 func hostFeatureSkip(src string, m Meta) string {
 	if !m.Flags["async"] && referencesPrintGlobal(src) {
 		return "host:print"
+	}
+	// The $262.agent API spawns a second agent (worker thread) sharing a
+	// SharedArrayBuffer. gojs implements SharedArrayBuffer/Atomics for a single
+	// agent only (Phase 1), so a test that drives another agent needs a host
+	// capability we don't provide; skip it rather than fail. The single-agent
+	// SharedArrayBuffer and Atomics tests (the large majority) still run.
+	if strings.Contains(src, "$262.agent") {
+		return "host:agent"
 	}
 	return ""
 }

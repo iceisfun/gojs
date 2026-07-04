@@ -262,6 +262,24 @@ func (i *Interpreter) initAtomics() {
 // Value coercion (which may run user code and shrink the buffer) is left to the
 // caller, which re-validates the index with validIndex before the access.
 func (i *Interpreter) atomicAccess(ctx context.Context, args []Value, waitable bool) (*typedArrayData, int, error) {
+	td, length, err := i.validateIntegerTA(ctx, args, waitable)
+	if err != nil {
+		return nil, 0, err
+	}
+	idx, err := i.validateAtomicIndex(ctx, args, length)
+	if err != nil {
+		return nil, 0, err
+	}
+	return td, idx, nil
+}
+
+// validateIntegerTA implements ValidateIntegerTypedArray (§25.4.3.1): args[0]
+// must be an integer TypedArray (or, when waitable, an Int32Array/BigInt64Array)
+// on a non-detached, in-bounds buffer. It returns the record and current element
+// length WITHOUT coercing the index — the spec's IsSharedArrayBuffer check for
+// wait/waitAsync happens between this and the index coercion (§25.4.11 steps
+// 3–4), so the two are split.
+func (i *Interpreter) validateIntegerTA(ctx context.Context, args []Value, waitable bool) (*typedArrayData, int, error) {
 	td, ok := typedArrayOf(arg(args, 0))
 	if !ok {
 		return nil, 0, i.throwError(ctx, "TypeError", "Atomics operation called on a non-TypedArray")
@@ -278,14 +296,22 @@ func (i *Interpreter) atomicAccess(ctx context.Context, args []Value, waitable b
 	if oob {
 		return nil, 0, i.throwError(ctx, "TypeError", "Atomics operation called on an out-of-bounds TypedArray")
 	}
+	return td, length, nil
+}
+
+// validateAtomicIndex implements the index part of ValidateAtomicAccess
+// (§25.4.3.2): args[1] converts via ToIndex and must be below the element
+// length. Coercion may run user code, so callers re-check bounds before the
+// access.
+func (i *Interpreter) validateAtomicIndex(ctx context.Context, args []Value, length int) (int, error) {
 	idx, err := i.toIndex(ctx, arg(args, 1))
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	if idx >= length {
-		return nil, 0, i.throwError(ctx, "RangeError", "Atomics access index "+NumberToString(float64(idx))+" is out of bounds")
+		return 0, i.throwError(ctx, "RangeError", "Atomics access index "+NumberToString(float64(idx))+" is out of bounds")
 	}
-	return td, idx, nil
+	return idx, nil
 }
 
 // atomicNumArg coerces an Atomics value argument for a non-BigInt element to the
@@ -357,11 +383,14 @@ type waiterKey struct {
 	idx int
 }
 
-// sabWaiter is a single parked waiter. notify closes ch (setting notified);
-// a timed-out or resolved waiter is removed from the list.
+// sabWaiter is a single parked waiter. A synchronous Atomics.wait waiter is
+// woken by closing ch; an Atomics.waitAsync waiter is woken by invoking settle
+// (which resolves its Promise with "ok"). notify sets notified so a waiter is
+// woken at most once.
 type sabWaiter struct {
-	ch       chan struct{}
-	notified bool
+	ch       chan struct{}        // sync waiter: closed on notify
+	notified bool                 // woken (by notify) — guards double wake
+	settle   func(outcome string) // async waiter: resolve the Promise once; nil for a sync waiter
 }
 
 // waiterList is the per-interpreter registry of parked waiters.
@@ -403,17 +432,15 @@ func (reg *waiterList) remove(key waiterKey, w *sabWaiter) {
 func (i *Interpreter) atomicsNotify(ab *arrayBufferData, idx, count int) int {
 	reg := i.waiters()
 	reg.mu.Lock()
-	defer reg.mu.Unlock()
 	key := waiterKey{ab, idx}
 	list := reg.m[key]
-	n := 0
-	for len(list) > 0 && (count < 0 || n < count) {
+	var woken []*sabWaiter
+	for len(list) > 0 && (count < 0 || len(woken) < count) {
 		w := list[0]
 		list = list[1:]
 		if !w.notified {
 			w.notified = true
-			close(w.ch)
-			n++
+			woken = append(woken, w)
 		}
 	}
 	if len(list) == 0 {
@@ -421,7 +448,17 @@ func (i *Interpreter) atomicsNotify(ab *arrayBufferData, idx, count int) int {
 	} else {
 		reg.m[key] = list
 	}
-	return n
+	reg.mu.Unlock()
+	// Wake outside the lock: a sync waiter unblocks its goroutine (close), an
+	// async waiter resolves its Promise to "ok" (settle schedules on the loop).
+	for _, w := range woken {
+		if w.settle != nil {
+			w.settle("ok")
+		} else {
+			close(w.ch)
+		}
+	}
+	return len(woken)
 }
 
 // atomicsDoWait implements the shared body of Atomics.wait (async=false) and
@@ -429,7 +466,11 @@ func (i *Interpreter) atomicsNotify(ab *arrayBufferData, idx, count int) int {
 // buffer, coerces the expected value and timeout, and either blocks (wait) or
 // returns a { async, value } result record (waitAsync).
 func (i *Interpreter) atomicsDoWait(ctx context.Context, args []Value, async bool) (Value, error) {
-	td, idx, err := i.atomicAccess(ctx, args, true)
+	// §25.4.11 steps 1–4: validate the (Int32/BigInt64) typed array, THEN require
+	// a shared buffer, THEN coerce the index. The shared check precedes any
+	// user-observable coercion, so a non-shared buffer throws TypeError even when
+	// the index/value/timeout arguments have poisoned valueOf hooks.
+	td, length, err := i.validateIntegerTA(ctx, args, true)
 	if err != nil {
 		return nil, err
 	}
@@ -440,6 +481,10 @@ func (i *Interpreter) atomicsDoWait(ctx context.Context, args []Value, async boo
 			name = "Atomics.waitAsync"
 		}
 		return nil, i.throwError(ctx, "TypeError", name+" cannot be used on a non-shared ArrayBuffer")
+	}
+	idx, err := i.validateAtomicIndex(ctx, args, length)
+	if err != nil {
+		return nil, err
 	}
 
 	// Coerce the expected value in the element's domain (§25.4.3.11 / 25.4.3.12).
@@ -540,23 +585,39 @@ func (i *Interpreter) atomicsWaitAsyncResult(ab *arrayBufferData, idx int, match
 		res.SetData("value", String("timed-out"))
 		return res
 	}
-	// async:true — a genuine pending Promise. In Phase 1 there is no notifier;
-	// for a finite timeout we schedule a "timed-out" resolution on the event loop
-	// when a TimerProvider is available, otherwise the Promise stays pending
-	// (best-effort, as documented for Phase 1). An infinite timeout stays pending.
+	// async:true — a genuine pending Promise settled by whichever comes first: a
+	// notify on this location (-> "ok") or, for a finite timeout, the timeout
+	// firing (-> "timed-out"). An infinite timeout with no notify stays pending.
 	p, resolve, _ := i.newPromise()
 	key := waiterKey{ab, idx}
 	w := &sabWaiter{ch: make(chan struct{})}
-	i.waiters().add(key, w)
-	if !math.IsInf(timeoutMs, 1) && i.timer != nil {
+	hasTimer := !math.IsInf(timeoutMs, 1) && i.timer != nil
+	if hasTimer {
 		i.loop.addTimer()
-		i.timer.AfterFunc(i.ctx, time.Duration(timeoutMs)*time.Millisecond, func() {
+	}
+	var cancelTimer func()
+	var once sync.Once
+	// settle resolves the Promise exactly once, on the event loop, and tears down
+	// the waiter registration and any pending timeout timer.
+	w.settle = func(outcome string) {
+		once.Do(func() {
 			i.loop.pushMacro(func() error {
 				i.waiters().remove(key, w)
-				i.loop.removeTimer()
-				resolve(String("timed-out"))
+				if hasTimer {
+					if cancelTimer != nil {
+						cancelTimer()
+					}
+					i.loop.removeTimer()
+				}
+				resolve(String(outcome))
 				return nil
 			})
+		})
+	}
+	i.waiters().add(key, w)
+	if hasTimer {
+		cancelTimer = i.timer.AfterFunc(i.ctx, time.Duration(timeoutMs)*time.Millisecond, func() {
+			w.settle("timed-out")
 		})
 	}
 	res.SetData("async", Boolean(true))
@@ -573,6 +634,11 @@ func integerOrInfinity(f float64) float64 {
 	}
 	if math.IsInf(f, 0) {
 		return f
+	}
+	// ToIntegerOrInfinity maps both +0 and -0 to (mathematical) 0, so normalize
+	// -0 to +0 (e.g. Atomics.store(i32a, 0, -0) returns +0).
+	if f == 0 {
+		return 0
 	}
 	return math.Trunc(f)
 }
