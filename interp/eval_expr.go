@@ -275,7 +275,14 @@ func (i *Interpreter) getTemplateObject(quasi *ast.TemplateLit) *Object {
 	strs := make([]Value, len(quasi.Quasis))
 	raws := make([]Value, len(quasi.Quasis))
 	for idx, q := range quasi.Quasis {
-		strs[idx] = String(q.Cooked)
+		// A segment with an invalid escape has no cooked value: the tagged
+		// template receives undefined for it (ECMA-262 §12.9.6). The raw value is
+		// always present.
+		if q.CookedInvalid {
+			strs[idx] = Undef
+		} else {
+			strs[idx] = String(q.Cooked)
+		}
 		raws[idx] = String(q.Raw)
 	}
 	rawArr := i.newArray(raws)

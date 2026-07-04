@@ -136,7 +136,20 @@ func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Env
 	}
 	member, ok := operand.(*ast.MemberExpr)
 	if !ok {
-		return True, nil // delete of a non-reference is a no-op that returns true
+		// delete of a non-reference returns true, but the operand is still
+		// evaluated for its side effects (e.g. `delete foo()` calls foo);
+		// §13.5.1.2 step 1 evaluates the UnaryExpression before checking whether it
+		// produced a Reference Record.
+		if _, err := i.evalExpr(ctx, operand, env); err != nil {
+			return nil, err
+		}
+		return True, nil
+	}
+	// `delete super.prop` / `delete super[expr]` is a ReferenceError (§13.5.1.2:
+	// IsSuperReference). It is thrown before the base or the property key is
+	// evaluated, so ToPropertyKey is never performed on a computed super index.
+	if _, ok := member.Object.(*ast.SuperExpr); ok {
+		return nil, i.throwError(ctx, "ReferenceError", "Unsupported reference to 'super'")
 	}
 	obj, err := i.evalExpr(ctx, member.Object, env)
 	if err != nil {

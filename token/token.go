@@ -435,6 +435,15 @@ type Token struct {
 	// the parser raises it when the surrounding code is strict.
 	StrictError string
 
+	// CookedInvalid reports that a template segment (TEMPLATE_NOSUB / _HEAD /
+	// _MIDDLE / _TAIL) contained an escape sequence with no valid cooked value —
+	// a LegacyOctalEscapeSequence, a NonOctalDecimalEscapeSequence (\8, \9), or a
+	// malformed hex/unicode escape. Unlike a string literal, an untagged template
+	// has no Annex B leniency, so such a segment is an unconditional early
+	// SyntaxError (ECMA-262 §12.9.6); a tagged template instead tolerates it and
+	// yields an undefined cooked value.
+	CookedInvalid bool
+
 	// Escaped reports whether an IDENT or PRIVATE token's source contained a
 	// UnicodeEscapeSequence (\uXXXX or \u{...}) in its IdentifierName. Such a
 	// token is always an IdentifierName, never a keyword, but its StringValue

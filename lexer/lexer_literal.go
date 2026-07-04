@@ -200,6 +200,18 @@ func (l *Lexer) scanString(start token.Pos, nl bool) token.Token {
 	return token.Token{Type: token.STRING, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl, StrictError: l.legacyEscape}
 }
 
+// escapeError reports a malformed escape sequence. Inside a template segment
+// (templateMode) the error is deferred: cookedInvalid is set so the segment has
+// no cooked value, but no lexer error is raised — a tagged template tolerates
+// it. Outside a template (a string literal) it is an immediate SyntaxError.
+func (l *Lexer) escapeError(format string, args ...any) {
+	if l.templateMode {
+		l.cookedInvalid = true
+		return
+	}
+	l.errorf(format, args...)
+}
+
 // scanEscape decodes a single escape sequence (the backslash is already
 // consumed) and appends the result to b.
 func (l *Lexer) scanEscape(b *strings.Builder) {
@@ -232,23 +244,39 @@ func (l *Lexer) scanEscape(b *strings.Builder) {
 			return
 		}
 		l.legacyEscape = "Octal escape sequences are not allowed in strict mode"
+		// A template has no Annex B octal leniency: a legacy octal escape has no
+		// cooked value at all (ECMA-262 §12.9.6).
+		if l.templateMode {
+			l.cookedInvalid = true
+		}
 		l.scanOctalEscape(b)
 	case '8', '9':
 		// \8 and \9 are NonOctalDecimalEscapeSequences: in sloppy mode they
-		// denote the digit itself; in strict mode they are early errors.
+		// denote the digit itself; in strict mode they are early errors. In a
+		// template they have no cooked value.
 		l.legacyEscape = "\\8 and \\9 are not allowed in strict mode"
+		if l.templateMode {
+			l.cookedInvalid = true
+		}
 		b.WriteRune(l.ch)
 		l.readRune()
 	case 'x':
 		l.readRune()
 		hi := hexVal(l.ch)
-		l.readRune()
-		lo := hexVal(l.ch)
-		l.readRune()
-		if hi < 0 || lo < 0 {
-			l.errorf("invalid hexadecimal escape sequence")
+		if hi < 0 {
+			// Stop at the offending character rather than consuming it, so the
+			// enclosing scanner (e.g. a template still searching for its closing
+			// backtick) does not swallow a delimiter.
+			l.escapeError("invalid hexadecimal escape sequence")
 			return
 		}
+		l.readRune()
+		lo := hexVal(l.ch)
+		if lo < 0 {
+			l.escapeError("invalid hexadecimal escape sequence")
+			return
+		}
+		l.readRune()
 		b.WriteRune(rune(hi*16 + lo))
 	case 'u':
 		l.readRune()
@@ -291,22 +319,36 @@ func (l *Lexer) scanUnicodeEscape() (val rune, braced, ok bool) {
 	if l.ch == '{' {
 		l.readRune()
 		v := 0
+		digits := 0
 		for isHexDigit(l.ch) {
 			v = v*16 + hexVal(l.ch)
+			if v > 0x10FFFF {
+				// Clamp so the accumulator cannot overflow; the out-of-range
+				// condition is checked after the closing brace is consumed.
+				v = 0x110000
+			}
 			l.readRune()
+			digits++
 		}
 		if l.ch != '}' {
-			l.errorf("invalid Unicode escape sequence")
+			l.escapeError("invalid Unicode escape sequence")
 			return 0, true, false
 		}
-		l.readRune()
+		l.readRune() // consume '}'
+		// CodePoint requires at least one hex digit and a value <= 0x10FFFF
+		// (ECMA-262 §12.9.4.1). Consuming the brace above keeps a template scan
+		// aligned so it can still find its closing backtick.
+		if digits == 0 || v > 0x10FFFF {
+			l.escapeError("invalid Unicode escape sequence")
+			return 0, true, false
+		}
 		return rune(v), true, true
 	}
 	v := 0
 	for i := 0; i < 4; i++ {
 		d := hexVal(l.ch)
 		if d < 0 {
-			l.errorf("invalid Unicode escape sequence")
+			l.escapeError("invalid Unicode escape sequence")
 			return 0, false, false
 		}
 		v = v*16 + d
@@ -356,6 +398,9 @@ func (l *Lexer) scanTemplate(start token.Pos, nl bool, head bool) token.Token {
 	// delimiters with escape sequences left undecoded and line terminators
 	// normalized to LF; it is captured from the raw source slice below.
 	innerBegin := l.offset
+	// cookedInvalid records whether this segment contains an escape with no valid
+	// cooked value; a fresh scan starts valid.
+	l.cookedInvalid = false
 
 	var b strings.Builder
 	for {
@@ -369,7 +414,7 @@ func (l *Lexer) scanTemplate(start token.Pos, nl bool, head bool) token.Token {
 			if head {
 				typ = token.TEMPLATE_NOSUB
 			}
-			return token.Token{Type: typ, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl}
+			return token.Token{Type: typ, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl, CookedInvalid: l.cookedInvalid}
 		case l.ch == '$' && l.peek() == '{':
 			raw := templateRawValue(l.input[innerBegin:l.offset])
 			l.readRune() // $
@@ -381,10 +426,21 @@ func (l *Lexer) scanTemplate(start token.Pos, nl bool, head bool) token.Token {
 			if head {
 				typ = token.TEMPLATE_HEAD
 			}
-			return token.Token{Type: typ, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl}
+			return token.Token{Type: typ, Literal: b.String(), Raw: raw, Pos: start, NewlineBefore: nl, CookedInvalid: l.cookedInvalid}
 		case l.ch == '\\':
 			l.readRune()
+			l.templateMode = true
 			l.scanEscape(&b)
+			l.templateMode = false
+		case l.ch == '\r':
+			// The Template Value normalizes a <CR> or <CR><LF> LineTerminatorSequence
+			// to a single <LF> (ECMA-262 §12.9.6, TV). (U+2028/U+2029 are kept as
+			// themselves and fall through to the default case.)
+			b.WriteByte('\n')
+			l.readRune()
+			if l.ch == '\n' {
+				l.readRune()
+			}
 		default:
 			b.WriteRune(l.ch)
 			l.readRune()

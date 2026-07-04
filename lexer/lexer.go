@@ -89,6 +89,14 @@ type Lexer struct {
 	// StrictError for the parser to raise when the code is strict.
 	legacyEscape string
 
+	// templateMode is set while scanEscape is decoding an escape inside a template
+	// segment. In that mode an invalid escape does not raise an immediate lexer
+	// error (a tagged template tolerates it); instead cookedInvalid is set so the
+	// segment can report an undefined cooked value, and the parser raises the
+	// early error only for the untagged case.
+	templateMode  bool
+	cookedInvalid bool
+
 	err *token.SyntaxError
 }
 

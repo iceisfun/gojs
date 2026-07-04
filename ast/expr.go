@@ -115,6 +115,11 @@ type TemplateElement struct {
 	Pos    token.Pos
 	Cooked string // interpreted value (with escapes processed)
 	Raw    string // exact source text
+	// CookedInvalid reports that this segment contained an escape with no cooked
+	// value (a legacy octal, \8/\9, or malformed hex/unicode escape). It is an
+	// early SyntaxError in an untagged template; a tagged template yields an
+	// undefined cooked value for the segment (ECMA-262 §12.9.6).
+	CookedInvalid bool
 }
 
 func (e *TemplateLit) Pos() token.Pos { return e.Start }

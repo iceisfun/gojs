@@ -239,6 +239,15 @@ func (p *parser) parseUnary() ast.Expr {
 					p.errorAt(m.Property.Pos(), "Private fields can not be deleted")
 				}
 			}
+			// In strict mode, deleting a bare IdentifierReference is an early
+			// SyntaxError (ECMA-262 §13.5.1.1). Parentheses do not change the operand
+			// node's type, so `delete x`, `delete (x)`, and `delete ((x))` are all
+			// rejected, while `delete x.y`, `delete (x, y)`, and `delete f()` are not.
+			if p.strict {
+				if id, ok := operand.(*ast.Ident); ok {
+					p.errorAt(id.NamePos, "Delete of an unqualified identifier in strict mode")
+				}
+			}
 		}
 		return &ast.UnaryExpr{OpPos: op.Pos, Op: op.Type, Operand: operand}
 	case token.INC, token.DEC:
@@ -556,7 +565,18 @@ func (p *parser) parsePrimary() ast.Expr {
 		}
 		return &ast.RegexLit{ValuePos: tk.Pos, Pattern: tk.Literal, Flags: flags, Raw: tk.Raw}
 	case token.TEMPLATE_NOSUB, token.TEMPLATE_HEAD:
-		return p.parseTemplate()
+		tl := p.parseTemplate()
+		// An untagged template must have a cooked value for every segment: a legacy
+		// octal, \8/\9, or malformed hex/unicode escape is an early SyntaxError
+		// with no Annex B leniency (ECMA-262 §12.9.6). (A tagged template is parsed
+		// via parseCallMemberTail and tolerates such escapes.)
+		for _, q := range tl.Quasis {
+			if q.CookedInvalid {
+				p.errorAt(q.Pos, "invalid escape sequence in template literal")
+				break
+			}
+		}
+		return tl
 	case token.LPAREN:
 		return p.parseParenExpr()
 	case token.LBRACKET:
@@ -692,23 +712,23 @@ func (p *parser) parseTemplate() *ast.TemplateLit {
 	tl := &ast.TemplateLit{Start: first.Pos}
 	if first.Type == token.TEMPLATE_NOSUB {
 		p.next()
-		tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: first.Pos, Cooked: first.Literal, Raw: first.Raw})
+		tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: first.Pos, Cooked: first.Literal, Raw: first.Raw, CookedInvalid: first.CookedInvalid})
 		tl.EndPos = first.End
 		return tl
 	}
 	// TEMPLATE_HEAD expr (TEMPLATE_MIDDLE expr)* TEMPLATE_TAIL
 	head := p.next()
-	tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: head.Pos, Cooked: head.Literal, Raw: head.Raw})
+	tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: head.Pos, Cooked: head.Literal, Raw: head.Raw, CookedInvalid: head.CookedInvalid})
 	for {
 		tl.Exprs = append(tl.Exprs, p.parseExpression())
 		seg := p.cur()
 		switch seg.Type {
 		case token.TEMPLATE_MIDDLE:
 			p.next()
-			tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: seg.Pos, Cooked: seg.Literal, Raw: seg.Raw})
+			tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: seg.Pos, Cooked: seg.Literal, Raw: seg.Raw, CookedInvalid: seg.CookedInvalid})
 		case token.TEMPLATE_TAIL:
 			p.next()
-			tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: seg.Pos, Cooked: seg.Literal, Raw: seg.Raw})
+			tl.Quasis = append(tl.Quasis, ast.TemplateElement{Pos: seg.Pos, Cooked: seg.Literal, Raw: seg.Raw, CookedInvalid: seg.CookedInvalid})
 			tl.EndPos = seg.End
 			return tl
 		default:
