@@ -193,24 +193,33 @@ func skipReason(m Meta) string {
 // rather than counted as a conformance failure. These are host features, not
 // language behavior gojs implements:
 //
-//   - $262.createRealm: gojs has a single realm per Interpreter, so cross-realm
-//     tests are unsupportable (documented under wontfix/). Every such test calls
-//     $262.createRealm — with $262 always installed by installT262Host, that call
-//     throws "$262.createRealm is not a function" at runtime; we classify it up
-//     front by source (and by the cross-realm feature tag as a backstop).
 //   - print: the runner exposes `print` only as a bespoke $DONE sentinel sink for
 //     async tests (see installAsyncDone); it deliberately does not provide a
 //     general `print` host sink. A NON-async test that references the bare `print`
 //     global therefore needs a capability we don't provide. Skipping such tests in
 //     the classification path (rather than installing a global print) keeps the
 //     async sentinel `print` untouched and avoids double-installing it.
+//
+// $262.createRealm is implemented (installT262Host builds a fresh realm via
+// interp.NewChildRealm, a real isolated Interpreter sharing this agent's Symbol
+// registry and well-known symbols), which unlocks the ShadowRealm cross-realm
+// tests. The broader cross-realm corpus additionally depends on realm-aware
+// abstract operations gojs does not yet implement — e.g. GetFunctionRealm (so
+// GetPrototypeFromConstructor falls back to the constructor's OWN realm's
+// intrinsic default: proto-from-ctor-realm), and throwing a TypeError / creating
+// intrinsics from the *current* running realm rather than the realm that created
+// the object (Proxy internal-method *-realm tests). Until those land, cross-realm
+// tests that are not ShadowRealm tests are skipped rather than counted as
+// conformance failures. ShadowRealm tests are exempt: they pass.
 func hostFeatureSkip(src string, m Meta) string {
-	if strings.Contains(src, "$262.createRealm") {
-		return "host:$262.createRealm"
-	}
-	for _, f := range m.Features {
-		if f == "cross-realm" {
-			return "feature:cross-realm"
+	if !hasFeature(m, "ShadowRealm") {
+		if strings.Contains(src, "$262.createRealm") {
+			return "host:cross-realm"
+		}
+		for _, f := range m.Features {
+			if f == "cross-realm" {
+				return "feature:cross-realm"
+			}
 		}
 	}
 	if !m.Flags["async"] && referencesPrintGlobal(src) {
@@ -521,12 +530,14 @@ func negTypeMatches(vm *interp.Interpreter, v interp.Value, negType string) bool
 	return false
 }
 
-// installT262Host installs the $262 host object that some Test262 tests use.
-// Only the members our corpus needs are provided: detachArrayBuffer (backing
-// the many detached-buffer tests) and global (the global object). Unsupported
-// members are left absent so tests that require them fail visibly rather than
-// silently misbehaving.
-func installT262Host(vm *interp.Interpreter) {
+// installT262Host installs the $262 host object that some Test262 tests use on
+// vm's global object and returns it. The members our corpus needs are provided:
+// global (the realm's global object), detachArrayBuffer (backing the many
+// detached-buffer tests), evalScript (global-code evaluation in this realm), and
+// createRealm (a fresh sibling realm with its own $262). Unsupported members are
+// left absent so tests that require them fail visibly rather than silently
+// misbehaving.
+func installT262Host(vm *interp.Interpreter) *interp.Object {
 	host := vm.NewPlainObject()
 	host.SetData("global", vm.GetGlobal("globalThis"))
 	host.SetData("detachArrayBuffer", vm.NewFunction("detachArrayBuffer", func(args []interp.Value) (interp.Value, error) {
@@ -554,5 +565,15 @@ func installT262Host(vm *interp.Interpreter) {
 		}
 		return vm.RunString("<evalScript>", src)
 	}))
+	// $262.createRealm(): create a new realm in the same agent, install this same
+	// $262 API on its global, and return that realm's $262 object. The child
+	// shares the GlobalSymbolRegistry and is closed with its parent (see
+	// NewChildRealm). Objects flow between realms directly as ordinary values, so
+	// cross-realm tests observe each realm's distinct intrinsics.
+	host.SetData("createRealm", vm.NewFunction("createRealm", func(args []interp.Value) (interp.Value, error) {
+		child := vm.NewChildRealm()
+		return installT262Host(child), nil
+	}))
 	vm.SetGlobal("$262", host)
+	return host
 }

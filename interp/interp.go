@@ -384,19 +384,24 @@ func New(opts ...Option) *Interpreter {
 		i.rng = newPRNG(0)
 	}
 
-	i.symIterator = &Symbol{Desc: "Symbol.iterator", HasDesc: true}
-	i.symAsyncIterator = &Symbol{Desc: "Symbol.asyncIterator", HasDesc: true}
-	i.symToPrimitive = &Symbol{Desc: "Symbol.toPrimitive", HasDesc: true}
-	i.symToStringTag = &Symbol{Desc: "Symbol.toStringTag", HasDesc: true}
-	i.symHasInstance = &Symbol{Desc: "Symbol.hasInstance", HasDesc: true}
-	i.symMatch = &Symbol{Desc: "Symbol.match", HasDesc: true}
-	i.symMatchAll = &Symbol{Desc: "Symbol.matchAll", HasDesc: true}
-	i.symReplace = &Symbol{Desc: "Symbol.replace", HasDesc: true}
-	i.symSearch = &Symbol{Desc: "Symbol.search", HasDesc: true}
-	i.symSplit = &Symbol{Desc: "Symbol.split", HasDesc: true}
-	i.symSpecies = &Symbol{Desc: "Symbol.species", HasDesc: true}
-	i.symUnscopables = &Symbol{Desc: "Symbol.unscopables", HasDesc: true}
-	i.symIsConcatSpreadable = &Symbol{Desc: "Symbol.isConcatSpreadable", HasDesc: true}
+	// Well-known symbols are shared by every realm in one agent (they are agent-
+	// level values, not per-realm). A child realm (NewChildRealm) pre-populates
+	// these fields from its parent, so only mint fresh ones when unset.
+	if i.symIterator == nil {
+		i.symIterator = &Symbol{Desc: "Symbol.iterator", HasDesc: true}
+		i.symAsyncIterator = &Symbol{Desc: "Symbol.asyncIterator", HasDesc: true}
+		i.symToPrimitive = &Symbol{Desc: "Symbol.toPrimitive", HasDesc: true}
+		i.symToStringTag = &Symbol{Desc: "Symbol.toStringTag", HasDesc: true}
+		i.symHasInstance = &Symbol{Desc: "Symbol.hasInstance", HasDesc: true}
+		i.symMatch = &Symbol{Desc: "Symbol.match", HasDesc: true}
+		i.symMatchAll = &Symbol{Desc: "Symbol.matchAll", HasDesc: true}
+		i.symReplace = &Symbol{Desc: "Symbol.replace", HasDesc: true}
+		i.symSearch = &Symbol{Desc: "Symbol.search", HasDesc: true}
+		i.symSplit = &Symbol{Desc: "Symbol.split", HasDesc: true}
+		i.symSpecies = &Symbol{Desc: "Symbol.species", HasDesc: true}
+		i.symUnscopables = &Symbol{Desc: "Symbol.unscopables", HasDesc: true}
+		i.symIsConcatSpreadable = &Symbol{Desc: "Symbol.isConcatSpreadable", HasDesc: true}
+	}
 
 	i.bootstrap()
 	return i
@@ -430,6 +435,48 @@ func (i *Interpreter) Close() error {
 		child.Close()
 	}
 	return nil
+}
+
+// NewChildRealm creates a second, fully independent realm (a fresh Interpreter
+// with its own global object and complete set of intrinsics) that nonetheless
+// belongs to the same agent as i: it shares i's GlobalSymbolRegistry (so
+// Symbol.for is consistent across realms), inherits i's cancellation context,
+// clock/timer providers, module provider, and bytecode setting, and is closed
+// automatically when i is closed. Objects flow between the two realms directly
+// as ordinary values (no wrapping) — each retains the [[Prototype]] and, for
+// built-ins, the [[Realm]] of the realm that created it. This backs multi-realm
+// host hooks such as Test262's $262.createRealm.
+func (i *Interpreter) NewChildRealm() *Interpreter {
+	child := New(func(c *Interpreter) {
+		c.ctx = i.ctx // wrapped with its own cancel by New; parent cancel propagates
+		c.useBytecode = i.useBytecode
+		c.clock = i.clock
+		c.timer = i.timer
+		if i.moduleProvider != nil {
+			c.moduleProvider = i.moduleProvider
+		}
+		// Agent-level Symbol state is shared across realms: the GlobalSymbolRegistry
+		// (Symbol.for/keyFor) and every well-known symbol (Symbol.iterator, ...), so
+		// e.g. otherRealm.Symbol.iterator === Symbol.iterator. Pre-populating before
+		// bootstrap makes initSymbol and every intrinsic key off the shared symbols.
+		c.symByKey = i.symByKey
+		c.symBySym = i.symBySym
+		c.symIterator = i.symIterator
+		c.symAsyncIterator = i.symAsyncIterator
+		c.symToPrimitive = i.symToPrimitive
+		c.symToStringTag = i.symToStringTag
+		c.symHasInstance = i.symHasInstance
+		c.symMatch = i.symMatch
+		c.symMatchAll = i.symMatchAll
+		c.symReplace = i.symReplace
+		c.symSearch = i.symSearch
+		c.symSplit = i.symSplit
+		c.symSpecies = i.symSpecies
+		c.symUnscopables = i.symUnscopables
+		c.symIsConcatSpreadable = i.symIsConcatSpreadable
+	})
+	i.childRealms = append(i.childRealms, child)
+	return child
 }
 
 // enterCall increments the recursion counter, returning a RangeError once
