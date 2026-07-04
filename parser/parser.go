@@ -225,6 +225,10 @@ type EvalContext struct {
 	AllowSuperCall     bool
 	AllowSuperProperty bool
 	AllowNewTarget     bool
+	// InFieldInitializer is true when the direct eval is lexically inside a class
+	// field initializer or static block (not crossing an ordinary function
+	// boundary), where a reference to `arguments` is an early SyntaxError.
+	InFieldInitializer bool
 	PrivateNames       []string
 }
 
@@ -239,6 +243,7 @@ func ParseEval(sourceName, source string, ec EvalContext) (*ast.Program, error) 
 	p.superCallOK = ec.AllowSuperCall
 	p.superPropOK = ec.AllowSuperProperty
 	p.newTargetOK = ec.AllowNewTarget
+	p.inFieldInit = ec.InFieldInitializer
 	if len(ec.PrivateNames) > 0 {
 		env := &privateEnv{declared: make(map[string]bool, len(ec.PrivateNames))}
 		for _, n := range ec.PrivateNames {

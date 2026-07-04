@@ -354,6 +354,7 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 			fieldEnv := NewEnvironment(cd.env, true)
 			fieldEnv.setThis(self)
 			fieldEnv.homeObj = cd.proto
+			fieldEnv.fieldInit = true
 			v, err = i.evalExpr(ctx, m.Value, fieldEnv)
 			if err != nil {
 				return err
@@ -402,6 +403,7 @@ func (i *Interpreter) initStaticField(ctx context.Context, cd *classData, ctor *
 		env := NewEnvironment(classEnv, true)
 		env.setThis(ctor)
 		env.homeObj = ctor
+		env.fieldInit = true
 		v, err = i.evalExpr(ctx, m.Value, env)
 		if err != nil {
 			return err
@@ -431,6 +433,7 @@ func (i *Interpreter) runStaticBlock(ctx context.Context, ctor *Object, m *ast.C
 	env.setThis(ctor)
 	env.homeObj = ctor
 	env.newTgt = Undef
+	env.fieldInit = true
 	_, err := i.runFunctionBody(ctx, "static block", m.StaticBlock, env)
 	return err
 }

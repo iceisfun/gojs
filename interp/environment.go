@@ -32,6 +32,13 @@ type Environment struct {
 	// It is set only on a class's scope; a reference resolves by walking the
 	// enclosing scopes, so nested classes see their outer classes' privates.
 	privNames map[string]*PrivateName
+
+	// fieldInit marks the scope of a class field initializer or static
+	// initialization block, where `arguments` is forbidden. A direct eval here
+	// inherits that restriction (see inFieldInitializer); arrow functions are
+	// transparent to it, but a regular function establishes its own `arguments`
+	// and clears it.
+	fieldInit bool
 }
 
 // resolvePrivate returns the PrivateName identity that a textual private name
@@ -216,6 +223,24 @@ func (e *Environment) thisScope() *Environment {
 		}
 	}
 	return nil
+}
+
+// inFieldInitializer reports whether this scope lies within a class field
+// initializer or static initialization block without an intervening ordinary
+// function boundary. It is consulted when a direct eval must forbid `arguments`
+// as an early error (§15.7.1 / PerformEval class-fields extension). An ordinary
+// function (or generator/async) binds its own `arguments`, ending the search;
+// an arrow function binds none, so the restriction passes through it.
+func (e *Environment) inFieldInitializer() bool {
+	for env := e; env != nil; env = env.parent {
+		if env.fieldInit {
+			return true
+		}
+		if _, ok := env.vars["arguments"]; ok {
+			return false
+		}
+	}
+	return false
 }
 
 // homeObject returns the nearest [[HomeObject]] for super resolution.

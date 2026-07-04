@@ -73,6 +73,7 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 		AllowSuperCall:     env.inDerivedConstructor(),
 		AllowSuperProperty: env.homeObject() != nil,
 		AllowNewTarget:     env.functionScope() != i.globalEnv,
+		InFieldInitializer: env.inFieldInitializer(),
 		PrivateNames:       env.privateNamesInScope(),
 	})
 	if err != nil {
