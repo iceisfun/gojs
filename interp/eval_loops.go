@@ -271,9 +271,15 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 				}
 				return completion, nil
 			default:
-				// Throw, or a break/continue targeting an outer loop: close the
-				// iterator but let the original abrupt completion take precedence.
-				_ = closeIter()
+				// A return, or a break/continue targeting an outer loop, or a
+				// throw. IteratorClose (§7.4.11) calls return(): if the body's
+				// completion is a throw, that throw wins and the return() result is
+				// discarded; otherwise (a non-throw abrupt completion) an error from
+				// return() supersedes it.
+				closeErr := closeIter()
+				if closeErr != nil && isAbruptSignal(bodyErr) {
+					return completion, closeErr
+				}
 				return completion, bodyErr
 			}
 		}

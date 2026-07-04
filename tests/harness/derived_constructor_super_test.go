@@ -17,9 +17,12 @@ func TestDerivedConstructorRequiresSuper(t *testing.T) {
 }
 
 func TestDerivedConstructorPrimitiveReturnRequiresSuper(t *testing.T) {
+	// A non-undefined, non-object return from a derived constructor is a
+	// TypeError (§10.2.2 [[Construct]] step 13c), thrown before the this-binding
+	// is consulted — so it applies even when super() was never called.
 	Expect(t, `
 		class E extends Error { constructor() { return 5; } }
-		assert.throws(ReferenceError, function () { new E(); },
+		assert.throws(TypeError, function () { new E(); },
 			"primitive return without super()");
 	`)
 }

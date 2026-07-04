@@ -493,7 +493,7 @@ func (i *Interpreter) initString() {
 			return nil, err
 		}
 		return String(s), nil
-	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
 		s := ""
 		if len(args) > 0 {
 			var err error
@@ -502,7 +502,17 @@ func (i *Interpreter) initString() {
 				return nil, err
 			}
 		}
-		return i.newStringObject(String(s)), nil
+		o := i.newStringObject(String(s))
+		// GetPrototypeFromConstructor (§22.1.1.1): a subclass instance takes its
+		// prototype from new.target rather than %String.prototype%.
+		p, err := i.protoFromNewTarget(ctx, newTarget, i.stringProto)
+		if err != nil {
+			return nil, err
+		}
+		if p != i.stringProto {
+			o.SetProto(p)
+		}
+		return o, nil
 	})
 	linkCtor(ctor, proto)
 

@@ -53,9 +53,13 @@ func (i *Interpreter) initGenAsyncFunctions() {
 // [[Prototype]] is %Function% (the Function constructor), its "prototype" own
 // property is proto, its name is name, and its length is 1.
 func (i *Interpreter) makeFamilyCtor(name string, proto *Object, kind dynFuncKind) *Object {
-	ctor := i.newNativeCtor(name, 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		return i.createDynamicFunctionKind(ctx, kind, args)
-	}, nil)
+	var ctor *Object
+	ctor = i.newNativeCtor(name, 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
+		// Called (not via `new`): NewTarget is the active function object.
+		return i.createDynamicFunctionKind(ctx, kind, ctor, args)
+	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		return i.createDynamicFunctionKind(ctx, kind, newTarget, args)
+	})
 	// A subclass of %Function%: Object.getPrototypeOf(ctor) === Function.
 	ctor.SetProto(i.functionCtor)
 	// ctor.prototype = proto, { writable:false, enumerable:false, configurable:false }.

@@ -329,7 +329,7 @@ func (i *Interpreter) initNumber() {
 			return nil, err
 		}
 		return Number(f), nil
-	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
+	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
 		f := 0.0
 		if len(args) > 0 {
 			var err error
@@ -338,7 +338,11 @@ func (i *Interpreter) initNumber() {
 				return nil, err
 			}
 		}
-		o := NewObject(i.numberProto)
+		p, err := i.protoFromNewTarget(ctx, newTarget, i.numberProto)
+		if err != nil {
+			return nil, err
+		}
+		o := NewObject(p)
 		o.class = "Number"
 		o.primitive = Number(f)
 		return o, nil
@@ -650,8 +654,12 @@ func (i *Interpreter) initBoolean() {
 
 	ctor := i.newNativeCtor("Boolean", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return Bool(ToBoolean(arg(args, 0))), nil
-	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		o := NewObject(i.booleanProto)
+	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		p, err := i.protoFromNewTarget(ctx, newTarget, i.booleanProto)
+		if err != nil {
+			return nil, err
+		}
+		o := NewObject(p)
 		o.class = "Boolean"
 		o.primitive = Bool(ToBoolean(arg(args, 0)))
 		return o, nil

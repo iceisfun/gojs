@@ -60,8 +60,23 @@ func (i *Interpreter) initRegExp() {
 
 	ctor := i.newNativeCtor("RegExp", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return i.regexpFromArgs(ctx, args, true) // called as a function: NewTarget undefined
-	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return i.regexpFromArgs(ctx, args, false) // constructed: NewTarget defined
+	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		v, err := i.regexpFromArgs(ctx, args, false) // constructed: NewTarget defined
+		if err != nil {
+			return nil, err
+		}
+		// GetPrototypeFromConstructor (§22.2.3.1): a subclass instance takes its
+		// prototype from new.target rather than %RegExp.prototype%.
+		if o, ok := v.(*Object); ok {
+			p, err := i.protoFromNewTarget(ctx, newTarget, i.regexpProto)
+			if err != nil {
+				return nil, err
+			}
+			if p != i.regexpProto {
+				o.SetProto(p)
+			}
+		}
+		return v, nil
 	})
 	linkCtor(ctor, proto)
 	i.regexpCtor = ctor

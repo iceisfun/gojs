@@ -206,9 +206,13 @@ func (i *Interpreter) initFunction() {
 	// The Function constructor builds a function from source strings
 	// (CreateDynamicFunction). Both `Function(...)` and `new Function(...)`
 	// route here; it can be gated off via Security.DisableFunctionCtor.
-	ctor := i.newNativeCtor("Function", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return i.createDynamicFunction(ctx, args)
-	}, nil)
+	var ctor *Object
+	ctor = i.newNativeCtor("Function", 1, func(ctx context.Context, _ Value, args []Value) (Value, error) {
+		// Called (not via `new`): NewTarget is the active function object.
+		return i.createDynamicFunction(ctx, ctor, args)
+	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		return i.createDynamicFunction(ctx, newTarget, args)
+	})
 	linkCtor(ctor, proto)
 	i.functionCtor = ctor
 	i.setGlobalHidden("Function", ctor)

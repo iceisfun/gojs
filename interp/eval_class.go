@@ -16,7 +16,8 @@ type classData struct {
 	def            *ast.ClassDef
 	env            *Environment
 	proto          *Object
-	superCtor      *Object // parent constructor (nil when no extends)
+	superCtor      *Object // parent constructor (nil when no extends, or `extends null`)
+	derived        bool    // ClassHeritage present (`extends X` or `extends null`)
 	fieldInits     []*ast.ClassMember
 	privateMethods []*ast.ClassMember // instance #methods and private accessors
 	// computedKeys holds each computed member's property key, evaluated once at
@@ -57,10 +58,20 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 		}
 	}
 
+	// The class name is an immutable binding in the class scope, created
+	// uninitialized (in its Temporal Dead Zone) before the heritage expression is
+	// evaluated, and evaluated *in that scope* (§15.7.14 ClassDefinitionEvaluation
+	// steps 2-6): so `class x extends x {}` reads `x` in TDZ (a ReferenceError),
+	// and a heritage closure captures this inner binding independently of any
+	// same-named outer binding.
+	if def.Name != nil {
+		classEnv.vars[def.Name.Name] = &binding{mutable: false, initialized: false, lexical: true}
+	}
+
 	var superCtor *Object
 	protoParent := i.objectProto
 	if def.SuperClass != nil {
-		sv, err := i.evalExpr(ctx, def.SuperClass, env)
+		sv, err := i.evalExpr(ctx, def.SuperClass, classEnv)
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +102,7 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 	}
 
 	proto := NewObject(protoParent)
-	cd := &classData{def: def, env: classEnv, proto: proto, superCtor: superCtor}
+	cd := &classData{def: def, env: classEnv, proto: proto, superCtor: superCtor, derived: def.SuperClass != nil}
 
 	// Find an explicit constructor method.
 	var ctorDef *ast.FuncDef
@@ -126,9 +137,13 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 	proto.defineOwn(StrKey("constructor"), &Property{Value: ctor, Writable: true, Enumerable: false, Configurable: true})
 	ctor.defineOwn(StrKey("prototype"), &Property{Value: proto, Writable: false, Enumerable: false, Configurable: false})
 
-	// Bind the class name inside the class scope for self-reference.
+	// InitializeBinding: the class name binding (created uninitialized above) is
+	// now bound to the constructor, so methods can self-reference the class.
 	if def.Name != nil {
-		classEnv.vars[def.Name.Name] = &binding{value: ctor, mutable: false, initialized: true}
+		if b := classEnv.vars[def.Name.Name]; b != nil {
+			b.value = ctor
+			b.initialized = true
+		}
 	}
 
 	// Evaluate every computed element name exactly once, in source order, at
@@ -222,12 +237,21 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		if newTarget == nil {
 			newTarget = Undef
 		}
-		// A base class's instance takes its prototype from new.target.prototype
-		// (which differs under Reflect.construct with an explicit newTarget); a
-		// derived class populates a fresh object whose prototype is this class's
-		// own proto and reconciles it in invokeSuperOnto.
-		instProto := proto
-		if cd.superCtor == nil {
+		env := NewEnvironment(classEnv, true)
+		env.homeObj = proto
+		env.newTgt = newTarget
+		// A class constructor (like any ordinary function) has an `arguments`
+		// object. Class code is strict, so it is unmapped; a formal named
+		// "arguments" is a SyntaxError, so there is never a shadowing conflict.
+		env.vars["arguments"] = &binding{value: i.makeArguments(args, nil, true), mutable: true, initialized: true}
+
+		// -------------------------------------------------------------------
+		// Base class (no ClassHeritage): `this` is created here from
+		// new.target.prototype (OrdinaryCreateFromConstructor), then fields and
+		// private elements are installed before the body runs.
+		// -------------------------------------------------------------------
+		if !cd.derived {
+			instProto := proto
 			if nt, ok := newTarget.(*Object); ok {
 				if pv, _ := nt.GetStr(ctx, "prototype"); pv != nil {
 					if po, ok := pv.(*Object); ok {
@@ -235,38 +259,46 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 					}
 				}
 			}
-		}
-		self := NewObject(instProto)
-		env := NewEnvironment(classEnv, true)
-		env.homeObj = proto
-		env.setThis(self)
-		env.newTgt = newTarget
-		// A class constructor (like any ordinary function) has an `arguments`
-		// object. Class code is strict, so it is unmapped; a formal named
-		// "arguments" is a SyntaxError, so there is never a shadowing conflict.
-		env.vars["arguments"] = &binding{value: i.makeArguments(args, nil, true), mutable: true, initialized: true}
-
-		// With a superclass, `this` field/private init and body run after super()
-		// is called; a base class initializes everything up front.
-		if cd.superCtor == nil {
+			self := NewObject(instProto)
+			env.setThis(self)
 			if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
 				return nil, err
 			}
 			if err := i.initInstanceFields(ctx, self, cd, env); err != nil {
 				return nil, err
 			}
-		} else {
-			// Provide a super() binding that constructs the parent onto self, and
-			// mark `this` as uninitialized until super() runs. The active function
-			// object is recorded so GetSuperConstructor can read its current
-			// [[Prototype]] dynamically (§13.3.7.1 SuperCall / GetSuperConstructor).
-			env.superInit = &superInitState{}
-			env.vars["%activefunc%"] = &binding{value: fnObj, mutable: false, initialized: true}
-			env.vars["%superctor%"] = &binding{value: cd.superCtor, mutable: false, initialized: true}
-			env.vars["%fieldinit%"] = &binding{value: i.fieldInitThunk(cd, self), mutable: false, initialized: true}
+			var result Value = self
+			if ctorDef != nil {
+				if err := i.bindParams(ctx, ctorDef.Params, args, env); err != nil {
+					return nil, err
+				}
+				ret, err := i.runConstructorBody(ctx, "new "+frameName(name), ctorDef.Body, env)
+				if err != nil {
+					return nil, err
+				}
+				// A base class ignores a primitive/undefined return (§10.2.2 step
+				// 13b); only an explicit object return replaces `this`.
+				if obj, ok := ret.(*Object); ok {
+					result = obj
+				}
+			}
+			return result, nil
 		}
 
-		var result Value = self
+		// -------------------------------------------------------------------
+		// Derived class (`extends X` or `extends null`): `this` is uninitialized
+		// until super() binds it to the object the parent [[Construct]] returns.
+		// Reading `this` before super() is a ReferenceError (getThisBinding on the
+		// uninitialized environment). The active function object is recorded so
+		// GetSuperConstructor reads its current [[Prototype]] dynamically
+		// (§13.3.7.1 SuperCall / GetSuperConstructor).
+		// -------------------------------------------------------------------
+		env.superInit = &superInitState{}
+		env.setThis(Undef) // marks the this-scope; superInit.called governs uninitialized
+		env.vars["%activefunc%"] = &binding{value: fnObj, mutable: false, initialized: true}
+		env.vars["%superctor%"] = &binding{value: cd.superCtor, mutable: false, initialized: true}
+		env.vars["%fieldinit%"] = &binding{value: i.fieldInitThunk(cd, env), mutable: false, initialized: true}
+
 		if ctorDef != nil {
 			if err := i.bindParams(ctx, ctorDef.Params, args, env); err != nil {
 				return nil, err
@@ -275,45 +307,44 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			if err != nil {
 				return nil, err
 			}
-			// An explicit object return from a constructor replaces `this`. A
-			// non-object return is governed by ECMA-262 10.2.2 [[Construct]] step 13:
-			//   - In a base class a primitive/undefined return is ignored (this).
-			//   - In a derived class a non-undefined non-object return is a TypeError;
-			//     an undefined return yields the `this` binding, which is a
-			//     ReferenceError if super() was never called (GetThisBinding on an
-			//     uninitialized environment).
+			// §10.2.2 [[Construct]] step 13: an explicit object return replaces
+			// `this`; a non-undefined non-object return is a TypeError (step 13c),
+			// checked before consulting the this-binding; an undefined return
+			// yields GetThisBinding, a ReferenceError when super() never ran.
 			if obj, ok := ret.(*Object); ok {
-				result = obj
-			} else if cd.superCtor != nil {
-				// GetThisBinding is consulted for a non-object completion: a derived
-				// constructor whose `this` is still uninitialized (super() never ran)
-				// is a ReferenceError, observed before the invalid-return TypeError for
-				// a primitive completion value.
-				if env.superInit == nil || !env.superInit.called {
-					return nil, i.throwError(ctx, "ReferenceError",
-						"Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
-				}
-				if !IsUndefined(ret) {
-					return nil, i.throwError(ctx, "TypeError",
-						"Derived constructors may only return an object or undefined")
-				}
+				return obj, nil
 			}
-		} else if cd.superCtor != nil {
-			// Default derived constructor behaves as `constructor(...args) {
-			// super(...args); }`: construct the parent, fold its own properties
-			// onto self, then initialize this class's private elements and fields.
-			if err := i.invokeSuperOnto(ctx, self, cd.superCtor, args, newTarget); err != nil {
-				return nil, err
+			if !IsUndefined(ret) {
+				return nil, i.throwError(ctx, "TypeError",
+					"Derived constructors may only return an object or undefined")
 			}
-			env.superInit.called = true
-			if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
-				return nil, err
-			}
-			if err := i.initInstanceFields(ctx, self, cd, env); err != nil {
-				return nil, err
-			}
+			return i.getThisBinding(ctx, env)
 		}
-		return result, nil
+
+		// Default derived constructor: `constructor(...args) { super(...args); }`.
+		// GetSuperConstructor is the active function's [[Prototype]]; for
+		// `extends null` it is %Function.prototype%, which is not a constructor.
+		superCtor := fnObj.proto
+		if superCtor == nil || !superCtor.IsConstructor() {
+			return nil, i.throwError(ctx, "TypeError", "Super constructor is not a constructor")
+		}
+		result, err := superCtor.fn.construct(ctx, newTarget, args)
+		if err != nil {
+			return nil, err
+		}
+		self, ok := result.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Super constructor returned a non-object")
+		}
+		env.setThis(self)
+		env.superInit.called = true
+		if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
+			return nil, err
+		}
+		if err := i.initInstanceFields(ctx, self, cd, env); err != nil {
+			return nil, err
+		}
+		return self, nil
 	}
 
 	fnObj.fn = &functionData{
@@ -333,17 +364,22 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 	return fnObj
 }
 
-// fieldInitThunk returns a native function that initializes instance fields on
-// self; the derived constructor calls it after super().
-func (i *Interpreter) fieldInitThunk(cd *classData, self *Object) *Object {
+// fieldInitThunk returns a native function that installs this class's private
+// elements and initializes its instance fields on the constructor's current
+// `this` binding. It is invoked by super() after `this` has been bound to the
+// object the parent [[Construct]] returned, so it reads `this` from ctorEnv at
+// call time rather than capturing a pre-created instance.
+func (i *Interpreter) fieldInitThunk(cd *classData, ctorEnv *Environment) *Object {
 	return i.newNativeFunc("%fieldinit%", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		env := NewEnvironment(cd.env, true)
-		env.setThis(self)
-		env.homeObj = cd.proto
+		tv, _ := ctorEnv.thisBinding()
+		self, ok := tv.(*Object)
+		if !ok {
+			return Undef, nil
+		}
 		if err := i.installInstancePrivateMethods(ctx, self, cd); err != nil {
 			return Undef, err
 		}
-		return Undef, i.initInstanceFields(ctx, self, cd, env)
+		return Undef, i.initInstanceFields(ctx, self, cd, ctorEnv)
 	})
 }
 
@@ -397,18 +433,13 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 	return nil
 }
 
-// defineFieldOrThrow creates a public class field as an own data property with
-// CreateDataPropertyOrThrow semantics: adding a new property to a non-extensible
-// object (e.g. a field initializer froze `this`) is a TypeError.
+// defineFieldOrThrow creates a public class field with CreateDataPropertyOrThrow
+// semantics (§sec-define-field DefineField step 9): it routes through the
+// object's [[DefineOwnProperty]] so a Proxy receiver's defineProperty trap runs
+// and it is observable, and a refusal — e.g. a non-extensible receiver (a field
+// initializer froze `this`) — is a TypeError.
 func (i *Interpreter) defineFieldOrThrow(ctx context.Context, obj *Object, key PropertyKey, v Value) error {
-	if !obj.extensible {
-		if _, exists := obj.getOwn(key); !exists {
-			return i.throwError(ctx, "TypeError",
-				"Cannot define property "+keyName(key)+", object is not extensible")
-		}
-	}
-	obj.writeData(key, v)
-	return nil
+	return i.createDataPropertyOrThrow(ctx, obj, key, v)
 }
 
 // initStaticField evaluates a static field initializer on the constructor.
@@ -548,6 +579,12 @@ func (i *Interpreter) installPrivateMember(ctx context.Context, target, home *Ob
 func (i *Interpreter) installInstancePrivateMethods(ctx context.Context, self *Object, cd *classData) error {
 	if err := i.checkNoDuplicateBrand(ctx, self, cd); err != nil {
 		return err
+	}
+	// A private method or accessor may not be added to a non-extensible object,
+	// consistent with private fields (nonextensible-applies-to-private).
+	if len(cd.sharedPrivate) > 0 && !self.extensible {
+		return i.throwError(ctx, "TypeError",
+			"Cannot add private member to a non-extensible object")
 	}
 	// Install the shared private elements by reference, so every instance observes
 	// the same private method/accessor function objects.
@@ -699,8 +736,10 @@ func (i *Interpreter) runConstructorBody(ctx context.Context, name string, body 
 }
 
 // resolveSuperCall handles a super(...) call inside a derived constructor by
-// returning a synthetic callable that constructs the parent onto `this` and
-// runs field initializers.
+// returning a synthetic callable. When invoked it constructs the parent class
+// and binds the derived `this` to the object the parent [[Construct]] returns
+// (§13.3.7.1 SuperCall / §9.1.1.3.1 BindThisValue), then runs this class's field
+// and private-element initializers on that object.
 func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (Value, Value, error) {
 	b := env.lookup("%superctor%")
 	if b == nil {
@@ -715,35 +754,47 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 			superCtor = fn.proto
 		}
 	}
-	thisVal, _ := env.thisBinding()
-	self, _ := thisVal.(*Object)
 	fieldInit := env.lookup("%fieldinit%")
 	newTarget := env.newTarget()
-	// The super-init state lives on the derived constructor's `this` scope.
+	// The super-init state and `this` binding live on the derived constructor's
+	// this-scope.
+	ts := env.thisScope()
 	initState := (*superInitState)(nil)
-	if ts := env.thisScope(); ts != nil {
+	if ts != nil {
 		initState = ts.superInit
 	}
 
 	caller := i.newNativeFunc("super", 0, func(ctx context.Context, _ Value, args []Value) (Value, error) {
-		// super() may be called at most once in a derived constructor.
-		if initState != nil && initState.called {
-			return nil, i.throwError(ctx, "ReferenceError", "Super constructor may only be called once")
-		}
 		// IsConstructor(superCtor) is checked after ArgumentListEvaluation, so the
 		// arguments' side effects are observed even when the super value is not a
 		// constructor (§13.3.7.1 SuperCall steps 4-5).
 		if superCtor == nil || !superCtor.IsConstructor() {
 			return nil, i.throwError(ctx, "TypeError", "Super constructor is not a constructor")
 		}
-		if err := i.invokeSuperOnto(ctx, self, superCtor, args, newTarget); err != nil {
+		// Step 6: Construct(func, argList, newTarget). This runs even when `this`
+		// is already initialized (its side effects are observable); the duplicate
+		// binding is only rejected afterward by BindThisValue.
+		result, err := superCtor.fn.construct(ctx, newTarget, args)
+		if err != nil {
 			return nil, err
+		}
+		self, ok := result.(*Object)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "Super constructor returned a non-object")
+		}
+		// Step 8: BindThisValue — a second super() in the same constructor throws,
+		// because the this-binding is already initialized (§9.1.1.3.1).
+		if initState != nil && initState.called {
+			return nil, i.throwError(ctx, "ReferenceError", "Super constructor may only be called once")
+		}
+		if ts != nil {
+			ts.setThis(self)
 		}
 		if initState != nil {
 			initState.called = true
 		}
-		// Initialize this class's private elements and instance fields after
-		// super returns.
+		// InitializeInstanceElements: install this class's private elements and
+		// instance fields on the newly bound `this`.
 		if fieldInit != nil {
 			if fn, ok := fieldInit.value.(*Object); ok {
 				if _, err := fn.fn.call(ctx, self, nil); err != nil {
@@ -754,78 +805,4 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 		return Undef, nil
 	})
 	return caller, Undef, nil
-}
-
-// invokeSuperOnto constructs the parent class with args and folds the resulting
-// object's own properties onto self. gojs uses a single-object instance model,
-// so a derived instance is one object; super() populates it with the fields the
-// parent constructor would have set.
-func (i *Interpreter) invokeSuperOnto(ctx context.Context, self *Object, superCtor *Object, args []Value, newTarget Value) error {
-	if newTarget == nil {
-		newTarget = superCtor
-	}
-	result, err := superCtor.fn.construct(ctx, newTarget, args)
-	if err != nil {
-		return err
-	}
-	parentObj, ok := result.(*Object)
-	if !ok || self == nil || parentObj == self {
-		return nil
-	}
-	// If the parent is an integer-indexed exotic (class X extends Uint8Array),
-	// adopt its TypedArray backing so element access routes through the shared
-	// buffer. The numeric-index "own properties" are not ordinary storage, so
-	// they must not be folded on (that is handled by the exotic slot).
-	if parentObj.typedArray != nil {
-		self.typedArray = parentObj.typedArray
-		self.class = parentObj.class
-		for key, p := range parentObj.props {
-			self.defineOwn(key, p)
-		}
-		for pn, p := range parentObj.private {
-			self.definePrivate(pn, p)
-		}
-		return nil
-	}
-	// If the parent is an exotic Array (class X extends Array), the instance
-	// must itself be array-backed so length/indexing/push work on it.
-	if parentObj.isArray {
-		self.isArray = true
-		self.i = i
-		self.elems = parentObj.elems
-		self.class = "Array"
-	}
-	for _, name := range parentObj.OwnKeys() {
-		if p, ok := parentObj.getOwn(StrKey(name)); ok {
-			self.defineOwn(StrKey(name), p)
-		}
-	}
-	// Preserve any extra own (e.g. symbol) properties too.
-	for key, p := range parentObj.props {
-		if key.IsSymbol() {
-			self.defineOwn(key, p)
-		}
-	}
-	// Fold the parent's private brand onto self so inherited methods can access
-	// the base class's private elements through the single derived instance. The
-	// keys are the parent evaluation's PrivateName identities, so the parent's
-	// methods (which resolve to those same identities) still find them.
-	for pn, p := range parentObj.private {
-		self.definePrivate(pn, p)
-	}
-	// Carry over internal slots the parent set up (Map/Set backing storage,
-	// boxed primitives, etc.) so built-in subclassing works on the instance.
-	for k, v := range parentObj.internal {
-		if self.internal == nil {
-			self.internal = make(map[string]any)
-		}
-		self.internal[k] = v
-	}
-	if parentObj.primitive != nil {
-		self.primitive = parentObj.primitive
-	}
-	if parentObj.class != "Object" && self.class == "Object" {
-		self.class = parentObj.class
-	}
-	return nil
 }

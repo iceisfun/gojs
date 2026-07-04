@@ -900,7 +900,7 @@ func (i *Interpreter) initDate() {
 		return String(dateToString(timeClip(i.dateNow(ctx)))), nil
 	}
 
-	constructFn := func(ctx context.Context, this Value, args []Value) (Value, error) {
+	constructFn := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
 		var ms float64
 		switch len(args) {
 		case 0:
@@ -938,7 +938,17 @@ func (i *Interpreter) initDate() {
 			}
 			ms = timeClip(comps)
 		}
-		return newDateObj(ms), nil
+		// GetPrototypeFromConstructor (§21.4.2.1): a subclass instance takes its
+		// prototype from new.target rather than %Date.prototype%.
+		p, err := i.protoFromNewTarget(ctx, newTarget, i.dateProto)
+		if err != nil {
+			return nil, err
+		}
+		o := newDateObj(ms)
+		if p != i.dateProto {
+			o.SetProto(p)
+		}
+		return o, nil
 	}
 
 	ctor := i.newNativeCtor("Date", 7, callFn, constructFn)

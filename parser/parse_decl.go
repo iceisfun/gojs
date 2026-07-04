@@ -1013,6 +1013,19 @@ func (p *parser) parseClassDef() *ast.ClassDef {
 		id := p.next()
 		p.checkEscapedReserved(id)
 		def.Name = &ast.Ident{NamePos: id.Pos, Name: id.Literal}
+	} else if p.cur().Type.IsKeyword() && !p.at(token.EXTENDS) {
+		// A class BindingIdentifier may be spelled with a contextual keyword
+		// (e.g. `class await {}` in script code, or `yield` outside a
+		// generator/strict context). An always-reserved word, or one reserved
+		// in the current context, is a SyntaxError.
+		id := p.next()
+		name := identText(id)
+		if token.IsReservedWord(name) {
+			p.errorAt(id.Pos, "'%s' is a reserved word and may not be used as an identifier", name)
+		}
+		p.checkReservedIdentifier(name, id.Pos)
+		p.checkEscapedReserved(id)
+		def.Name = &ast.Ident{NamePos: id.Pos, Name: name}
 	}
 	if p.accept(token.EXTENDS) {
 		def.SuperClass = p.parseLeftHandSide()
@@ -1254,7 +1267,7 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 	generator := false
 	kind := ast.PropInit
 
-	if (p.at(token.GET) || p.at(token.SET)) && !isMemberEnd(p.peek(1).Type) {
+	if (p.at(token.GET) || p.at(token.SET)) && !isMemberEnd(p.peek(1).Type) && p.peek(1).Type != token.STAR {
 		if p.at(token.SET) {
 			kind = ast.PropSet
 		} else {
@@ -1319,6 +1332,7 @@ func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
 	prevStaticAwait := p.staticBlockAwait
 	prevGen, prevAsync, prevParams := p.inGenerator, p.inAsync, p.inParams
 	prevSuperCall, prevSuperProp := p.superCallOK, p.superPropOK
+	prevNT := p.newTargetOK
 	// A static initialization block is a break/continue/return boundary just like
 	// a function body: an enclosing loop, switch, or label does not reach across
 	// it. Save and reset the tracking state.
@@ -1330,12 +1344,14 @@ func (p *parser) parseStaticBlock(m *ast.ClassMember) *ast.ClassMember {
 	p.inGenerator, p.inAsync, p.inParams = false, false, false
 	p.superCallOK = false
 	p.superPropOK = true
+	p.newTargetOK = true // new.target is valid (and evaluates to undefined) in a static block
 	p.inLoop, p.inSwitch = 0, 0
 	p.labelSet, p.pendingLabels = nil, nil
 	m.StaticBlock = p.parseBlock()
 	p.inFieldInit, p.inStaticBlock = prevField, prevStatic
 	p.staticBlockAwait = prevStaticAwait
 	p.inGenerator, p.inAsync, p.inParams = prevGen, prevAsync, prevParams
+	p.newTargetOK = prevNT
 	p.superCallOK, p.superPropOK = prevSuperCall, prevSuperProp
 	p.inLoop, p.inSwitch = prevLoop, prevSwitch
 	p.labelSet, p.pendingLabels = prevLabels, prevPending

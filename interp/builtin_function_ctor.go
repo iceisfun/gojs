@@ -39,8 +39,8 @@ func (k dynFuncKind) prefix() string {
 // createDynamicFunction implements CreateDynamicFunction for a normal function
 // (ECMA-262 sec-createdynamicfunction), backing `new Function(...)` and a plain
 // `Function(...)` call.
-func (i *Interpreter) createDynamicFunction(ctx context.Context, args []Value) (Value, error) {
-	return i.createDynamicFunctionKind(ctx, dynNormal, args)
+func (i *Interpreter) createDynamicFunction(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+	return i.createDynamicFunctionKind(ctx, dynNormal, newTarget, args)
 }
 
 // createDynamicFunctionKind implements CreateDynamicFunction for any of the
@@ -52,7 +52,7 @@ func (i *Interpreter) createDynamicFunction(ctx context.Context, args []Value) (
 // Parameters and body are parsed separately as well as combined, so that an
 // injection such as `new Function("/*", "*/ ) {")` is rejected: each piece must
 // be individually well-formed.
-func (i *Interpreter) createDynamicFunctionKind(ctx context.Context, kind dynFuncKind, args []Value) (Value, error) {
+func (i *Interpreter) createDynamicFunctionKind(ctx context.Context, kind dynFuncKind, newTarget Value, args []Value) (Value, error) {
 	if i.security.DisableFunctionCtor {
 		return nil, i.throwError(ctx, "EvalError", "Function constructor is disabled in this sandbox")
 	}
@@ -104,5 +104,18 @@ func (i *Interpreter) createDynamicFunctionKind(ctx context.Context, kind dynFun
 
 	// The dynamic function closes over the global environment.
 	fn := i.makeFunction(decl.Def, i.globalEnv, kindNormal, nil, false)
+	// GetPrototypeFromConstructor (§20.2.1.1.1 step 26): the instance's
+	// [[Prototype]] comes from new.target, so `class F extends Function {}`
+	// yields F.prototype rather than the default fallback. The fallback is the
+	// prototype makeFunction already assigned for this kind.
+	if fn.proto != nil {
+		p, err := i.protoFromNewTarget(ctx, newTarget, fn.proto)
+		if err != nil {
+			return nil, err
+		}
+		if p != fn.proto {
+			fn.SetProto(p)
+		}
+	}
 	return fn, nil
 }
