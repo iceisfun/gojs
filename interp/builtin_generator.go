@@ -119,6 +119,14 @@ func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *E
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
 		return nil, nil, err
 	}
+	// A non-simple parameter list gives the body its own VariableEnvironment
+	// (§10.2.11 step 27). It is a fresh function scope, so the generator state —
+	// which generator() locates by walking to the nearest function scope — must be
+	// carried onto it, or a `yield` in the body would find no generator.
+	bodyEnv := bodyVarEnv(def.Params, def.Body, env)
+	if bodyEnv != env {
+		bodyEnv.gen = gs
+	}
 
 	started := false
 	start := func() {
@@ -131,7 +139,7 @@ func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *E
 			case <-gs.ctx.Done():
 				return
 			}
-			_, err := i.runGeneratorBody(gs.ctx, defName(def), def.Body, env)
+			_, err := i.runGeneratorBody(gs.ctx, defName(def), def.Body, bodyEnv)
 			var final yieldMsg
 			switch e := err.(type) {
 			case nil:
