@@ -345,7 +345,7 @@ func (i *Interpreter) initNumber() {
 				return nil, err
 			}
 		}
-		p, err := i.protoFromNewTarget(ctx, newTarget, i.numberProto)
+		p, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.numberProto })
 		if err != nil {
 			return nil, err
 		}
@@ -662,7 +662,7 @@ func (i *Interpreter) initBoolean() {
 	ctor := i.newNativeCtor("Boolean", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return Bool(ToBoolean(arg(args, 0))), nil
 	}, func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		p, err := i.protoFromNewTarget(ctx, newTarget, i.booleanProto)
+		p, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.booleanProto })
 		if err != nil {
 			return nil, err
 		}

@@ -362,7 +362,7 @@ func (i *Interpreter) typedArrayConstruct(ctx context.Context, kind taKind, newT
 		if err != nil {
 			return nil, err
 		}
-		proto, err := i.protoFromCtor(ctx, newTarget, i.typedArrayKindProtos[kind])
+		proto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.typedArrayKindProtos[kind] })
 		if err != nil {
 			return nil, err
 		}
@@ -373,7 +373,7 @@ func (i *Interpreter) typedArrayConstruct(ctx context.Context, kind taKind, newT
 		return o, nil
 	}
 
-	proto, err := i.protoFromCtor(ctx, newTarget, i.typedArrayKindProtos[kind])
+	proto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.typedArrayKindProtos[kind] })
 	if err != nil {
 		return nil, err
 	}

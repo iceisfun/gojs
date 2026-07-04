@@ -252,7 +252,7 @@ func (i *Interpreter) initMap() {
 		return nil, i.throwError(ctx, "TypeError", "Constructor Map requires 'new'")
 	}
 	mapConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.mapProto })
 		if err != nil {
 			return nil, err
 		}
@@ -561,7 +561,7 @@ func (i *Interpreter) initSet() {
 		return nil, i.throwError(ctx, "TypeError", "Constructor Set requires 'new'")
 	}
 	setConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.setProto })
 		if err != nil {
 			return nil, err
 		}
@@ -760,6 +760,7 @@ func (i *Interpreter) initSet() {
 func (i *Interpreter) initWeakMap() {
 	weakMapProto := NewObject(i.objectProto)
 	weakMapProto.class = "WeakMap"
+	i.weakMapProto = weakMapProto
 
 	// Constructor: new WeakMap(iterable?). §24.3.1.1. Called without new
 	// (NewTarget undefined) → TypeError.
@@ -767,7 +768,7 @@ func (i *Interpreter) initWeakMap() {
 		return nil, i.throwError(ctx, "TypeError", "Constructor WeakMap requires 'new'")
 	}
 	wmConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, weakMapProto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.weakMapProto })
 		if err != nil {
 			return nil, err
 		}
@@ -937,6 +938,7 @@ func (i *Interpreter) initWeakMap() {
 func (i *Interpreter) initWeakSet() {
 	weakSetProto := NewObject(i.objectProto)
 	weakSetProto.class = "WeakSet"
+	i.weakSetProto = weakSetProto
 
 	// Constructor: new WeakSet(iterable?). §24.4.1.1. Called without new
 	// (NewTarget undefined) → TypeError.
@@ -944,7 +946,7 @@ func (i *Interpreter) initWeakSet() {
 		return nil, i.throwError(ctx, "TypeError", "Constructor WeakSet requires 'new'")
 	}
 	wsConstruct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, weakSetProto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.weakSetProto })
 		if err != nil {
 			return nil, err
 		}

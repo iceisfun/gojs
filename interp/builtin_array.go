@@ -33,9 +33,38 @@ func (i *Interpreter) initArray() {
 		return Bool(ok && o.isArray), nil
 	})
 	i.defineMethod(ctor, "of", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		cp := make([]Value, len(args))
-		copy(cp, args)
-		return i.newArray(cp), nil
+		// Array.of (§23.1.2.3): when the `this` value is a constructor, build the
+		// result via Construct(C, «len») — so `Array.of.call(Subclass, ...)` and a
+		// cross-realm constructor produce a properly-typed instance — then fill it
+		// with CreateDataPropertyOrThrow and set "length" via a throwing Set.
+		length := len(args)
+		var a *Object
+		if co, ok := this.(*Object); ok && co.IsConstructor() {
+			res, err := co.fn.construct(ctx, co, []Value{Number(float64(length))})
+			if err != nil {
+				return nil, err
+			}
+			ro, ok := res.(*Object)
+			if !ok {
+				return nil, i.throwError(ctx, "TypeError", "Array.of: constructor did not return an object")
+			}
+			a = ro
+		} else {
+			arr, err := i.arrayCreate(ctx, length)
+			if err != nil {
+				return nil, err
+			}
+			a = arr
+		}
+		for k := 0; k < length; k++ {
+			if err := i.createDataPropertyOrThrow(ctx, a, idxKey(k), args[k]); err != nil {
+				return nil, err
+			}
+		}
+		if err := i.setOrThrow(ctx, a, StrKey("length"), Number(float64(length))); err != nil {
+			return nil, err
+		}
+		return a, nil
 	})
 	i.defineMethod(ctor, "from", 1, i.arrayFrom)
 	i.defineMethod(ctor, "fromAsync", 1, i.arrayFromAsync)
@@ -158,7 +187,7 @@ func (i *Interpreter) arrayConstructNewTarget(ctx context.Context, newTarget Val
 		return nil, err
 	}
 	arr := arrV.(*Object)
-	proto, err := i.protoFromConstructor(ctx, newTarget, i.arrayProto)
+	proto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.arrayProto })
 	if err != nil {
 		return nil, err
 	}
@@ -166,13 +195,42 @@ func (i *Interpreter) arrayConstructNewTarget(ctx context.Context, newTarget Val
 	return arr, nil
 }
 
+// getFunctionRealm implements GetFunctionRealm (§10.2.10): it resolves the realm
+// (interpreter) associated with a callable object. A bound function and a Proxy
+// exotic have no own [[Realm]] slot, so it follows the bound target / proxy
+// target; a revoked proxy throws a TypeError. Anything without a resolvable
+// [[Realm]] falls back to the current (calling) realm.
+func (i *Interpreter) getFunctionRealm(ctx context.Context, fn *Object) (*Interpreter, error) {
+	for {
+		// A bound function exotic has no [[Realm]]; follow [[BoundTargetFunction]].
+		if fn.fn != nil && fn.fn.boundTarget != nil {
+			fn = fn.fn.boundTarget
+			continue
+		}
+		// A Proxy exotic has no [[Realm]]; follow [[ProxyTarget]] (revoked throws).
+		if fn.proxy != nil {
+			if fn.proxy.revoked() {
+				return nil, i.throwError(ctx, "TypeError", "Cannot perform operation on a revoked proxy")
+			}
+			fn = fn.proxy.target
+			continue
+		}
+		if fn.fn != nil && fn.fn.realm != nil {
+			return fn.fn.realm, nil
+		}
+		return i, nil
+	}
+}
+
 // protoFromConstructor implements GetPrototypeFromConstructor (§10.1.13): it
-// reads new.target's "prototype" via [[Get]] (honoring a Proxy new.target),
-// falling back to the supplied intrinsic when it is not an object.
-func (i *Interpreter) protoFromConstructor(ctx context.Context, newTarget Value, fallback *Object) (*Object, error) {
+// reads new.target's "prototype" via [[Get]] (honoring a Proxy new.target). When
+// that is not an object, the default prototype is the intrinsic of new.target's
+// *own* realm (§10.1.13 step 4: GetFunctionRealm then read the named intrinsic),
+// which pick selects — so a cross-realm new.target yields its realm's intrinsic.
+func (i *Interpreter) protoFromConstructor(ctx context.Context, newTarget Value, pick func(*Interpreter) *Object) (*Object, error) {
 	nt, ok := newTarget.(*Object)
 	if !ok {
-		return fallback, nil
+		return pick(i), nil
 	}
 	protoV, err := nt.GetStr(ctx, "prototype")
 	if err != nil {
@@ -181,7 +239,11 @@ func (i *Interpreter) protoFromConstructor(ctx context.Context, newTarget Value,
 	if proto, ok := protoV.(*Object); ok {
 		return proto, nil
 	}
-	return fallback, nil
+	realm, err := i.getFunctionRealm(ctx, nt)
+	if err != nil {
+		return nil, err
+	}
+	return pick(realm), nil
 }
 
 // thisArray coerces this to an array-like *Object, throwing otherwise.
@@ -986,6 +1048,20 @@ func (i *Interpreter) arraySpeciesCreate(ctx context.Context, original *Object, 
 	c, err := original.GetStr(ctx, "constructor")
 	if err != nil {
 		return nil, err
+	}
+	// §23.1.3.36 step 4: when C is a constructor from another realm that is that
+	// realm's own %Array%, treat it as absent, so the result is a default array
+	// in the *current* realm rather than routing through the foreign Array (and
+	// its @@species). This keeps `arr.constructor = otherRealm.Array` from
+	// hijacking a subclass-less map/filter/slice/splice/concat.
+	if co, ok := c.(*Object); ok && co.IsConstructor() {
+		realmC, err := i.getFunctionRealm(ctx, co)
+		if err != nil {
+			return nil, err
+		}
+		if realmC != i && co == realmC.arrayCtor {
+			c = Undef
+		}
 	}
 	if co, ok := c.(*Object); ok {
 		sv, err := co.Get(ctx, SymKey(i.symSpecies))

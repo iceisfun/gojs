@@ -117,6 +117,12 @@ type functionData struct {
 	// Function.prototype.bind; nil for every other callable. It lets
 	// OrdinaryHasInstance delegate `instanceof` to the wrapped target.
 	boundTarget *Object
+	// realm is the function's [[Realm]] internal slot — the realm (interpreter)
+	// in which it was created. GetFunctionRealm (§10.2.10) reads it to resolve
+	// the intrinsic default prototype in cross-realm construction. Bound and
+	// Proxy exotics have no own [[Realm]] and are resolved by following their
+	// target instead (see getFunctionRealm).
+	realm *Interpreter
 }
 
 // ---------------------------------------------------------------------------
@@ -779,20 +785,28 @@ func (o *Object) setArrayLength(v Value) {
 // new length (which may be a sparse tail for large values, never an eager
 // allocation). It reports whether the write took effect.
 func (o *Object) setArrayLengthChecked(ctx context.Context, v Value) (bool, error) {
+	// The invalid-length RangeError (and any coercion error) comes from the
+	// running realm, not the realm that created the array (§10.4.2.4 runs in the
+	// current execution context). Fall back to the array's own realm when ctx
+	// carries none.
+	r := o.i
+	if cur := currentRealm(ctx); cur != nil {
+		r = cur
+	}
 	// Coerce the value twice (ToUint32's ToNumber, then ToNumber), matching
 	// ArraySetLength steps 3–4, so a user-defined [Symbol.toPrimitive]/valueOf
 	// observes both invocations.
-	num1, err := o.i.ToNumberV(ctx, v)
+	num1, err := r.ToNumberV(ctx, v)
 	if err != nil {
 		return false, err
 	}
 	newLen := ToUint32(num1)
-	num2, err := o.i.ToNumberV(ctx, v)
+	num2, err := r.ToNumberV(ctx, v)
 	if err != nil {
 		return false, err
 	}
 	if float64(newLen) != num2 {
-		return false, NewThrow(o.i.newError("RangeError", "Invalid array length"))
+		return false, NewThrow(r.newError("RangeError", "Invalid array length"))
 	}
 	if o.lengthNonWritable {
 		return int(newLen) == o.ArrayLen(), nil

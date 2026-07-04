@@ -109,7 +109,20 @@ func (i *Interpreter) createDynamicFunctionKind(ctx context.Context, kind dynFun
 	// yields F.prototype rather than the default fallback. The fallback is the
 	// prototype makeFunction already assigned for this kind.
 	if fn.proto != nil {
-		p, err := i.protoFromNewTarget(ctx, newTarget, fn.proto)
+		p, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object {
+			// The intrinsic default prototype for a dynamic function is the
+			// %(Async)(Generator)Function.prototype% of new.target's realm.
+			switch kind {
+			case dynGenerator:
+				return r.genFuncProto
+			case dynAsync:
+				return r.asyncFuncProto
+			case dynAsyncGenerator:
+				return r.asyncGenFuncProto
+			default:
+				return r.functionProto
+			}
+		})
 		if err != nil {
 			return nil, err
 		}

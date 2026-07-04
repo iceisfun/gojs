@@ -191,6 +191,11 @@ type intrinsics struct {
 	regexpStringIteratorProto *Object // %RegExpStringIteratorPrototype%
 	mapProto                  *Object
 	setProto                  *Object
+	weakMapProto              *Object // %WeakMap.prototype%
+	weakSetProto              *Object // %WeakSet.prototype%
+	weakRefProto              *Object // %WeakRef.prototype%
+	finalizationRegistryProto *Object // %FinalizationRegistry.prototype%
+	shadowRealmProto          *Object // %ShadowRealm.prototype%
 	promiseProto              *Object
 	promiseCtor               *Object // %Promise%, for SpeciesConstructor defaults
 	aggregateErrorProto       *Object // %AggregateError.prototype%, for Promise.any
@@ -379,6 +384,11 @@ func New(opts ...Option) *Interpreter {
 		i.ctx = context.Background()
 	}
 	i.ctx, i.cancel = context.WithCancel(i.ctx)
+	// Tag the base context with this realm so realm-sensitive operations reached
+	// through the realm-agnostic object layer (chiefly Proxy internal methods)
+	// can select the *running* realm's intrinsics/error constructors. A child
+	// realm's own tag shadows the parent's inherited one.
+	i.ctx = context.WithValue(i.ctx, currentRealmKey{}, i)
 	i.loop = newEventLoop()
 	if i.rng == nil {
 		i.rng = newPRNG(0)
@@ -409,6 +419,29 @@ func New(opts ...Option) *Interpreter {
 
 // Context returns the interpreter's execution context.
 func (i *Interpreter) Context() context.Context { return i.ctx }
+
+// currentRealmKey is the context key under which the running realm is stored.
+// The running execution context's Realm (§9.4) governs which realm's intrinsics
+// and error constructors abstract operations use — most visibly for the
+// TypeErrors a Proxy raises, which come from the *current* realm rather than the
+// realm that created the proxy.
+type currentRealmKey struct{}
+
+// currentRealm returns the running realm recorded in ctx, or nil when unset.
+func currentRealm(ctx context.Context) *Interpreter {
+	r, _ := ctx.Value(currentRealmKey{}).(*Interpreter)
+	return r
+}
+
+// withCurrentRealm returns ctx tagged with i as the running realm. It reuses ctx
+// unchanged when it already names i, so same-realm calls — the overwhelming
+// majority — allocate nothing; only a genuine cross-realm boundary wraps ctx.
+func (i *Interpreter) withCurrentRealm(ctx context.Context) context.Context {
+	if currentRealm(ctx) == i {
+		return ctx
+	}
+	return context.WithValue(ctx, currentRealmKey{}, i)
+}
 
 // Global returns the global object.
 func (i *Interpreter) Global() *Object { return i.global }

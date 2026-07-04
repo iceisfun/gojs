@@ -31,6 +31,7 @@ func weakRefTarget(this Value) (Value, bool) {
 func (i *Interpreter) initWeakRef() {
 	proto := NewObject(i.objectProto)
 	proto.class = "WeakRef"
+	i.weakRefProto = proto
 
 	wrCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return nil, i.throwError(ctx, "TypeError", "Constructor WeakRef requires 'new'")
@@ -40,7 +41,7 @@ func (i *Interpreter) initWeakRef() {
 		if !canBeHeldWeakly(target) {
 			return nil, i.throwError(ctx, "TypeError", "WeakRef: target cannot be held weakly")
 		}
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.weakRefProto })
 		if err != nil {
 			return nil, err
 		}
@@ -107,6 +108,7 @@ func finRegistrySlot(this Value) *finalizationRegistry {
 func (i *Interpreter) initFinalizationRegistry() {
 	proto := NewObject(i.objectProto)
 	proto.class = "FinalizationRegistry"
+	i.finalizationRegistryProto = proto
 
 	frCall := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		return nil, i.throwError(ctx, "TypeError", "Constructor FinalizationRegistry requires 'new'")
@@ -116,7 +118,7 @@ func (i *Interpreter) initFinalizationRegistry() {
 		if co, ok := cb.(*Object); !ok || !co.IsCallable() {
 			return nil, i.throwError(ctx, "TypeError", "FinalizationRegistry: cleanup callback is not callable")
 		}
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.finalizationRegistryProto })
 		if err != nil {
 			return nil, err
 		}

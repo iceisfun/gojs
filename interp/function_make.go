@@ -71,6 +71,10 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		if err := i.checkContext(); err != nil {
 			return nil, err
 		}
+		// PrepareForOrdinaryCall pushes an execution context whose Realm is this
+		// function's [[Realm]]; tag ctx so realm-sensitive operations in the body
+		// (e.g. Proxy TypeErrors) resolve against it. No-op for a same-realm call.
+		ctx = i.withCurrentRealm(ctx)
 		if err := i.enterCall(); err != nil {
 			return nil, err
 		}
@@ -172,7 +176,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 	}
 
 	length := countParams(def.Params)
-	fnObj.fn = &functionData{call: call, name: name, length: length}
+	fnObj.fn = &functionData{call: call, name: name, length: length, realm: i}
 	setFuncLength(fnObj, length)
 	setFuncNameProp(fnObj, name)
 
@@ -287,13 +291,15 @@ func (i *Interpreter) makeConstruct(fnObj *Object, call CallFn) CallFn {
 		}
 		proto, ok := protoV.(*Object)
 		if !ok {
-			// GetPrototypeFromConstructor falls back to new.target's realm's
-			// %Object.prototype%; GetFunctionRealm throws for a revoked proxy
-			// (which a "get" trap may have revoked while reading "prototype").
-			if protoSource.proxy != nil && protoSource.proxy.revoked() {
-				return nil, i.throwError(ctx, "TypeError", "Cannot construct with a revoked proxy as new.target")
+			// GetPrototypeFromConstructor step 4: the default %Object.prototype%
+			// comes from new.target's own realm. GetFunctionRealm throws for a
+			// revoked proxy (which a "get" trap may have revoked while reading
+			// "prototype").
+			realm, err := i.getFunctionRealm(ctx, protoSource)
+			if err != nil {
+				return nil, err
 			}
-			proto = i.objectProto
+			proto = realm.objectProto
 		}
 		self := NewObject(proto)
 		i.pendingNewTarget = newTarget

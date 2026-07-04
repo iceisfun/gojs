@@ -17,6 +17,18 @@ type proxyState struct {
 	isRevkd bool
 }
 
+// realm returns the realm whose intrinsics and error constructors this Proxy's
+// internal methods must use: the running (current) realm carried in ctx, falling
+// back to the proxy's creation realm when ctx names none. Per spec a Proxy's
+// TypeErrors and default intrinsics come from the current execution context's
+// realm, not the realm in which the proxy was created.
+func (p *proxyState) realm(ctx context.Context) *Interpreter {
+	if r := currentRealm(ctx); r != nil {
+		return r
+	}
+	return p.i
+}
+
 // revoked reports whether the proxy has been revoked. Revocation is tracked with
 // a flag rather than by nil-ing target/handler, so a handler trap that revokes
 // the proxy mid-operation (e.g. a "get" trap calling revoke) leaves target valid
@@ -27,7 +39,7 @@ func (p *proxyState) revoked() bool { return p.isRevkd }
 // checkRevoked throws a TypeError when the proxy has been revoked.
 func (p *proxyState) checkRevoked(ctx context.Context) error {
 	if p.revoked() {
-		return p.i.throwError(ctx, "TypeError", "Cannot perform operation on a revoked proxy")
+		return p.realm(ctx).throwError(ctx, "TypeError", "Cannot perform operation on a revoked proxy")
 	}
 	return nil
 }
@@ -44,7 +56,7 @@ func (p *proxyState) trap(ctx context.Context, name string) (*Object, error) {
 	}
 	fn, ok := v.(*Object)
 	if !ok || !fn.IsCallable() {
-		return nil, p.i.throwError(ctx, "TypeError", "'"+name+"' trap is not a function")
+		return nil, p.realm(ctx).throwError(ctx, "TypeError", "'"+name+"' trap is not a function")
 	}
 	return fn, nil
 }
@@ -58,7 +70,7 @@ func (p *proxyState) get(ctx context.Context, key PropertyKey, receiver Value) (
 	if err := p.checkRevoked(ctx); err != nil {
 		return nil, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "get")
 	if err != nil {
 		return nil, err
@@ -93,7 +105,7 @@ func (p *proxyState) set(ctx context.Context, key PropertyKey, v, receiver Value
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "set")
 	if err != nil {
 		return false, err
@@ -128,7 +140,7 @@ func (p *proxyState) has(ctx context.Context, key PropertyKey) (bool, error) {
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "has")
 	if err != nil {
 		return false, err
@@ -166,7 +178,7 @@ func (p *proxyState) deleteProperty(ctx context.Context, key PropertyKey) (bool,
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "deleteProperty")
 	if err != nil {
 		return false, err
@@ -206,7 +218,7 @@ func (p *proxyState) getOwnProperty(ctx context.Context, key PropertyKey) (*Prop
 	if err := p.checkRevoked(ctx); err != nil {
 		return nil, false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "getOwnPropertyDescriptor")
 	if err != nil {
 		return nil, false, err
@@ -274,7 +286,7 @@ func (p *proxyState) ownKeys(ctx context.Context) ([]PropertyKey, error) {
 	if err := p.checkRevoked(ctx); err != nil {
 		return nil, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "ownKeys")
 	if err != nil {
 		return nil, err
@@ -359,7 +371,7 @@ func (p *proxyState) defineProperty(ctx context.Context, key PropertyKey, descOb
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "defineProperty")
 	if err != nil {
 		return false, err
@@ -448,7 +460,7 @@ func (i *Interpreter) isCompatiblePropertyDescriptor(ctx context.Context, extens
 // receiver is a proxy: it invokes the defineProperty trap with a complete data
 // descriptor.
 func (p *proxyState) defineDataValue(ctx context.Context, key PropertyKey, v Value) (bool, error) {
-	d := NewObject(p.i.objectProto)
+	d := NewObject(p.realm(ctx).objectProto)
 	d.SetData("value", v)
 	d.SetData("writable", True)
 	d.SetData("enumerable", True)
@@ -461,7 +473,7 @@ func (p *proxyState) getPrototypeOf(ctx context.Context) (Value, error) {
 	if err := p.checkRevoked(ctx); err != nil {
 		return nil, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "getPrototypeOf")
 	if err != nil {
 		return nil, err
@@ -500,7 +512,7 @@ func (p *proxyState) setPrototypeOf(ctx context.Context, proto Value) (bool, err
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "setPrototypeOf")
 	if err != nil {
 		return false, err
@@ -536,7 +548,7 @@ func (p *proxyState) isExtensible(ctx context.Context) (bool, error) {
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "isExtensible")
 	if err != nil {
 		return false, err
@@ -563,7 +575,7 @@ func (p *proxyState) preventExtensions(ctx context.Context) (bool, error) {
 	if err := p.checkRevoked(ctx); err != nil {
 		return false, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "preventExtensions")
 	if err != nil {
 		return false, err
@@ -592,7 +604,7 @@ func (p *proxyState) callTrap(ctx context.Context, thisArg Value, args []Value) 
 	if err := p.checkRevoked(ctx); err != nil {
 		return nil, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "apply")
 	if err != nil {
 		return nil, err
@@ -608,7 +620,7 @@ func (p *proxyState) constructTrap(ctx context.Context, newTarget Value, args []
 	if err := p.checkRevoked(ctx); err != nil {
 		return nil, err
 	}
-	i := p.i
+	i := p.realm(ctx)
 	tr, err := p.trap(ctx, "construct")
 	if err != nil {
 		return nil, err

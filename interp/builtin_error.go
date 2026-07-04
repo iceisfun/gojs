@@ -115,7 +115,12 @@ func (i *Interpreter) newErrorCtor(name string, proto *Object) *Object {
 	// Reflect.construct(E, args, foreignTarget) and `class X extends E` produce
 	// an instance whose prototype is NewTarget.prototype.
 	construct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		instProto, err := i.protoFromConstructor(ctx, newTarget, proto)
+		instProto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object {
+			if name == "Error" {
+				return r.errorProto
+			}
+			return r.nativeErrorProtos[name]
+		})
 		if err != nil {
 			return nil, err
 		}

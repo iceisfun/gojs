@@ -68,7 +68,7 @@ func (i *Interpreter) initRegExp() {
 		// GetPrototypeFromConstructor (§22.2.3.1): a subclass instance takes its
 		// prototype from new.target rather than %RegExp.prototype%.
 		if o, ok := v.(*Object); ok {
-			p, err := i.protoFromNewTarget(ctx, newTarget, i.regexpProto)
+			p, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.regexpProto })
 			if err != nil {
 				return nil, err
 			}

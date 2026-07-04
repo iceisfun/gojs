@@ -46,7 +46,7 @@ func (i *Interpreter) initAggregateError(errorCtor *Object) {
 		return buildInto(ctx, proto, args)
 	}
 	construct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
-		instProto, err := i.protoFromConstructor(ctx, newTarget, proto)
+		instProto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.aggregateErrorProto })
 		if err != nil {
 			return nil, err
 		}

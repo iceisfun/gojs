@@ -189,7 +189,7 @@ func (i *Interpreter) initPromise() {
 		// OrdinaryCreateFromConstructor: derive the prototype from new.target
 		// (§27.2.3.1 step 3).  A throwing "prototype" getter must propagate
 		// before the executor runs.
-		proto, err := i.protoFromNewTarget(ctx, newTarget, i.promiseProto)
+		proto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.promiseProto })
 		if err != nil {
 			return nil, err
 		}

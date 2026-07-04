@@ -291,7 +291,7 @@ func (i *Interpreter) initObject() {
 		// constructor itself nor undefined), ignore the argument and create a fresh
 		// ordinary object using NewTarget's "prototype".
 		if nt, ok := newTarget.(*Object); ok && nt != ctor {
-			p, err := i.protoFromNewTarget(ctx, nt, i.objectProto)
+			p, err := i.protoFromConstructor(ctx, nt, func(r *Interpreter) *Object { return r.objectProto })
 			if err != nil {
 				return nil, err
 			}

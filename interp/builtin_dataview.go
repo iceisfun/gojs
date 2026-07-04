@@ -89,7 +89,7 @@ func (i *Interpreter) initDataView() {
 			}
 		}
 
-		proto, err := i.protoFromCtor(ctx, newTarget, i.dataViewProto)
+		proto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.dataViewProto })
 		if err != nil {
 			return nil, err
 		}

@@ -940,7 +940,7 @@ func (i *Interpreter) initDate() {
 		}
 		// GetPrototypeFromConstructor (§21.4.2.1): a subclass instance takes its
 		// prototype from new.target rather than %Date.prototype%.
-		p, err := i.protoFromNewTarget(ctx, newTarget, i.dateProto)
+		p, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.dateProto })
 		if err != nil {
 			return nil, err
 		}

@@ -69,24 +69,6 @@ func (i *Interpreter) toIndex(ctx context.Context, v Value) (int, error) {
 	return int(integer), nil
 }
 
-// protoFromCtor implements GetPrototypeFromConstructor (§10.1.13) for native
-// constructors: it reads newTarget.prototype and falls back to def when that is
-// not an object.
-func (i *Interpreter) protoFromCtor(ctx context.Context, newTarget Value, def *Object) (*Object, error) {
-	nt, ok := newTarget.(*Object)
-	if !ok {
-		return def, nil
-	}
-	pv, err := nt.GetStr(ctx, "prototype")
-	if err != nil {
-		return nil, err
-	}
-	if po, ok := pv.(*Object); ok {
-		return po, nil
-	}
-	return def, nil
-}
-
 // getMaxByteLengthOption implements GetArrayBufferMaxByteLengthOption
 // (§25.1.3.7): reads options.maxByteLength when options is an object, returning
 // (-1, false) for "empty".
@@ -120,7 +102,7 @@ func (i *Interpreter) allocateArrayBuffer(ctx context.Context, newTarget Value, 
 	if hasMax && maxByteLength > maxByteDataBlock {
 		return nil, i.throwError(ctx, "RangeError", "ArrayBuffer: maxByteLength is too large")
 	}
-	proto, err := i.protoFromCtor(ctx, newTarget, i.arrayBufferProto)
+	proto, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.arrayBufferProto })
 	if err != nil {
 		return nil, err
 	}

@@ -18,6 +18,10 @@ import (
 // When Security.DisableEval is set, eval throws instead of executing — an
 // explicit, observable refusal for locked-down embeddings.
 func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error) {
+	// A rope (produced by string concatenation) is still a String value; flatten
+	// it before the "if Type(x) is not String, return x" check (§19.2.1.1 step 2),
+	// otherwise `eval("a" + "b")` would return the unevaluated source string.
+	code = flattenRope(code)
 	str, ok := code.(String)
 	if !ok {
 		return code, nil
@@ -59,6 +63,9 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 // its var/function declarations hoist into the calling function (or global)
 // scope; a strict direct eval confines them to its own environment.
 func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environment) (Value, error) {
+	// See evalSource: a concatenation rope is a String; flatten before the
+	// non-String short-circuit so direct eval evaluates it.
+	code = flattenRope(code)
 	str, ok := code.(String)
 	if !ok {
 		return code, nil

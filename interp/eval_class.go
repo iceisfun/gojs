@@ -307,18 +307,25 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 			if err != nil {
 				return nil, err
 			}
-			// §10.2.2 [[Construct]] step 13: an explicit object return replaces
-			// `this`; a non-undefined non-object return is a TypeError (step 13c),
-			// checked before consulting the this-binding; an undefined return
-			// yields GetThisBinding, a ReferenceError when super() never ran.
+			// §10.2.2 [[Construct]] pops the callee (this constructor's realm)
+			// execution context at step 9, so the post-body steps run in the
+			// *caller's* realm: an explicit object return replaces `this`; a
+			// non-undefined non-object return is a TypeError (step 11d); an
+			// undefined return yields GetThisBinding, a ReferenceError when super()
+			// never ran (step 13). Both errors therefore come from the running
+			// (caller) realm, not this constructor's realm.
 			if obj, ok := ret.(*Object); ok {
 				return obj, nil
 			}
+			caller := i
+			if cur := currentRealm(ctx); cur != nil {
+				caller = cur
+			}
 			if !IsUndefined(ret) {
-				return nil, i.throwError(ctx, "TypeError",
+				return nil, caller.throwError(ctx, "TypeError",
 					"Derived constructors may only return an object or undefined")
 			}
-			return i.getThisBinding(ctx, env)
+			return caller.getThisBinding(ctx, env)
 		}
 
 		// Default derived constructor: `constructor(...args) { super(...args); }`.
@@ -355,6 +362,7 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		name:      name,
 		length:    0,
 		ctor:      true,
+		realm:     i,
 	}
 	if ctorDef != nil {
 		fnObj.fn.length = countParams(ctorDef.Params)

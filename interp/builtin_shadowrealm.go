@@ -31,12 +31,13 @@ func shadowRealmInner(this Value) *Interpreter {
 func (i *Interpreter) initShadowRealm() {
 	proto := NewObject(i.objectProto)
 	proto.class = "ShadowRealm"
+	i.shadowRealmProto = proto
 
 	call := func(ctx context.Context, _ Value, _ []Value) (Value, error) {
 		return nil, i.throwError(ctx, "TypeError", "Constructor ShadowRealm requires 'new'")
 	}
 	construct := func(ctx context.Context, newTarget Value, _ []Value) (Value, error) {
-		proto0, err := i.protoFromNewTarget(ctx, newTarget, proto)
+		proto0, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.shadowRealmProto })
 		if err != nil {
 			return nil, err
 		}

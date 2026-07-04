@@ -505,7 +505,7 @@ func (i *Interpreter) initString() {
 		o := i.newStringObject(String(s))
 		// GetPrototypeFromConstructor (§22.1.1.1): a subclass instance takes its
 		// prototype from new.target rather than %String.prototype%.
-		p, err := i.protoFromNewTarget(ctx, newTarget, i.stringProto)
+		p, err := i.protoFromConstructor(ctx, newTarget, func(r *Interpreter) *Object { return r.stringProto })
 		if err != nil {
 			return nil, err
 		}

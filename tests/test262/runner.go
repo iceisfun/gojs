@@ -202,26 +202,14 @@ func skipReason(m Meta) string {
 //
 // $262.createRealm is implemented (installT262Host builds a fresh realm via
 // interp.NewChildRealm, a real isolated Interpreter sharing this agent's Symbol
-// registry and well-known symbols), which unlocks the ShadowRealm cross-realm
-// tests. The broader cross-realm corpus additionally depends on realm-aware
-// abstract operations gojs does not yet implement — e.g. GetFunctionRealm (so
-// GetPrototypeFromConstructor falls back to the constructor's OWN realm's
-// intrinsic default: proto-from-ctor-realm), and throwing a TypeError / creating
-// intrinsics from the *current* running realm rather than the realm that created
-// the object (Proxy internal-method *-realm tests). Until those land, cross-realm
-// tests that are not ShadowRealm tests are skipped rather than counted as
-// conformance failures. ShadowRealm tests are exempt: they pass.
+// registry and well-known symbols), and the realm-aware abstract operations the
+// cross-realm corpus exercises are implemented too: GetFunctionRealm (§10.2.10)
+// so GetPrototypeFromConstructor falls back to the constructor's OWN realm's
+// intrinsic default (proto-from-ctor-realm), and current-running-realm selection
+// for the Typeerrors/intrinsics a Proxy raises (Proxy internal-method *-realm
+// tests). The whole cross-realm / createRealm corpus therefore runs rather than
+// being skipped.
 func hostFeatureSkip(src string, m Meta) string {
-	if !hasFeature(m, "ShadowRealm") {
-		if strings.Contains(src, "$262.createRealm") {
-			return "host:cross-realm"
-		}
-		for _, f := range m.Features {
-			if f == "cross-realm" {
-				return "feature:cross-realm"
-			}
-		}
-	}
 	if !m.Flags["async"] && referencesPrintGlobal(src) {
 		return "host:print"
 	}

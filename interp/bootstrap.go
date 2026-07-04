@@ -17,6 +17,7 @@ func (i *Interpreter) bootstrap() {
 		call:   func(context.Context, Value, []Value) (Value, error) { return Undef, nil },
 		name:   "",
 		length: 0,
+		realm:  i,
 	}
 
 	// 2. Remaining intrinsic prototypes (bare; methods added by initializers).
