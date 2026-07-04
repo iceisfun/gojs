@@ -1,7 +1,5 @@
 package jsregexp
 
-import "unicode"
-
 // resolveProperty resolves a Unicode property escape \p{Name} or \p{Name=Value}
 // to the POSITIVE runeSet of code points it matches. The caller (compileClassSet)
 // is responsible for complementing the set for \P{...}, so this function never
@@ -17,24 +15,22 @@ import "unicode"
 // Unknown property names/values yield a SyntaxError (via propErr) so callers fail
 // loudly rather than mismatching silently.
 func resolveProperty(name, value string) (*runeSet, error) {
-	// Non-binary properties: \p{Name=Value}. Also reachable as \p{name} below is
-	// rejected because these require a value.
+	// Non-binary properties: \p{Name=Value}. Resolved against the generated
+	// Unicode 17.0 tables (unicode_ucd17.go) so \p{} matches the same version the
+	// conformance suite targets, rather than Go's older unicode package.
 	if value != "" {
 		switch canonicalPropertyName(name) {
 		case "General_Category":
-			if rt := categoryTable(value); rt != nil {
-				return rangeTableToSet(rt), nil
+			if rs := lookupCategory(value); rs != nil {
+				return rs, nil
 			}
 		case "Script":
-			if rt := scriptTable(value); rt != nil {
-				return rangeTableToSet(rt), nil
+			if rs := ucdLookup(ucd17Script, resolveScriptName(value)); rs != nil {
+				return rs, nil
 			}
 		case "Script_Extensions":
-			// Go does not ship a Script_Extensions table, so approximate it with
-			// the plain Script table (the two differ only for shared code points,
-			// which scx additionally includes; Script is a safe subset).
-			if rt := scriptTable(value); rt != nil {
-				return rangeTableToSet(rt), nil
+			if rs := ucdLookup(ucd17ScriptExt, resolveScriptName(value)); rs != nil {
+				return rs, nil
 			}
 		}
 		return nil, propErr(name, value)
@@ -42,8 +38,8 @@ func resolveProperty(name, value string) (*runeSet, error) {
 
 	// Lone name: a General_Category shorthand (\p{Lu}, \p{Letter}), a binary
 	// property, or one of the Any/ASCII/Assigned specials.
-	if rt := categoryTable(name); rt != nil {
-		return rangeTableToSet(rt), nil
+	if rs := lookupCategory(name); rs != nil {
+		return rs, nil
 	}
 	if set := binaryProperty(name); set != nil {
 		return set, nil
@@ -56,10 +52,36 @@ func resolveProperty(name, value string) (*runeSet, error) {
 	case "Assigned":
 		// Complement of the Cn (unassigned) category.
 		var b setBuilder
-		b.addComplement(rangeTableToSet(unicode.Categories["Cn"]).ranges)
+		b.addComplement(ucd17Category["Cn"])
 		return b.build(), nil
 	}
 	return nil, propErr(name, value)
+}
+
+// ucdLookup returns a fresh runeSet for key in a generated UCD 17.0 table, or
+// nil when the key is absent. The copy keeps callers free to mutate the result.
+func ucdLookup(m map[string][]rrange, key string) *runeSet {
+	rs, ok := m[key]
+	if !ok {
+		return nil
+	}
+	return &runeSet{ranges: append([]rrange(nil), rs...)}
+}
+
+// lookupCategory resolves a General_Category long name or alias to its 17.0 set.
+func lookupCategory(v string) *runeSet {
+	if short, ok := categoryAlias[v]; ok {
+		v = short
+	}
+	return ucdLookup(ucd17Category, v)
+}
+
+// resolveScriptName maps a 4-letter ISO 15924 alias to its long Script name.
+func resolveScriptName(v string) string {
+	if long, ok := scriptAlias[v]; ok {
+		return long
+	}
+	return v
 }
 
 func propErr(name, value string) *SyntaxError {
@@ -84,191 +106,14 @@ func canonicalPropertyName(name string) string {
 	return name
 }
 
-// categoryTable maps a General_Category long name or short alias to its
-// RangeTable, including the group categories (LC and the umbrellas L, M, N, P,
-// S, Z, C), which Go already exposes as keys.
-func categoryTable(v string) *unicode.RangeTable {
-	if short, ok := categoryAlias[v]; ok {
-		v = short
-	}
-	return unicode.Categories[v]
-}
-
-// scriptTable maps a Script value — a long name or a 4-letter ISO 15924 alias —
-// to its RangeTable.
-func scriptTable(v string) *unicode.RangeTable {
-	if long, ok := scriptAlias[v]; ok {
-		v = long
-	}
-	return unicode.Scripts[v]
-}
-
 // binaryProperty resolves a lone binary property name (long form or alias) to
-// its positive runeSet, or nil if the name is not a supported binary property.
-// The three kinds of source are: (a) tables Go exposes directly in
-// unicode.Properties, (b) tables composed from Go's Categories/Properties, and
-// (c) hardcoded tables in unicode_tables.go for properties Go cannot supply.
+// its positive runeSet from the generated Unicode 17.0 tables, or nil if the
+// name is not a supported binary property.
 func binaryProperty(name string) *runeSet {
-	// (a) Direct pass-throughs to unicode.Properties. Aliases are normalized to
-	// the canonical name first.
 	if canon, ok := binaryAlias[name]; ok {
 		name = canon
 	}
-	if rt := directBinary[name]; rt != nil {
-		return rangeTableToSet(rt)
-	}
-	// (b) + (c): composed and hardcoded properties.
-	switch name {
-	case "Alphabetic":
-		return unionTables(cat("L"), cat("Nl"), prop("Other_Alphabetic"))
-	case "Uppercase":
-		return unionTables(cat("Lu"), prop("Other_Uppercase"))
-	case "Lowercase":
-		return unionTables(cat("Ll"), prop("Other_Lowercase"))
-	case "Cased":
-		return unionTables(cat("Lu"), cat("Ll"), cat("Lt"), prop("Other_Uppercase"), prop("Other_Lowercase"))
-	case "Math":
-		return unionTables(cat("Sm"), prop("Other_Math"))
-	case "Grapheme_Extend":
-		return graphemeExtend()
-	case "Grapheme_Base":
-		return graphemeBase()
-	case "ID_Start":
-		return idStart()
-	case "ID_Continue":
-		return idContinue()
-	case "XID_Start":
-		return subtract(idStart(), &runeSet{ranges: normalize(xidStartRemove)})
-	case "XID_Continue":
-		return subtract(idContinue(), &runeSet{ranges: normalize(xidContinueRemove)})
-	case "Default_Ignorable_Code_Point":
-		return defaultIgnorable()
-	case "Case_Ignorable":
-		return &runeSet{ranges: normalize(caseIgnorableRanges)}
-	case "Bidi_Mirrored":
-		return &runeSet{ranges: normalize(bidiMirroredRanges)}
-	case "Emoji":
-		return &runeSet{ranges: normalize(emojiRanges)}
-	case "Emoji_Component":
-		return &runeSet{ranges: normalize(emojiComponentRanges)}
-	case "Emoji_Modifier":
-		return &runeSet{ranges: normalize(emojiModifierRanges)}
-	case "Emoji_Modifier_Base":
-		return &runeSet{ranges: normalize(emojiModifierBaseRanges)}
-	case "Emoji_Presentation":
-		return &runeSet{ranges: normalize(emojiPresentationRanges)}
-	case "Extended_Pictographic":
-		return &runeSet{ranges: normalize(extendedPictographicRanges)}
-	case "Changes_When_Casefolded":
-		return &runeSet{ranges: normalize(changesWhenCasefoldedRanges)}
-	case "Changes_When_Casemapped":
-		return &runeSet{ranges: normalize(changesWhenCasemappedRanges)}
-	case "Changes_When_Lowercased":
-		return &runeSet{ranges: normalize(changesWhenLowercasedRanges)}
-	case "Changes_When_NFKC_Casefolded":
-		return &runeSet{ranges: normalize(changesWhenNFKCCasefoldedRanges)}
-	case "Changes_When_Titlecased":
-		return &runeSet{ranges: normalize(changesWhenTitlecasedRanges)}
-	case "Changes_When_Uppercased":
-		return &runeSet{ranges: normalize(changesWhenUppercasedRanges)}
-	}
-	return nil
-}
-
-// cat and prop are short accessors for Go's category and property tables.
-func cat(k string) *unicode.RangeTable  { return unicode.Categories[k] }
-func prop(k string) *unicode.RangeTable { return unicode.Properties[k] }
-
-// unionTables builds the normalized union of one or more RangeTables.
-func unionTables(tabs ...*unicode.RangeTable) *runeSet {
-	var b setBuilder
-	for _, t := range tabs {
-		if t == nil {
-			continue
-		}
-		b.ranges = append(b.ranges, rangeTableToSet(t).ranges...)
-	}
-	return b.build()
-}
-
-// idStart implements DerivedCoreProperties ID_Start:
-//
-//	ID_Start = L ∪ Nl ∪ Other_ID_Start − Pattern_Syntax − Pattern_White_Space
-func idStart() *runeSet {
-	base := unionTables(cat("L"), cat("Nl"), prop("Other_ID_Start"))
-	return subtract(base, unionTables(prop("Pattern_Syntax"), prop("Pattern_White_Space")))
-}
-
-// idContinue implements DerivedCoreProperties ID_Continue:
-//
-//	ID_Continue = ID_Start ∪ Mn ∪ Mc ∪ Nd ∪ Pc ∪ Other_ID_Continue
-//	              − Pattern_Syntax − Pattern_White_Space
-func idContinue() *runeSet {
-	var b setBuilder
-	b.ranges = append(b.ranges, idStart().ranges...)
-	b.ranges = append(b.ranges, unionTables(cat("Mn"), cat("Mc"), cat("Nd"), cat("Pc"), prop("Other_ID_Continue")).ranges...)
-	base := b.build()
-	return subtract(base, unionTables(prop("Pattern_Syntax"), prop("Pattern_White_Space")))
-}
-
-// graphemeExtend implements DerivedCoreProperties Grapheme_Extend:
-//
-//	Grapheme_Extend = Mn ∪ Me ∪ Other_Grapheme_Extend
-func graphemeExtend() *runeSet {
-	return unionTables(cat("Mn"), cat("Me"), prop("Other_Grapheme_Extend"))
-}
-
-// graphemeBase implements DerivedCoreProperties Grapheme_Base:
-//
-//	Grapheme_Base = [0..10FFFF] − Cc − Cf − Cs − Co − Cn − Zl − Zp − Grapheme_Extend
-func graphemeBase() *runeSet {
-	all := &runeSet{ranges: []rrange{{0, 0x10FFFF}}}
-	excl := unionTables(cat("Cc"), cat("Cf"), cat("Cs"), cat("Co"), cat("Cn"), cat("Zl"), cat("Zp"))
-	base := subtract(all, excl)
-	return subtract(base, graphemeExtend())
-}
-
-// defaultIgnorable implements DerivedCoreProperties
-// Default_Ignorable_Code_Point:
-//
-//	DI = Other_Default_Ignorable_Code_Point ∪ Cf ∪ Variation_Selector
-//	     − White_Space − FFF9..FFFB − 13430..1343F − Prepended_Concatenation_Mark
-func defaultIgnorable() *runeSet {
-	base := unionTables(prop("Other_Default_Ignorable_Code_Point"), cat("Cf"), prop("Variation_Selector"))
-	excl := unionTables(prop("White_Space"), prop("Prepended_Concatenation_Mark"))
-	excl = &runeSet{ranges: normalize(append(append([]rrange{}, excl.ranges...),
-		rrange{0xFFF9, 0xFFFB}, rrange{0x13430, 0x1343F}))}
-	return subtract(base, excl)
-}
-
-// directBinary maps the canonical names of binary properties that Go exposes
-// verbatim in unicode.Properties. Aliases are resolved to these names first via
-// binaryAlias.
-var directBinary = map[string]*unicode.RangeTable{
-	"ASCII_Hex_Digit":         unicode.ASCII_Hex_Digit,
-	"Bidi_Control":            unicode.Bidi_Control,
-	"Dash":                    unicode.Dash,
-	"Deprecated":              unicode.Deprecated,
-	"Diacritic":               unicode.Diacritic,
-	"Extender":                unicode.Extender,
-	"Hex_Digit":               unicode.Hex_Digit,
-	"IDS_Binary_Operator":     unicode.IDS_Binary_Operator,
-	"IDS_Trinary_Operator":    unicode.IDS_Trinary_Operator,
-	"Ideographic":             unicode.Ideographic,
-	"Join_Control":            unicode.Join_Control,
-	"Logical_Order_Exception": unicode.Logical_Order_Exception,
-	"Noncharacter_Code_Point": unicode.Noncharacter_Code_Point,
-	"Pattern_Syntax":          unicode.Pattern_Syntax,
-	"Pattern_White_Space":     unicode.Pattern_White_Space,
-	"Quotation_Mark":          unicode.Quotation_Mark,
-	"Radical":                 unicode.Radical,
-	"Regional_Indicator":      unicode.Regional_Indicator,
-	"Sentence_Terminal":       unicode.Sentence_Terminal,
-	"Soft_Dotted":             unicode.Soft_Dotted,
-	"Terminal_Punctuation":    unicode.Terminal_Punctuation,
-	"Unified_Ideograph":       unicode.Unified_Ideograph,
-	"Variation_Selector":      unicode.Variation_Selector,
-	"White_Space":             unicode.White_Space,
+	return ucdLookup(ucd17Binary, name)
 }
 
 // binaryAlias maps every accepted short/alias form of a binary property to its
@@ -537,32 +382,4 @@ var scriptAlias = map[string]string{
 	"Zinh": "Inherited",
 	"Zyyy": "Common",
 	"Zzzz": "Unknown",
-}
-
-// rangeTableToSet converts a unicode.RangeTable to a runeSet.
-func rangeTableToSet(rt *unicode.RangeTable) *runeSet {
-	if rt == nil {
-		return &runeSet{}
-	}
-	var b setBuilder
-	for _, r := range rt.R16 {
-		for c := rune(r.Lo); c <= rune(r.Hi); c += rune(r.Stride) {
-			// Coalesce stride-1 runs into ranges; strided runs add singletons.
-			if r.Stride == 1 {
-				b.addRange(rune(r.Lo), rune(r.Hi))
-				break
-			}
-			b.addRune(c)
-		}
-	}
-	for _, r := range rt.R32 {
-		if r.Stride == 1 {
-			b.addRange(rune(r.Lo), rune(r.Hi))
-			continue
-		}
-		for c := rune(r.Lo); c <= rune(r.Hi); c += rune(r.Stride) {
-			b.addRune(c)
-		}
-	}
-	return b.build()
 }
