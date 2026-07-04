@@ -19,10 +19,10 @@ import (
 // or nil when it is grammatically valid. flags is the raw flag string (the text
 // following the closing '/').
 func validateRegexpLiteral(pattern, flags string) error {
-	f, err := jsregexp.ParseFlags(flags)
-	if err != nil {
-		return err
-	}
-	_, err = jsregexp.Parse(pattern, f)
+	// Compile (not just Parse) so the parse-time check matches everything the
+	// runtime engine rejects — including compile-only early errors such as an
+	// unknown \p{...} property or a reference to an undefined named group — which
+	// §22.2 makes early SyntaxErrors of the literal.
+	_, err := jsregexp.Compile(pattern, flags)
 	return err
 }
