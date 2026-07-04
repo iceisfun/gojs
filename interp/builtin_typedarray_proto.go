@@ -168,20 +168,39 @@ func (i *Interpreter) initTypedArrayProto() {
 // Iteration methods
 // ---------------------------------------------------------------------------
 
+// taNextLength reports the current TypedArray length for an in-progress array
+// iterator, throwing a TypeError when the view has become detached or out of
+// bounds (§23.1.5.1 step 8: the check runs on every next until exhaustion).
+func (i *Interpreter) taNextLength(ctx context.Context, td *typedArrayData) (int, error) {
+	oob, n := td.outOfBounds()
+	if oob {
+		return 0, i.throwError(ctx, "TypeError", "TypedArray is out of bounds")
+	}
+	return n, nil
+}
+
 func (i *Interpreter) taKeys(ctx context.Context, this Value, _ []Value) (Value, error) {
-	o, _, _, err := i.validateTA(ctx, this, "keys")
+	_, td, _, err := i.validateTA(ctx, this, "keys")
 	if err != nil {
 		return nil, err
 	}
 	idx := 0
-	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-		length := o.typedArray.length()
+	done := false
+	return i.newArrayIteratorObj(func(ctx context.Context) (Value, bool, error) {
+		if done {
+			return Undef, true, nil
+		}
+		length, err := i.taNextLength(ctx, td)
+		if err != nil {
+			return nil, false, err
+		}
 		if idx >= length {
-			return Undef, false
+			done = true
+			return Undef, true, nil
 		}
 		k := Number(float64(idx))
 		idx++
-		return k, true
+		return k, false, nil
 	}), nil
 }
 
@@ -191,30 +210,47 @@ func (i *Interpreter) taValues(ctx context.Context, this Value, _ []Value) (Valu
 		return nil, err
 	}
 	idx := 0
-	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-		if idx >= td.length() {
-			return Undef, false
+	done := false
+	return i.newArrayIteratorObj(func(ctx context.Context) (Value, bool, error) {
+		if done {
+			return Undef, true, nil
+		}
+		length, err := i.taNextLength(ctx, td)
+		if err != nil {
+			return nil, false, err
+		}
+		if idx >= length {
+			done = true
+			return Undef, true, nil
 		}
 		v := taGetIdx(td, idx)
 		idx++
-		return v, true
+		return v, false, nil
 	}), nil
 }
 
 func (i *Interpreter) taEntries(ctx context.Context, this Value, _ []Value) (Value, error) {
-	o, td, _, err := i.validateTA(ctx, this, "entries")
+	_, td, _, err := i.validateTA(ctx, this, "entries")
 	if err != nil {
 		return nil, err
 	}
-	_ = o
 	idx := 0
-	return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
-		if idx >= td.length() {
-			return Undef, false
+	done := false
+	return i.newArrayIteratorObj(func(ctx context.Context) (Value, bool, error) {
+		if done {
+			return Undef, true, nil
+		}
+		length, err := i.taNextLength(ctx, td)
+		if err != nil {
+			return nil, false, err
+		}
+		if idx >= length {
+			done = true
+			return Undef, true, nil
 		}
 		pair := i.newArray([]Value{Number(float64(idx)), taGetIdx(td, idx)})
 		idx++
-		return pair, true
+		return pair, false, nil
 	}), nil
 }
 

@@ -1758,88 +1758,74 @@ func (i *Interpreter) newArrayIterator(ctx context.Context, this Value, kind arr
 	if o.isArray && o.proxy == nil {
 		idx := 0
 		done := false
-		return i.newIteratorProto(i.arrayIteratorProto, "Array Iterator", func() (Value, bool) {
+		return i.newArrayIteratorObj(func(ctx context.Context) (Value, bool, error) {
 			// Once the index reaches the length the iterator drops its target and
 			// stays done (§23.1.5.1), so elements appended afterward are not
 			// revisited even though the dense backing may have grown.
 			if done || idx >= len(o.elems) {
 				done = true
-				return Undef, false
+				return Undef, true, nil
 			}
 			cur := idx
 			idx++
 			switch kind {
 			case arrayIterKeys:
-				return Number(float64(cur)), true
+				return Number(float64(cur)), false, nil
 			case arrayIterEntries:
-				return i.newArray([]Value{Number(float64(cur)), elemAt(o, cur)}), true
+				return i.newArray([]Value{Number(float64(cur)), elemAt(o, cur)}), false, nil
 			default:
-				return elemAt(o, cur), true
+				return elemAt(o, cur), false, nil
 			}
 		}), nil
 	}
 	// Generic array-like path: length and elements are obtained through [[Get]]
 	// (LengthOfArrayLike), and errors from an exotic receiver propagate.
-	it := NewObject(i.arrayIteratorProto)
-	it.class = "Array Iterator"
 	idx := 0
 	done := false
-	i.defineMethod(it, "next", 0, func(ctx context.Context, _ Value, _ []Value) (Value, error) {
-		res := NewObject(i.objectProto)
-		if !done {
-			var length int
-			if o.typedArray != nil {
-				// §23.1.5.1: for a TypedArray receiver the iterator throws when the
-				// view is detached or out of bounds (a resizable buffer shrank), and
-				// otherwise uses the live TypedArrayLength rather than Get("length").
-				oob, n := o.typedArray.outOfBounds()
-				if oob {
-					return nil, i.throwError(ctx, "TypeError", "TypedArray is out of bounds")
-				}
-				length = n
-			} else {
-				l, err := i.lengthOfArrayLike(ctx, o)
-				if err != nil {
-					return nil, err
-				}
-				length = l
-			}
-			if idx < length {
-				cur := idx
-				idx++
-				var val Value
-				switch kind {
-				case arrayIterKeys:
-					val = Number(float64(cur))
-				case arrayIterEntries:
-					ev, err := i.getV(ctx, o, StrKey(intToStr(cur)), o)
-					if err != nil {
-						return nil, err
-					}
-					val = i.newArray([]Value{Number(float64(cur)), ev})
-				default:
-					v, err := i.getV(ctx, o, StrKey(intToStr(cur)), o)
-					if err != nil {
-						return nil, err
-					}
-					val = v
-				}
-				res.SetData("value", val)
-				res.SetData("done", False)
-				return res, nil
-			}
-			done = true
+	return i.newArrayIteratorObj(func(ctx context.Context) (Value, bool, error) {
+		if done {
+			return Undef, true, nil
 		}
-		res.SetData("value", Undef)
-		res.SetData("done", True)
-		return res, nil
-	})
-	it.defineOwn(SymKey(i.symIterator), &Property{
-		Value:        i.newNativeFunc("[Symbol.iterator]", 0, func(ctx context.Context, this Value, args []Value) (Value, error) { return this, nil }),
-		Writable:     true,
-		Configurable: true,
-	})
-	return it, nil
+		var length int
+		if o.typedArray != nil {
+			// §23.1.5.1: for a TypedArray receiver the iterator throws when the
+			// view is detached or out of bounds (a resizable buffer shrank), and
+			// otherwise uses the live TypedArrayLength rather than Get("length").
+			oob, n := o.typedArray.outOfBounds()
+			if oob {
+				return nil, false, i.throwError(ctx, "TypeError", "TypedArray is out of bounds")
+			}
+			length = n
+		} else {
+			l, err := i.lengthOfArrayLike(ctx, o)
+			if err != nil {
+				return nil, false, err
+			}
+			length = l
+		}
+		if idx < length {
+			cur := idx
+			idx++
+			switch kind {
+			case arrayIterKeys:
+				return Number(float64(cur)), false, nil
+			case arrayIterEntries:
+				ev, err := i.getV(ctx, o, StrKey(intToStr(cur)), o)
+				if err != nil {
+					return nil, false, err
+				}
+				return i.newArray([]Value{Number(float64(cur)), ev}), false, nil
+			default:
+				v, err := i.getV(ctx, o, StrKey(intToStr(cur)), o)
+				if err != nil {
+					return nil, false, err
+				}
+				return v, false, nil
+			}
+		}
+		done = true
+		return Undef, true, nil
+	}), nil
 }
 
 // ---------------------------------------------------------------------------

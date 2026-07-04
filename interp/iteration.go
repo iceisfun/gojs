@@ -80,6 +80,57 @@ func (i *Interpreter) defineCollectionIteratorNext(proto *Object, slotKey, label
 	})
 }
 
+// arrayIteratorSlot marks an object as an Array Iterator instance and holds its
+// step closure (the [[IteratedArrayLike]]/[[ArrayLikeNextIndex]] state captured
+// in a Go closure). Its presence is the brand checked by
+// %ArrayIteratorPrototype%.next. The closure returns (value, done, error): the
+// error channel lets a Proxy [[Get]] trap or a detached/out-of-bounds TypedArray
+// check throw a TypeError out of next (§23.1.5.1).
+const arrayIteratorSlot = "ArrayIterator"
+
+// newArrayIteratorObj builds an Array Iterator instance (CreateArrayIterator,
+// §23.1.5.1). Like the Map/Set iterators, the per-instance step state lives in an
+// internal slot rather than a captured next method, so the single brand-checked
+// next installed on %ArrayIteratorPrototype% by defineArrayIteratorNext serves
+// every instance. Symbol.iterator is inherited from %Iterator.prototype%.
+func (i *Interpreter) newArrayIteratorObj(next func(ctx context.Context) (Value, bool, error)) *Object {
+	it := NewObject(i.arrayIteratorProto)
+	it.class = "Array Iterator"
+	it.internal = map[string]any{arrayIteratorSlot: next}
+	return it
+}
+
+// defineArrayIteratorNext installs the shared, brand-checked
+// %ArrayIteratorPrototype%.next as an own, writable/configurable data property.
+// It reads the step closure from this's arrayIteratorSlot internal slot; a
+// receiver lacking that slot — a plain object, the prototype itself, an array, or
+// undefined/null — throws a TypeError (§23.1.5.1 steps 2-3).
+func (i *Interpreter) defineArrayIteratorNext() {
+	i.defineMethod(i.arrayIteratorProto, "next", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		o, ok := this.(*Object)
+		var gen func(ctx context.Context) (Value, bool, error)
+		if ok && o.internal != nil {
+			gen, _ = o.internal[arrayIteratorSlot].(func(ctx context.Context) (Value, bool, error))
+		}
+		if gen == nil {
+			return nil, i.throwError(ctx, "TypeError", "%ArrayIteratorPrototype%.next called on incompatible receiver")
+		}
+		v, done, err := gen(ctx)
+		if err != nil {
+			return nil, err
+		}
+		res := NewObject(i.objectProto)
+		if done {
+			res.SetData("value", Undef)
+			res.SetData("done", True)
+			return res, nil
+		}
+		res.SetData("value", v)
+		res.SetData("done", False)
+		return res, nil
+	})
+}
+
 // iterate consumes an iterable, invoking fn for each produced value. It fast-
 // paths arrays and strings, and otherwise drives the Symbol.iterator protocol.
 func (i *Interpreter) iterate(ctx context.Context, iterable Value, fn func(Value) error) error {

@@ -270,6 +270,10 @@ func (i *Interpreter) initIterator() {
 	// matching the real prototype chain.
 	arrayIterProto := NewObject(proto)
 	i.arrayIteratorProto = arrayIterProto
+	// %ArrayIteratorPrototype%.next is a shared, brand-checked own data property
+	// (not a per-instance method), so calling it on a value without the Array
+	// Iterator internal slot throws a TypeError (§23.1.5.1).
+	i.defineArrayIteratorNext()
 	arrayIterProto.defineOwn(SymKey(i.symToStringTag), &Property{
 		Value: String("Array Iterator"), Writable: false, Enumerable: false, Configurable: true,
 	})
