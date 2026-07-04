@@ -34,19 +34,31 @@ that are now fixed for both engines (`new` arg-vs-isConstructor order §13.3.5.1
 `null[key]` ToObject-before-ToPropertyKey §13.3.3; and templates now flat-string +
 ToString-correct).
 
-**Performance (tree-walker vs VM, same programs; dispatch-only, no slots yet):**
+**Slot-based locals — DONE (bc_resolver.go).** A fully-native function (no
+fallback, no let/const, no nested closure, no `arguments`-object need) now gets
+frame slots for its parameters and function-scope vars instead of env-map
+bindings. Eligibility is decided by the compiler itself: it attempts a slot
+compile and aborts to name mode the instant it would emit a fallback or touch a
+binding a slot can't model, so "the slot compile succeeded" is the single source
+of truth (no separate analysis to drift). Local access becomes an array index;
+compound/`++`/`--`/assignment on a slot skip the reference machinery entirely.
 
-| workload | tree-walker | bytecode | speedup |
-|---|---|---|---|
-| `fib(27)` (recursion) | 1723 ms | 1242 ms | **1.39×** |
-| 200k arithmetic loop | 254 ms | 159 ms | **1.60×** |
-| 400×400 nested loop | 182 ms | 118 ms | **1.54×** |
-| 100k method calls | 241 ms | 184 ms | **1.31×** |
+**Performance (tree-walker vs slot-mode VM, same programs):**
 
-Allocations are ~unchanged (name-based scopes still allocate env maps), so the
-**1.3–1.6× is pure dispatch win** — exactly what §0 predicted from the
-architecture, no profiler needed. The next lever (slot-based locals) is the one
-that attacks the allocation count.
+| workload | speedup | allocations (TW → VM) |
+|---|---|---|
+| `fib(27)` (recursion) | ~3.8× | 17.4M → 5.3M (−70%) |
+| 200k arithmetic loop | ~4.4× | 3.4M → 2.0M (−41%) |
+| 400×400 nested loop | ~4.3× | 2.5M → 1.6M (−38%) |
+| 100k method calls | ~2.3× | 3.2M → 1.3M (−59%) |
+
+(CPU ratios carry machine noise; the **allocation reductions are the robust,
+machine-independent metric**.) This is exactly the §0 prediction realized: the
+first slice's 1.3–1.6× was pure dispatch with allocs unchanged; slotting locals
+then attacked the allocation count and roughly doubled the win again. The residual
+`fib` allocations are the per-call env (still created for `this`/global lookups)
+plus the locals array and boxed return value — eliminating the env for
+pure-computational functions is the next increment.
 
 ---
 

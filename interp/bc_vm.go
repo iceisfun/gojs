@@ -17,11 +17,12 @@ import (
 
 // bcFrame is one activation of a compiled function on the VM.
 type bcFrame struct {
-	code  *codeObject
-	ip    int
-	stack []Value
-	env   *Environment
-	loops []bcLoopRT
+	code   *codeObject
+	ip     int
+	stack  []Value
+	env    *Environment
+	locals []Value // frame slots in slot mode (nil in name mode)
+	loops  []bcLoopRT
 	// refs is a side stack of assignment target References resolved by
 	// opResolveName before their RHS runs (kept off the Value stack so it needs no
 	// boxing). opPutRef pops one.
@@ -64,8 +65,8 @@ func (f *bcFrame) popN(n int) []Value {
 // execCode runs a compiled function body in env and returns its completion value.
 // Control flow (return/throw) surfaces exactly as in the tree-walker: a *Throw or
 // context error propagates; the value of a `return` is returned directly.
-func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Environment) (Value, error) {
-	fr := &bcFrame{code: code, env: env, stack: make([]Value, 0, 8)}
+func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Environment, locals []Value) (Value, error) {
+	fr := &bcFrame{code: code, env: env, locals: locals, stack: make([]Value, 0, 8)}
 	instrs := code.instrs
 	for fr.ip < len(instrs) {
 		if err := i.checkContext(); err != nil {
@@ -108,6 +109,18 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 				return nil, err
 			}
 			fr.push(v)
+		case opGetLocal:
+			fr.push(fr.locals[in.a])
+		case opSetLocal:
+			fr.locals[in.a] = fr.pop()
+		case opIncDecLocal:
+			// in.b bit0 = prefix, bit1 = decrement.
+			result, stored, err := i.computeIncDec(ctx, fr.locals[in.a], in.b&2 == 0, in.b&1 == 1)
+			if err != nil {
+				return nil, err
+			}
+			fr.locals[in.a] = stored
+			fr.push(result)
 		case opResolveName:
 			// Resolve an assignment target reference BEFORE its RHS is evaluated
 			// (§13.15.2). Kept on the side ref-stack so the RHS's operands sit
@@ -117,6 +130,13 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 				return nil, err
 			}
 			fr.refs = append(fr.refs, ref)
+		case opRefLoad:
+			ref := fr.refs[len(fr.refs)-1]
+			v, err := i.getRefValue(ctx, ref)
+			if err != nil {
+				return nil, err
+			}
+			fr.push(v)
 		case opPutRef:
 			// PutValue with assignment semantics: strict write to an unresolved name
 			// throws ReferenceError, const reassignment throws TypeError, a with /
@@ -338,6 +358,14 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 				}
 				return nil, err
 			}
+		case opIncDec:
+			ref := fr.refs[len(fr.refs)-1]
+			fr.refs = fr.refs[:len(fr.refs)-1]
+			v, err := i.applyIncDecRef(ctx, ref, in.b == 0, in.a == 1)
+			if err != nil {
+				return nil, err
+			}
+			fr.push(v)
 		case opUpdate:
 			v, err := i.evalUpdate(ctx, code.nodes[in.a].(*ast.UpdateExpr), fr.env)
 			if err != nil {

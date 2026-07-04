@@ -129,6 +129,12 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 				env.vars[name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
 			}
 		}
+		// Slot-eligible compiled body: params and vars live in frame slots, so skip
+		// the arguments object, parameter binding into env, and var hoisting — the
+		// slot prologue handles them. env is kept (this/globals/self-name).
+		if bcCode != nil && bcCode.numSlots > 0 {
+			return i.runFunctionBodyBCSlots(ctx, funcFrameName(fnObj, name), bcCode, env, args)
+		}
 		// The arguments object is created before the parameters are bound so it is
 		// visible to default-value initializers (ECMA-262 FunctionDeclaration-
 		// Instantiation creates it before IteratorBindingInitialization). A formal
@@ -597,5 +603,29 @@ func (i *Interpreter) runFunctionBodyBC(ctx context.Context, name string, body *
 	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
 		return nil, err
 	}
-	return i.execCode(ctx, code, env)
+	return i.execCode(ctx, code, env, nil)
+}
+
+// runFunctionBodyBCSlots runs a slot-eligible compiled body: locals live in a
+// frame array (params bound by position, remaining slots var-hoisted to
+// undefined) instead of the environment, so there is no per-binding map work and
+// no arguments object. The env is still present for `this`, globals, and a named
+// function expression's self-reference.
+func (i *Interpreter) runFunctionBodyBCSlots(ctx context.Context, name string, code *codeObject, env *Environment, args []Value) (Value, error) {
+	defer i.enterFrame(name)()
+	savedParamEnv := i.paramDefaultEnv
+	i.paramDefaultEnv = nil
+	defer func() { i.paramDefaultEnv = savedParamEnv }()
+	locals := make([]Value, code.numSlots)
+	for j := range locals {
+		locals[j] = Undef // var hoisting: every slot starts undefined
+	}
+	// Bind parameters by position; a duplicated name's later position wins because
+	// paramSlots maps both positions to the same slot.
+	for pos, slot := range code.paramSlots {
+		if pos < len(args) {
+			locals[slot] = args[pos]
+		}
+	}
+	return i.execCode(ctx, code, env, locals)
 }

@@ -129,6 +129,25 @@ var bcDiffCases = []string{
 	`var x = {}; function f(){ try { new x(x = Array) } catch(e){} return x === Array } f()`,
 	// regression: null[key] throws TypeError before the key's toString runs
 	`function f(){ var hit=0; var k={toString(){hit=1;return "p"}}; try { (null)[k] } catch(e){} return hit + ":" + (typeof null) } f()`,
+
+	// --- slot-mode edge cases (fully-native functions get frame slots) ---
+	`function f(a,a){ return a } f(1,2)`,                                  // dup param: last wins
+	`function f(x){ var x = x + 1; return x } f(5)`,                       // var shadows param (same binding)
+	`function f(){ return typeof x; var x = 1 } f()`,                      // var hoisting: undefined slot
+	`function f(){ { var y = 3 } return y } f()`,                          // var is function-scoped across a block
+	`function f(n){ var s = 0; for (var i=0;i<n;i++){ s += i } return s } f(100)`,
+	`function f(n){ if (n<=1) return 1; return n*f(n-1) } f(6)`,           // recursion via global slot-eligible fn
+	`function f(a,b,c){ var t=a; t+=b; t+=c; t*=2; return t } f(1,2,3)`,   // params + compound + var
+	`function f(){ var i=10; var j=0; while(i>0){ i--; j++ } return i+":"+j } f()`,
+	`function f(x){ var r = 0; do { r += x; x-- } while(x>0); return r } f(4)`,
+	`function f(){ var a=1,b=2,c=3; return a+b*c-a } f()`,                 // multi-declarator var
+	`function f(p){ var q = p * 3n; return q + 1n } f(4n)`,                // bigint slot + incdec path
+	`function f(n){ var s=0; for(var i=0;i<n;i++){ if(i%3==0) continue; if(i>10) break; s+=i } return s } f(20)`,
+	// regression: `var arguments` is the arguments object, not an undefined slot
+	`function f(){ return typeof arguments; var arguments = 5 } f(1,2,3)`,
+	`function f(){ return arguments.length; var arguments } f(1,2,3)`,
+	`function f(arguments){ return arguments } f(7)`,                      // param named arguments shadows object
+	`function f(){ return arguments.length } f(1,2,3,4)`,                  // bare arguments ⇒ name mode
 }
 
 func TestBytecodeDiff(t *testing.T) {

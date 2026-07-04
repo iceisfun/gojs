@@ -42,7 +42,11 @@ const (
 
 	// Identifier reads/writes (name-based; reuse resolveIdent / references).
 	opLoadName    // a=name index → push resolveIdent(name)
+	opGetLocal    // a=slot → push frame local slot (slot-eligible functions only)
+	opSetLocal    // a=slot → locals[slot] = pop
+	opIncDecLocal // a=slot, b=prefix|dec<<1 → read/±1/write local slot; push old|new
 	opResolveName // a=name index → push a target Reference (assignment, resolved first)
+	opRefLoad     // GetValue of the top ref (kept) → push (compound assignment read)
 	opPutRef      // pop value + Reference → PutValue; push value back (assignment result)
 	opTypeofName  // a=name index → typeof, but undefined-safe for an unresolved name
 
@@ -96,6 +100,8 @@ const (
 	opClosure  // a=node index (FuncExpr/ArrowFunc/ClassExpr), b=name index → push function object
 	opTemplate // a=count → concatenate 2*count-1 alternating quasi/expr parts on stack
 
+	opIncDec // a=prefix(0/1), b=decrement(0/1); pop ref → read/±1/write; push old|new
+
 	// Escape hatches: run one AST subtree on the tree-walker with the live env.
 	opEvalNode // a=node index (ast.Expr) → push evalExpr(node, env)
 	opEvalStmt // a=node index (ast.Stmt) → evalStmt(node, env); completion handled by VM
@@ -119,9 +125,19 @@ type codeObject struct {
 	instrs []bcInstr
 
 	// Pools referenced by instruction operands.
-	consts []Value     // opPushConst
-	names  []string    // opLoadName/opStoreName/opGetProp/... and declarations
-	nodes  []ast.Node  // opEvalNode/opEvalStmt/opClosure/opEnterScope/opUpdate/opDelete
+	consts []Value    // opPushConst
+	names  []string   // opLoadName/opResolveName/opGetProp/... and declarations
+	nodes  []ast.Node // opEvalNode/opEvalStmt/opClosure/opEnterScope/opUpdate/opDelete
+
+	// numSlots > 0 marks a slot-eligible function: its params and function-scope
+	// vars live in the frame's locals array (indexed by opGetLocal/opSetLocal)
+	// instead of the environment. Set only when the whole body compiled with no
+	// fallback, no let/const, no nested function, and no `arguments` (see
+	// bc_resolver.go). Otherwise 0 and locals stay name-based.
+	numSlots   int
+	slotNames  []string // slot index → local name (debug / var-hoist)
+	paramSlots []int    // param position → slot index (last wins for a dup name)
+	numParams  int      // len(def.Params); positions ≥ this in paramSlots don't exist
 
 	strict bool
 }

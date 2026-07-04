@@ -199,48 +199,59 @@ func (i *Interpreter) evalUpdate(ctx context.Context, e *ast.UpdateExpr, env *En
 	if err != nil {
 		return nil, err
 	}
+	return i.applyIncDecRef(ctx, ref, e.Op == token.INC, e.Prefix)
+}
+
+// applyIncDecRef performs the read-modify-write of a ++/-- operator on an already
+// resolved Reference (§13.4). Shared by the tree-walker (evalUpdate) and the
+// bytecode VM (opIncDec) so both agree on the ToNumeric/BigInt semantics and the
+// prefix (new value) vs postfix (ToNumeric of the old value) result.
+func (i *Interpreter) applyIncDecRef(ctx context.Context, ref *reference, inc, prefix bool) (Value, error) {
 	old, err := i.getRefValue(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	// oldValue is ToNumeric(GetValue(ref)) (§13.4.4.1), so an object coercing to
-	// a BigInt takes the BigInt path rather than throwing in ToNumber.
-	oldNum, err := i.toNumeric(ctx, old)
+	result, stored, err := i.computeIncDec(ctx, old, inc, prefix)
 	if err != nil {
 		return nil, err
 	}
-	// BigInt increments stay BigInt.
-	if b, ok := oldNum.(*BigInt); ok {
-		delta := big.NewInt(1)
-		nv := new(big.Int)
-		if e.Op == token.INC {
-			nv.Add(b.Int, delta)
-		} else {
-			nv.Sub(b.Int, delta)
-		}
-		res := &BigInt{Int: nv}
-		if err := i.putRefValue(ctx, ref, res); err != nil {
-			return nil, err
-		}
-		if e.Prefix {
-			return res, nil
-		}
-		return b, nil
-	}
-	n := float64(oldNum.(Number))
-	var updated float64
-	if e.Op == token.INC {
-		updated = n + 1
-	} else {
-		updated = n - 1
-	}
-	if err := i.putRefValue(ctx, ref, Number(updated)); err != nil {
+	if err := i.putRefValue(ctx, ref, stored); err != nil {
 		return nil, err
 	}
-	if e.Prefix {
-		return Number(updated), nil
+	return result, nil
+}
+
+// computeIncDec performs ToNumeric(old) then ±1 (§13.4.4.1), returning the value
+// to push (prefix → new value; postfix → ToNumeric of the old value) and the value
+// to store back. Shared by the ref path (applyIncDecRef) and the VM slot path
+// (opIncDecLocal), which differ only in how the operand is read and written.
+func (i *Interpreter) computeIncDec(ctx context.Context, old Value, inc, prefix bool) (result, stored Value, err error) {
+	oldNum, err := i.toNumeric(ctx, old)
+	if err != nil {
+		return nil, nil, err
 	}
-	return Number(n), nil
+	if b, ok := oldNum.(*BigInt); ok {
+		nv := new(big.Int)
+		if inc {
+			nv.Add(b.Int, big.NewInt(1))
+		} else {
+			nv.Sub(b.Int, big.NewInt(1))
+		}
+		res := &BigInt{Int: nv}
+		if prefix {
+			return res, res, nil
+		}
+		return b, res, nil
+	}
+	n := float64(oldNum.(Number))
+	updated := n + 1
+	if !inc {
+		updated = n - 1
+	}
+	if prefix {
+		return Number(updated), Number(updated), nil
+	}
+	return Number(n), Number(updated), nil
 }
 
 // evalBinary evaluates a binary operator expression.
