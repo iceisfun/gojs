@@ -273,9 +273,21 @@ func (i *Interpreter) putRefValue(ctx context.Context, ref *reference, value Val
 		}
 		obj, ok := ref.base.(*Object)
 		if !ok {
-			// A write to a boxed primitive receiver never takes effect; strict
-			// mode reports the failed [[Set]] as a TypeError (§13.15.2 / PutValue).
-			if ref.strict {
+			// §6.2.5.6 PutValue step 6a: with a primitive base, set base to
+			// ToObject(base) and invoke the wrapper's [[Set]] with the original
+			// primitive as the receiver, so an inherited setter or a Proxy on the
+			// wrapper prototype fires. The write itself never sticks (the receiver
+			// is not an Object), so a failed [[Set]] is a TypeError only in strict
+			// mode.
+			wrapper, err := i.ToObject(ctx, ref.base)
+			if err != nil {
+				return err
+			}
+			wrote, err := i.setV(ctx, wrapper, key, value, ref.base)
+			if err != nil {
+				return err
+			}
+			if !wrote && ref.strict {
 				return i.throwError(ctx, "TypeError", "Cannot create property "+keyName(key)+" on "+briefValue(ref.base))
 			}
 			return nil

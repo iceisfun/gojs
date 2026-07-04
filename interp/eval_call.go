@@ -513,9 +513,20 @@ func (i *Interpreter) assignTo(ctx context.Context, target ast.Expr, value Value
 			if IsNullish(base) {
 				return i.throwError(ctx, "TypeError", "Cannot set properties of "+briefValue(base))
 			}
-			// Writes to a primitive receiver never take effect; in strict mode
-			// that failed [[Set]] is a TypeError (§13.15.2 / PutValue).
-			if env.isStrict() {
+			// §6.2.5.6 PutValue step 6a: with a primitive base, ToObject(base) and
+			// invoke the wrapper's [[Set]] with the original primitive as receiver,
+			// so an inherited setter or Proxy on the wrapper prototype fires. The
+			// write never sticks, so a failed [[Set]] is a TypeError only in strict
+			// mode.
+			wrapper, err := i.ToObject(ctx, base)
+			if err != nil {
+				return err
+			}
+			wrote, err := i.setV(ctx, wrapper, key, value, base)
+			if err != nil {
+				return err
+			}
+			if !wrote && env.isStrict() {
 				return i.throwError(ctx, "TypeError", "Cannot create property "+keyName(key)+" on "+briefValue(base))
 			}
 			return nil
