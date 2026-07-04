@@ -104,16 +104,18 @@ func (p *parser) tryParseArrow() ast.Expr {
 	base := 0
 
 	if start.Type == token.ASYNC && !p.peek(1).NewlineBefore {
-		switch p.peek(1).Type {
-		case token.IDENT:
-			// async x => …
+		switch {
+		case p.peek(1).Type == token.IDENT || isContextualKeyword(p.peek(1).Type):
+			// async x => … — the single BindingIdentifier may be a contextual
+			// keyword (`async of => {}`, `async yield => {}` in sloppy code). This
+			// is why `for (async of => {}; …)` is a C-style for loop, not a for-of.
 			if p.peek(2).Type == token.ARROW && !p.peek(2).NewlineBefore {
 				async = true
 				base = 1
 			} else {
 				return nil
 			}
-		case token.LPAREN:
+		case p.peek(1).Type == token.LPAREN:
 			async = true
 			base = 1
 		default:

@@ -184,6 +184,13 @@ func (p *parser) parseBinary(minPrec int) ast.Expr {
 	case token.AWAIT:
 		_, bareUnary = left.(*ast.AwaitExpr)
 	}
+	// A PrivateIdentifier is only legal as the immediate left operand of `in`
+	// (RelationalExpression : PrivateIdentifier in ShiftExpression, §13.10.1).
+	// In any other position — a standalone `#x`, the left operand of a different
+	// operator, or (caught below) the right operand of `in` — it is a SyntaxError.
+	if pi, ok := left.(*ast.PrivateIdent); ok && p.cur().Type != token.IN {
+		p.errorAt(pi.NamePos, "private identifier is only valid as the left operand of 'in'")
+	}
 	for {
 		opType := p.cur().Type
 		prec := p.binaryPrec(opType)
@@ -201,6 +208,12 @@ func (p *parser) parseBinary(minPrec int) ast.Expr {
 			nextMin = prec
 		}
 		right := p.parseBinary(nextMin)
+		// The RHS of `in` (a ShiftExpression) — and the RHS of every other binary
+		// operator — is never a PrivateIdentifier, so `#a in #b in c` is a
+		// SyntaxError even though each `#…` sits to the left of an `in`.
+		if pi, ok := right.(*ast.PrivateIdent); ok {
+			p.errorAt(pi.NamePos, "private identifier is only valid as the left operand of 'in'")
+		}
 		if opType == token.AND || opType == token.OR || opType == token.NULLISH {
 			// CoalesceExpression (§13.13): `??` may not be combined with `||` or `&&`
 			// without parentheses. Its operands are BitwiseORExpressions, and a

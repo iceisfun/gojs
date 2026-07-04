@@ -447,8 +447,12 @@ func (i *Interpreter) bindForTarget(ctx context.Context, left ast.Node, v Value,
 	switch l := left.(type) {
 	case *ast.VarDecl:
 		target := l.Decls[0].Target
+		// A `const` ForBinding is immutable: assigning to it in the loop body
+		// (e.g. `for (const x of a) x++`) is a TypeError (§14.7.5.7). let/var
+		// bindings remain mutable.
+		mutable := l.Kind != token.CONST
 		bind := func(name string, val Value) {
-			iterEnv.vars[name] = &binding{value: val, mutable: true, initialized: true}
+			iterEnv.vars[name] = &binding{value: val, mutable: mutable, initialized: true}
 		}
 		return i.bindPattern(ctx, target, v, iterEnv, bind)
 	case ast.Expr:
