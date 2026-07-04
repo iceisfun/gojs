@@ -413,6 +413,10 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 			fieldEnv.setThis(self)
 			fieldEnv.homeObj = cd.proto
 			fieldEnv.fieldInit = true
+			// A field initializer is a function context: new.target is bound
+			// (value undefined, since it is [[Call]]ed), so `new.target` — and a
+			// direct eval that mentions it — is valid inside the initializer.
+			fieldEnv.newTgt = Undef
 			v, err = i.evalExprWithName(ctx, m.Value, fieldEnv, fieldFuncName(m, key))
 			if err != nil {
 				return err
