@@ -200,12 +200,10 @@ func TestArgumentsObject(t *testing.T) {
 	`)
 }
 
-// TestUnmappedArguments verifies that arguments is a snapshot with no aliasing
-// to the named parameters. This is exact for strict mode and for any non-simple
-// parameter list (where the spec also mandates an unmapped object). gojs also
-// uses this snapshot behavior in the sloppy simple-param case, where the spec
-// would call for a *mapped* object; that intentional divergence is documented
-// in wontfix/function-code.md and pinned by TestArgumentsNoMappedAliasing below.
+// TestUnmappedArguments verifies that arguments is unmapped (no aliasing to the
+// named parameters) exactly where the spec mandates it: strict mode and any
+// non-simple parameter list (default/rest/destructuring). The sloppy
+// simple-param case IS mapped and is covered by TestArgumentsMappedAliasing.
 func TestUnmappedArguments(t *testing.T) {
 	Expect(t, `
 		// Strict mode: no aliasing.
@@ -228,17 +226,19 @@ func TestUnmappedArguments(t *testing.T) {
 	`)
 }
 
-// TestArgumentsNoMappedAliasing pins gojs's documented divergence: it does not
-// implement sloppy-mode mapped-arguments aliasing, so writing arguments[i] does
-// not change the named parameter (and vice versa) even for a simple parameter
-// list. If mapped arguments are ever implemented, update this test and remove
-// the entry from wontfix/function-code.md.
-func TestArgumentsNoMappedAliasing(t *testing.T) {
+// TestArgumentsMappedAliasing verifies sloppy-mode *mapped* arguments (§10.4.4):
+// for a simple (identifier-only) parameter list in non-strict code, arguments[i]
+// and the i-th named parameter share a binding, so a write to one is observed
+// through the other. Deleting arguments[i] severs the mapping. Strict mode and
+// non-simple parameter lists stay unmapped (TestUnmappedArguments).
+func TestArgumentsMappedAliasing(t *testing.T) {
 	Expect(t, `
 		function w2p(a){ arguments[0] = 99; return a; }
-		assert.sameValue(w2p(1), 1, "divergence: arguments[i] write is not seen by the parameter");
+		assert.sameValue(w2p(1), 99, "arguments[i] write is seen by the parameter");
 		function p2w(a){ a = 5; return arguments[0]; }
-		assert.sameValue(p2w(1), 1, "divergence: parameter write is not seen by arguments[i]");
+		assert.sameValue(p2w(1), 5, "parameter write is seen by arguments[i]");
+		function del(a){ delete arguments[0]; arguments[0] = 99; return a; }
+		assert.sameValue(del(1), 1, "delete arguments[i] severs the mapping");
 	`)
 }
 

@@ -879,7 +879,7 @@ func TestExponentOperator(t *testing.T) {
 		assert.sameValue(Infinity ** 0, 1);
 		assert.sameValue(NaN ** 0, 1);
 		assert.sameValue(NaN ** 1, NaN);
-		assert.sameValue(1 ** Infinity, 1);
+		assert.sameValue(1 ** Infinity, NaN);  // base magnitude 1, infinite exponent -> NaN (spec)
 
 		// large powers
 		assert.sameValue(2 ** 53, 9007199254740992);
