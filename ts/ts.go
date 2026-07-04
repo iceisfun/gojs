@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/interp"
 	"github.com/iceisfun/typescript/core"
 	"github.com/iceisfun/typescript/sourcemap"
@@ -31,7 +32,10 @@ func Transpile(fileName, src string) (string, error) {
 }
 
 // config holds per-provider transpilation settings.
-type config struct{ permissive bool }
+type config struct {
+	permissive  bool
+	astDisabled bool
+}
 
 // Option configures TypeScript transpilation for a Provider / WithTypeScript.
 type Option func(*config)
@@ -40,6 +44,14 @@ type Option func(*config)
 // ts.transpileModule) instead of rejecting it. The default is strict: malformed
 // TypeScript is reported as an error rather than run.
 func Permissive() Option { return func(c *config) { c.permissive = true } }
+
+// DisableAST turns off the direct TypeScript-AST -> gojs-AST module frontend, so
+// every TypeScript module is transpiled to JavaScript text and re-parsed (the
+// original behavior). By default a Provider lowers TypeScript modules straight to
+// the gojs AST — skipping the text emit + re-parse — and falls back to the text
+// path per module for anything the lowerer does not yet handle. Use this to force
+// the text path everywhere (for debugging, or to compare the two paths).
+func DisableAST() Option { return func(c *config) { c.astDisabled = true } }
 
 // transpileWith converts TypeScript to CommonJS JavaScript, optionally producing
 // a source map and/or tolerating syntax errors. It recovers a transform panic
@@ -87,7 +99,7 @@ func Provider(base interp.ModuleProvider, opts ...Option) interp.ModuleProvider 
 	for _, o := range opts {
 		o(&c)
 	}
-	return &provider{base: base, permissive: c.permissive}
+	return &provider{base: base, permissive: c.permissive, astDisabled: c.astDisabled}
 }
 
 // WithTypeScript returns the VM options for running TypeScript with
@@ -104,15 +116,16 @@ func WithTypeScript(base interp.ModuleProvider, opts ...Option) []interp.Option 
 	}
 	m := NewMapper()
 	return []interp.Option{
-		interp.WithModuleProvider(&provider{base: base, mapper: m, permissive: c.permissive}),
+		interp.WithModuleProvider(&provider{base: base, mapper: m, permissive: c.permissive, astDisabled: c.astDisabled}),
 		interp.WithSourceMapper(m),
 	}
 }
 
 type provider struct {
-	base       interp.ModuleProvider
-	mapper     *Mapper // when set, transpile with a source map and record it
-	permissive bool
+	base        interp.ModuleProvider
+	mapper      *Mapper // when set, transpile with a source map and record it
+	permissive  bool
+	astDisabled bool
 }
 
 func (p *provider) Resolve(ctx context.Context, specifier, referrer string) (string, error) {
@@ -159,6 +172,41 @@ func (p *provider) Load(ctx context.Context, id string) (string, error) {
 		p.mapper.record(id, src, raw)
 	}
 	return js, nil
+}
+
+// LoadProgram implements [interp.ProgramLoader]: for a TypeScript module it
+// lowers the source straight to a gojs AST (transpiler.ModuleAST + [Lower]),
+// skipping the emit-JavaScript-text-then-reparse round trip [Load] performs.
+//
+// It defers to the text Load path (handled=false) when the AST frontend is
+// disabled, when a source mapper is configured (the AST path is not yet recorded
+// in the source map), for non-TypeScript ids, and — crucially — whenever the
+// transpile or the lowering fails, including a construct the lowerer does not yet
+// handle (*UnsupportedNodeError). The text path therefore stays the correctness
+// backstop: turning the AST frontend on can only skip work, never change results.
+func (p *provider) LoadProgram(ctx context.Context, id string) (*ast.Program, string, bool, error) {
+	if p.astDisabled || p.mapper != nil || !IsTypeScript(id) {
+		return nil, "", false, nil
+	}
+	src, err := p.base.Load(ctx, id)
+	if err != nil {
+		return nil, "", false, err
+	}
+	sf, err := transpiler.ModuleAST(src, transpiler.Options{
+		FileName:           id,
+		Module:             core.ModuleKindCommonJS,
+		JSX:                strings.HasSuffix(id, ".tsx"),
+		IgnoreSyntaxErrors: p.permissive,
+	})
+	if err != nil {
+		// Let the text path re-run and surface the transpile/syntax error uniformly.
+		return nil, "", false, nil
+	}
+	prog, err := Lower(sf, id, src)
+	if err != nil {
+		return nil, "", false, nil
+	}
+	return prog, src, true, nil
 }
 
 // RunString transpiles a self-contained TypeScript program and runs it on vm as

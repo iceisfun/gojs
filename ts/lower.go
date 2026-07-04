@@ -26,7 +26,7 @@ func RunStringAST(vm *interp.Interpreter, name, tsSrc string) (interp.Value, err
 	if err != nil {
 		return nil, err
 	}
-	prog, err := Lower(sf, name)
+	prog, err := Lower(sf, name, tsSrc)
 	if err != nil {
 		return nil, err
 	}
@@ -60,9 +60,11 @@ func (e *UnsupportedNodeError) Error() string {
 }
 
 // Lower translates a lowered TypeScript SourceFile (from transpiler.ModuleAST)
-// into a gojs *ast.Program. source names the module for diagnostics.
-func Lower(sf *tsast.SourceFile, source string) (prog *gast.Program, err error) {
-	l := &lowerer{source: source}
+// into a gojs *ast.Program. name identifies the module in diagnostics; srcText is
+// the original TypeScript source, used to resolve node byte offsets into 1-based
+// line/column positions for stack traces (pass "" to skip position mapping).
+func Lower(sf *tsast.SourceFile, name, srcText string) (prog *gast.Program, err error) {
+	l := &lowerer{name: name, tab: newPosTable(srcText)}
 	defer func() {
 		if r := recover(); r != nil {
 			if ue, ok := r.(*UnsupportedNodeError); ok {
@@ -74,14 +76,15 @@ func Lower(sf *tsast.SourceFile, source string) (prog *gast.Program, err error) 
 	}()
 	body := l.stmtList(sf.Statements.Nodes)
 	return &gast.Program{
-		Source: source,
+		Source: name,
 		Body:   body,
 		Strict: l.strict,
 	}, nil
 }
 
 type lowerer struct {
-	source string
+	name string
+	tab  *posTable
 	// strict tracks lexical strict-mode nesting: once a directive prologue turns
 	// strict on (or we enter a class), inner functions inherit it.
 	strict bool
@@ -97,9 +100,75 @@ func (l *lowerer) fail(n *tsast.Node, msg string) {
 
 func (l *lowerer) pos(n *tsast.Node) token.Pos {
 	if n == nil {
-		return token.Pos{Source: l.source}
+		return token.Pos{Source: l.name}
 	}
-	return token.Pos{Source: l.source, Offset: int(n.Pos())}
+	off := int(n.Pos())
+	line, col := l.tab.lineCol(off)
+	return token.Pos{Source: l.name, Offset: off, Line: line, Column: col}
+}
+
+// posTable maps a byte offset in the module source to a 1-based line and column.
+// Node positions from typescript-go include leading trivia, so lineCol skips
+// whitespace and comments first to land on the token itself.
+type posTable struct {
+	src   string
+	lines []int // byte offset of the start of each line
+}
+
+func newPosTable(src string) *posTable {
+	lines := []int{0}
+	for i := 0; i < len(src); i++ {
+		if src[i] == '\n' {
+			lines = append(lines, i+1)
+		}
+	}
+	return &posTable{src: src, lines: lines}
+}
+
+func (t *posTable) lineCol(off int) (int, int) {
+	if t == nil || off < 0 || off > len(t.src) {
+		return 0, 0
+	}
+	off = t.skipTrivia(off)
+	// Largest line-start <= off.
+	lo, hi := 0, len(t.lines)-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if t.lines[mid] <= off {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo + 1, off - t.lines[lo] + 1
+}
+
+func (t *posTable) skipTrivia(off int) int {
+	s := t.src
+	for off < len(s) {
+		switch c := s[off]; {
+		case c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f':
+			off++
+		case c == '/' && off+1 < len(s) && s[off+1] == '/':
+			off += 2
+			for off < len(s) && s[off] != '\n' {
+				off++
+			}
+		case c == '/' && off+1 < len(s) && s[off+1] == '*':
+			off += 2
+			for off+1 < len(s) && !(s[off] == '*' && s[off+1] == '/') {
+				off++
+			}
+			if off+1 < len(s) {
+				off += 2
+			} else {
+				off = len(s)
+			}
+		default:
+			return off
+		}
+	}
+	return off
 }
 
 // ---------------------------------------------------------------------------

@@ -34,9 +34,6 @@ const primes: number[] = [];
 for (let i = 2; i <= limit; i++) {
     if (!composite[i]) {
         primes.push(i);
-        if i == 997 {
-            throw new Error("997");
-        }
     }
 }
 

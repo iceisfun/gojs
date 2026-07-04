@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/parser"
 )
 
@@ -28,6 +29,21 @@ type ModuleProvider interface {
 
 	// Load returns the source text of the module with the given canonical id.
 	Load(ctx context.Context, id string) (string, error)
+}
+
+// ProgramLoader is an optional interface a [ModuleProvider] may also implement
+// to supply an already-parsed program for a module id, bypassing the text Load +
+// parse step. It lets a provider that holds a richer source representation — for
+// example a TypeScript frontend that lowers straight to the gojs AST instead of
+// emitting JavaScript text and re-parsing it — skip the round trip.
+//
+// LoadProgram returns handled=false to defer to the normal Load path (the
+// interpreter then loads and parses text as usual); this is how a provider opts
+// out per module — for non-TypeScript files, unsupported constructs, or any
+// case it would rather the text path handle. When handled is true, source is the
+// module's original text, registered for diagnostics and code-frame rendering.
+type ProgramLoader interface {
+	LoadProgram(ctx context.Context, id string) (prog *ast.Program, source string, handled bool, err error)
 }
 
 // WithModuleProvider enables CommonJS-style require(specifier) backed by p.
@@ -71,14 +87,31 @@ func (i *Interpreter) requireModule(ctx context.Context, specifier, referrer str
 		return mod.GetStr(ctx, "exports")
 	}
 
-	src, err := i.moduleProvider.Load(ctx, id)
-	if err != nil {
-		return nil, i.throwError(ctx, "Error", "Cannot load module '"+id+"': "+err.Error())
+	// A provider may lower straight to a program (e.g. a TypeScript frontend that
+	// skips emitting and re-parsing JavaScript text). It opts out per module by
+	// returning handled=false, in which case we fall back to loading and parsing
+	// source text below.
+	var prog *ast.Program
+	if pl, ok := i.moduleProvider.(ProgramLoader); ok {
+		p, source, handled, lerr := pl.LoadProgram(ctx, id)
+		if lerr != nil {
+			return nil, i.throwError(ctx, "Error", "Cannot load module '"+id+"': "+lerr.Error())
+		}
+		if handled {
+			i.registerSource(id, source)
+			prog = p
+		}
 	}
-	i.registerSource(id, src)
-	prog, err := parser.Parse(id, src)
-	if err != nil {
-		return nil, i.throwError(ctx, "SyntaxError", err.Error())
+	if prog == nil {
+		src, err := i.moduleProvider.Load(ctx, id)
+		if err != nil {
+			return nil, i.throwError(ctx, "Error", "Cannot load module '"+id+"': "+err.Error())
+		}
+		i.registerSource(id, src)
+		prog, err = parser.Parse(id, src)
+		if err != nil {
+			return nil, i.throwError(ctx, "SyntaxError", err.Error())
+		}
 	}
 
 	// Build the CommonJS module record and cache it before evaluation.
