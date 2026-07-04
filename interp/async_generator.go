@@ -210,8 +210,8 @@ func (d *asyncGenDriver) awaitReturn() {
 // makeAsyncGenerator builds an async generator object: calling an async
 // generator function returns it without running the body, which advances lazily
 // as next/return/throw requests arrive.
-func (i *Interpreter) makeAsyncGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
-	_, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, false)
+func (i *Interpreter) makeAsyncGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, selfBind bool) (Value, error) {
+	_, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, false, selfBind)
 	if err != nil {
 		return nil, err
 	}

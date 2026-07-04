@@ -376,7 +376,14 @@ func (i *Interpreter) evalAssign(ctx context.Context, e *ast.AssignExpr, env *En
 			if err != nil {
 				return nil, err
 			}
-			val, err := i.evalExprNamed(ctx, e.Value, env, id.Name)
+			// NamedEvaluation applies only when the target IsIdentifierRef — a bare
+			// identifier, not a parenthesized `(fn)` — so a covered identifier
+			// target leaves an anonymous RHS unnamed (§13.15.2).
+			inferName := id.Name
+			if id.Parenthesized {
+				inferName = ""
+			}
+			val, err := i.evalExprNamed(ctx, e.Value, env, inferName)
 			if err != nil {
 				return nil, err
 			}
@@ -387,13 +394,23 @@ func (i *Interpreter) evalAssign(ctx context.Context, e *ast.AssignExpr, env *En
 		}
 	}
 
-	// Plain assignment keeps the existing target path.
+	// Plain assignment to a member target resolves the LeftHandSideExpression to
+	// a Reference — evaluating the base and any computed property-name expression
+	// — *before* the right-hand side, with ToPropertyKey deferred to PutValue
+	// (§13.15.2 AssignmentExpression : LeftHandSideExpression = AssignmentExpression,
+	// and the note that ToPropertyKey on a computed key runs after both operands).
+	// So `base[prop()] = expr()` reports prop()'s throw before expr() runs, and
+	// `base[keyObj] = expr()` never coerces keyObj when expr() throws first.
 	if e.Op == token.ASSIGN {
+		ref, err := i.evalRef(ctx, e.Target, env)
+		if err != nil {
+			return nil, err
+		}
 		val, err := i.evalExprNamed(ctx, e.Value, env, bindingName(e.Target))
 		if err != nil {
 			return nil, err
 		}
-		if err := i.assignTo(ctx, e.Target, val, env); err != nil {
+		if err := i.putRefValue(ctx, ref, val); err != nil {
 			return nil, err
 		}
 		return val, nil
@@ -775,19 +792,58 @@ func (i *Interpreter) assignObjectPattern(ctx context.Context, pat *ast.ObjectLi
 			return err
 		}
 		taken[pk] = true
-		v, err := i.getProperty(ctx, obj, pk)
-		if err != nil {
-			return err
-		}
 		tgt := prop.Value
 		if tgt == nil {
 			tgt = prop.Key
 		}
-		if err := i.assignPattern(ctx, tgt, v, env); err != nil {
+		if err := i.assignKeyedProperty(ctx, obj, pk, tgt, env); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// assignKeyedProperty implements KeyedDestructuringAssignmentEvaluation
+// (§13.15.5.6). For a non-pattern DestructuringAssignmentTarget the target
+// Reference is evaluated *before* GetV(value, propertyName) pulls the property
+// value (step 1 precedes step 2), and an Initializer is evaluated only
+// afterwards, when the pulled value is undefined (step 3). The deferred
+// PutValue coerces a computed member key at that point, so a target like
+// `obj[key()]` reports `key`'s side effects (base, key expression) before the
+// get and its ToPropertyKey only after. A nested array/object pattern skips the
+// reference step (step 1's guard) and recurses on the pulled value.
+func (i *Interpreter) assignKeyedProperty(ctx context.Context, obj Value, pk PropertyKey, tgt ast.Expr, env *Environment) error {
+	target, def := splitAssignElement(tgt)
+	if isDestructuringPattern(target) {
+		v, err := i.getProperty(ctx, obj, pk)
+		if err != nil {
+			return err
+		}
+		if def != nil && IsUndefined(v) {
+			dv, derr := i.evalExprNamed(ctx, def, env, "")
+			if derr != nil {
+				return derr
+			}
+			v = dv
+		}
+		return i.assignPattern(ctx, target, v, env)
+	}
+	ref, err := i.evalRef(ctx, target, env)
+	if err != nil {
+		return err
+	}
+	v, err := i.getProperty(ctx, obj, pk)
+	if err != nil {
+		return err
+	}
+	if def != nil && IsUndefined(v) {
+		dv, derr := i.evalExprNamed(ctx, def, env, bindingName(target))
+		if derr != nil {
+			return derr
+		}
+		v = dv
+	}
+	return i.putRefValue(ctx, ref, v)
 }
 
 // splitAssignElement separates a destructuring array element into its target and

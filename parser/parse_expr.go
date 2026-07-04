@@ -662,6 +662,12 @@ func (p *parser) parseParenExpr() ast.Expr {
 	// bare `{}`/`a?.b`: parenthesization changes AssignmentTargetType and severs an
 	// optional chain for tagged-template and coalesce-mixing purposes.
 	p.parenthesized[expr] = true
+	// A parenthesized identifier is not an IdentifierRef (its IsIdentifierRef is
+	// false), so it must not trigger NamedEvaluation as an assignment target. Mark
+	// the node so the interpreter can tell `(fn) = f` from `fn = f`.
+	if id, ok := expr.(*ast.Ident); ok {
+		id.Parenthesized = true
+	}
 	return expr
 }
 

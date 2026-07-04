@@ -21,8 +21,9 @@ const (
 
 // makeFunction constructs a callable object from a function definition captured
 // in the closure environment. homeObj is the [[HomeObject]] for super lookups
-// (nil outside methods).
-func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind funcKind, homeObj *Object) *Object {
+// (nil outside methods). selfBind requests the named-function-expression
+// self-reference (see below); only a named function expression sets it.
+func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind funcKind, homeObj *Object, selfBind bool) *Object {
 	name := ""
 	if def.Name != nil {
 		name = def.Name.Name
@@ -72,12 +73,12 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		// next/return/throw yield promises (see makeAsyncGenerator). Checked
 		// before the plain-generator case since it is both Async and Generator.
 		if def.Generator && def.Async && kind == kindNormal {
-			return i.makeAsyncGenerator(fnObj, def, closure, homeObj, i.bindThisValue(this, strict), args)
+			return i.makeAsyncGenerator(fnObj, def, closure, homeObj, i.bindThisValue(this, strict), args, selfBind)
 		}
 		// A generator function returns a generator object; its body runs
 		// lazily on a dedicated goroutine (see makeGenerator).
 		if def.Generator && kind == kindNormal {
-			return i.makeGenerator(fnObj, def, closure, homeObj, i.bindThisValue(this, strict), args)
+			return i.makeGenerator(fnObj, def, closure, homeObj, i.bindThisValue(this, strict), args, selfBind)
 		}
 		// An async function returns a promise driven through the microtask
 		// queue (see asyncRun).
@@ -86,7 +87,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			if kind == kindNormal {
 				t = i.bindThisValue(this, strict)
 			}
-			return i.asyncRun(fnObj, def, closure, homeObj, t, args, kind == kindArrow)
+			return i.asyncRun(fnObj, def, closure, homeObj, t, args, kind == kindArrow, selfBind)
 		}
 		env := NewEnvironment(closure, true)
 		env.strict = strict
@@ -108,8 +109,12 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 				env.newTgt = Undef
 			}
 		}
-		// A named function expression can refer to itself by name.
-		if def.Name != nil && kind == kindNormal {
+		// A named function *expression* refers to itself through a fresh immutable
+		// binding of its own name (§15.2.5). A function declaration does not: its
+		// name is a mutable binding in the enclosing scope, so the body reaches
+		// that binding and may reassign it (`function f(){ f = 1 }` — legal even in
+		// strict mode). selfBind is therefore true only for the FuncExpr path.
+		if selfBind && def.Name != nil && kind == kindNormal {
 			if _, exists := closure.vars[name]; !exists {
 				env.vars[name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
 			}

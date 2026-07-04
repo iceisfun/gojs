@@ -482,7 +482,7 @@ func (i *Interpreter) installClassMethod(ctx context.Context, cd *classData, tar
 		return err
 	}
 	fnExpr := m.Value.(*ast.FuncExpr)
-	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
+	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home, false)
 	// The function name follows SetFunctionName: a symbol key becomes "[desc]"
 	// (or "" for a descriptionless symbol), and an accessor takes a "get"/"set"
 	// prefix (§15.4.5 / §15.4.4 MethodDefinitionEvaluation).
@@ -515,7 +515,7 @@ func (i *Interpreter) installPrivateMember(ctx context.Context, target, home *Ob
 	name := priv.Name
 	pn := classEnv.resolvePrivate(name)
 	fnExpr := m.Value.(*ast.FuncExpr)
-	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
+	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home, false)
 	setFuncNameProp(fn, name)
 	switch m.Kind {
 	case ast.PropGet:
@@ -568,7 +568,7 @@ func (i *Interpreter) buildSharedPrivate(ctx context.Context, cd *classData, cla
 		}
 		pn := classEnv.resolvePrivate(priv.Name)
 		fnExpr := m.Value.(*ast.FuncExpr)
-		fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
+		fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home, false)
 		setFuncNameProp(fn, priv.Name)
 		if cd.sharedPrivate == nil {
 			cd.sharedPrivate = make(map[*PrivateName]*Property)

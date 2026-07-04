@@ -13,6 +13,12 @@ import "github.com/iceisfun/gojs/token"
 type Ident struct {
 	NamePos token.Pos
 	Name    string
+	// Parenthesized marks an identifier that appeared as the immediate content of
+	// a ParenthesizedExpression, e.g. `(fn)`. Such an operand is a
+	// CoverParenthesizedExpression, whose IsIdentifierRef is false (§13.2.5.2), so
+	// it does not trigger NamedEvaluation: `(fn) = function(){}` leaves the
+	// function anonymous even though a bare `fn = function(){}` would name it.
+	Parenthesized bool
 }
 
 func (e *Ident) Pos() token.Pos { return e.NamePos }

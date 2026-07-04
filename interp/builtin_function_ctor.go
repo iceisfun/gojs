@@ -103,6 +103,6 @@ func (i *Interpreter) createDynamicFunctionKind(ctx context.Context, kind dynFun
 	}
 
 	// The dynamic function closes over the global environment.
-	fn := i.makeFunction(decl.Def, i.globalEnv, kindNormal, nil)
+	fn := i.makeFunction(decl.Def, i.globalEnv, kindNormal, nil, false)
 	return fn, nil
 }

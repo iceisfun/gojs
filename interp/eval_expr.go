@@ -62,7 +62,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 	case *ast.ObjectLit:
 		return i.evalObjectLit(ctx, e, env)
 	case *ast.FuncExpr:
-		fn := i.makeFunction(e.Def, env, kindNormal, nil)
+		fn := i.makeFunction(e.Def, env, kindNormal, nil, true)
 		if e.Def.Name == nil && name != "" {
 			setFuncNameProp(fn, name)
 		}
@@ -165,7 +165,7 @@ func (i *Interpreter) evalArrow(ctx context.Context, e *ast.ArrowFunc, env *Envi
 		body = &ast.BlockStmt{Body: []ast.Stmt{&ast.ReturnStmt{Argument: bodyExpr}}}
 	}
 	def.Body = body
-	fn := i.makeFunction(def, env, kindArrow, nil)
+	fn := i.makeFunction(def, env, kindArrow, nil, false)
 	if name != "" {
 		setFuncNameProp(fn, name)
 	}
@@ -367,7 +367,7 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 				return nil, err
 			}
 			fnExpr := prop.Value.(*ast.FuncExpr)
-			fn := i.makeFunction(fnExpr.Def, env, kindNormal, obj)
+			fn := i.makeFunction(fnExpr.Def, env, kindNormal, obj, false)
 			prefix := "get"
 			if prop.Kind == ast.PropSet {
 				prefix = "set"
@@ -400,7 +400,7 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 		var val Value
 		if prop.Method {
 			fnExpr := prop.Value.(*ast.FuncExpr)
-			m := i.makeFunction(fnExpr.Def, env, kindNormal, obj)
+			m := i.makeFunction(fnExpr.Def, env, kindNormal, obj, false)
 			i.setFuncName(m, key, "")
 			val = m
 		} else {

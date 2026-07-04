@@ -760,7 +760,13 @@ func (p *parser) checkSimpleAssignmentTarget(expr ast.Expr) {
 	}
 	switch e := expr.(type) {
 	case *ast.Ident:
-		if p.strict && (e.Name == "eval" || e.Name == "arguments") {
+		// new.target has AssignmentTargetType invalid (§13.3.12.1), so `new.target
+		// = 1` — even covered as `(new.target) = 1` — is an early Syntax Error. The
+		// parser represents the meta-property as the Ident named "new.target",
+		// which no ordinary reference can be.
+		if e.Name == "new.target" {
+			p.earlyError(e.NamePos, "Invalid left-hand side in assignment")
+		} else if p.strict && (e.Name == "eval" || e.Name == "arguments") {
 			p.earlyError(e.NamePos, "Assignment to '"+e.Name+"' in strict mode")
 		}
 	case *ast.MemberExpr:
@@ -780,7 +786,12 @@ func (p *parser) checkSimpleAssignmentTarget(expr ast.Expr) {
 func (p *parser) checkAssignmentTarget(expr ast.Expr) {
 	switch e := expr.(type) {
 	case *ast.Ident:
-		if p.strict && (e.Name == "eval" || e.Name == "arguments") {
+		// new.target has AssignmentTargetType invalid (§13.3.12.1): rejected here
+		// so `new.target = 1` and its covered form `(new.target) = 1` are early
+		// Syntax Errors.
+		if e.Name == "new.target" {
+			p.earlyError(e.NamePos, "Invalid left-hand side in assignment")
+		} else if p.strict && (e.Name == "eval" || e.Name == "arguments") {
 			p.earlyError(e.NamePos, "Assignment to '"+e.Name+"' in strict mode")
 		}
 	case *ast.MemberExpr:

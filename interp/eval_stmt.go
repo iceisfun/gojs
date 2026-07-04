@@ -58,7 +58,7 @@ func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, e
 	for _, s := range stmts {
 		switch st := s.(type) {
 		case *ast.FuncDecl:
-			fn := i.makeFunction(st.Def, env, kindNormal, nil)
+			fn := i.makeFunction(st.Def, env, kindNormal, nil, false)
 			name := ""
 			if st.Def.Name != nil {
 				name = st.Def.Name.Name

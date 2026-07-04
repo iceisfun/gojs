@@ -81,7 +81,7 @@ type yieldMsg struct {
 // this. Because advance blocks the caller while the body runs and the body
 // blocks at each suspension point, only one goroutine touches interpreter state
 // at a time — cooperative coroutining, not parallelism.
-func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow bool) (*generatorState, func(resumeMsg) yieldMsg, error) {
+func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, arrow, selfBind bool) (*generatorState, func(resumeMsg) yieldMsg, error) {
 	gs := &generatorState{
 		resume:   make(chan resumeMsg),
 		out:      make(chan yieldMsg),
@@ -100,11 +100,12 @@ func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *E
 		}
 	}
 	env.gen = gs
-	// A named generator/async(-generator) function expression can refer to itself
-	// by name through an immutable binding in its body scope (mirroring the plain
-	// named-function-expression case in makeFunction). Methods (homeObj != nil) and
-	// arrows never create this binding.
-	if def.Name != nil && !arrow && homeObj == nil && fnObj != nil {
+	// A named generator/async(-generator) function *expression* can refer to
+	// itself by name through an immutable binding in its body scope (mirroring the
+	// plain named-function-expression case in makeFunction). A declaration reaches
+	// its mutable enclosing-scope binding instead, so selfBind gates this. Methods
+	// (homeObj != nil) and arrows never create this binding.
+	if selfBind && def.Name != nil && !arrow && homeObj == nil && fnObj != nil {
 		if _, exists := closure.vars[def.Name.Name]; !exists {
 			env.vars[def.Name.Name] = &binding{value: fnObj, mutable: false, weakImmutable: true, initialized: true}
 		}
@@ -225,8 +226,8 @@ func generatorInstanceOf(this Value) *generatorInstance {
 // function returns a fresh generator (iterator) object without running the body.
 // The next/return/throw methods live on %GeneratorPrototype% (see initGenerator);
 // the object only carries the coroutine state in its internal slot.
-func (i *Interpreter) makeGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value) (Value, error) {
-	gs, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, false)
+func (i *Interpreter) makeGenerator(fnObj *Object, def *ast.FuncDef, closure *Environment, homeObj *Object, this Value, args []Value, selfBind bool) (Value, error) {
+	gs, advance, err := i.startCoroutine(fnObj, def, closure, homeObj, this, args, false, selfBind)
 	if err != nil {
 		return nil, err
 	}
