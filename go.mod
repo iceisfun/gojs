@@ -3,7 +3,7 @@ module github.com/iceisfun/gojs
 go 1.26
 
 require (
-	github.com/iceisfun/typescript v0.0.0-20260702211620-eca0364c8466
+	github.com/iceisfun/typescript v0.0.0-20260704200705-4ed3afb99463
 	golang.org/x/text v0.38.0
 )
 

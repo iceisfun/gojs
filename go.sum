@@ -1,7 +1,7 @@
 github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 h1:KZaTBSyshWX3MP5jukJcNSuXDQTO+rNpt0J564dX/eg=
 github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68/go.mod h1:tphK2c80bpPhMOI4v6bIc2xWywPfbqi1Z06+RcrMkDg=
-github.com/iceisfun/typescript v0.0.0-20260702211620-eca0364c8466 h1:Y9neaUFNBUDF9gQX4G9wU1TWdwTjGbdu7A9KXVvbdlU=
-github.com/iceisfun/typescript v0.0.0-20260702211620-eca0364c8466/go.mod h1:JW50knKXaJZsqbWsDN2Tp9FlvKw+gb/jXMU4sLEm8qo=
+github.com/iceisfun/typescript v0.0.0-20260704200705-4ed3afb99463 h1:vapV+Dt0Tpz0VMZ30qwyHB47YkRLC1o3u0CB71R0zwo=
+github.com/iceisfun/typescript v0.0.0-20260704200705-4ed3afb99463/go.mod h1:JW50knKXaJZsqbWsDN2Tp9FlvKw+gb/jXMU4sLEm8qo=
 github.com/klauspost/cpuid/v2 v2.2.10 h1:tBs3QSyvjDyFTq3uoc/9xFpCuOsJQFNPiAhYdw2skhE=
 github.com/klauspost/cpuid/v2 v2.2.10/go.mod h1:hqwkgyIinND0mEev00jJYCxPNVRVXFQeu1XKlok6oO0=
 github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
