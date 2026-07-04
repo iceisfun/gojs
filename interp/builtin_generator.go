@@ -596,15 +596,14 @@ func (i *Interpreter) evalYieldDelegateAsync(ctx context.Context, iterable Value
 		return ToBoolean(doneV), value, nil
 	}
 
-	// asyncYield performs AsyncGeneratorYield: await the value, then deliver it to
-	// the consumer, returning the resumption completion.
+	// asyncYield performs AsyncGeneratorYield(IteratorValue(innerResult)). Unlike a
+	// plain `yield`, it does NOT await the operand: in `yield*` only the inner
+	// iterator's *result object* is awaited (in step, below), and modern
+	// AsyncGeneratorYield (§27.6.3.5) no longer awaits its argument. So a value
+	// produced by a manually-implemented async iterator — e.g. a Promise — is
+	// re-yielded verbatim rather than unwrapped.
 	asyncYield := func(v Value) {
-		awaited, aerr := i.doAwait(gs, v)
-		if aerr != nil {
-			recVal, received = nil, aerr
-			return
-		}
-		recVal, received = i.doYield(gs, awaited)
+		recVal, received = i.doYield(gs, v)
 	}
 
 	for {
