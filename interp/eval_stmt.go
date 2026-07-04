@@ -65,7 +65,7 @@ func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, e
 			}
 			// A global-scope function declaration becomes a globalThis property.
 			if env == i.globalEnv {
-				i.defineGlobalFunction(name, fn)
+				i.defineGlobalFunction(name, fn, false)
 			} else {
 				env.vars[name] = &binding{value: fn, mutable: true, initialized: true}
 			}
@@ -99,18 +99,20 @@ func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, e
 // declarative environment.
 func (i *Interpreter) declareVarBinding(env *Environment, name string, v Value) {
 	if env == i.globalEnv {
-		i.defineGlobalVar(name, v)
+		i.defineGlobalVar(name, v, false)
 		return
 	}
 	env.declareVar(name, v)
 }
 
 // defineGlobalVar creates or updates a global `var`/function binding as a
-// property of the global object. Such properties are non-configurable (so
-// `delete x` is a no-op that returns false), writable, and enumerable. An
+// property of the global object (CreateGlobalVarBinding, §9.1.1.4.17). A
+// top-level script var is non-configurable (configurable=false, so `delete x`
+// is a no-op that returns false); a var introduced by eval is configurable
+// (configurable=true). Either way the property is writable and enumerable. An
 // existing property (a prior var, or a built-in) keeps its descriptor and only
 // takes the new value.
-func (i *Interpreter) defineGlobalVar(name string, v Value) {
+func (i *Interpreter) defineGlobalVar(name string, v Value, configurable bool) {
 	key := StrKey(name)
 	if p, ok := i.global.props[key]; ok {
 		if v != nil && !p.Accessor {
@@ -122,7 +124,7 @@ func (i *Interpreter) defineGlobalVar(name string, v Value) {
 	if v != nil {
 		init = v
 	}
-	i.global.defineOwn(key, &Property{Value: init, Writable: true, Enumerable: true, Configurable: false})
+	i.global.defineOwn(key, &Property{Value: init, Writable: true, Enumerable: true, Configurable: configurable})
 }
 
 // defineGlobalFunction implements CreateGlobalFunctionBinding (§9.1.1.4.18) for a
@@ -130,8 +132,10 @@ func (i *Interpreter) defineGlobalVar(name string, v Value) {
 // *configurable* existing property is redefined to a fresh {writable,
 // enumerable, non-configurable} data property; a non-configurable existing
 // property (a prior global function/var) keeps its descriptor and only takes the
-// new value. The name joins the global [[VarNames]] list.
-func (i *Interpreter) defineGlobalFunction(name string, fn Value) {
+// new value. The name joins the global [[VarNames]] list. configurable is the D
+// argument: false for a top-level script function declaration, true for one
+// introduced by eval.
+func (i *Interpreter) defineGlobalFunction(name string, fn Value, configurable bool) {
 	key := StrKey(name)
 	if p, ok := i.global.getOwn(key); ok && !p.Configurable {
 		if !p.Accessor {
@@ -139,7 +143,7 @@ func (i *Interpreter) defineGlobalFunction(name string, fn Value) {
 		}
 		return
 	}
-	i.global.defineOwn(key, &Property{Value: fn, Writable: true, Enumerable: true, Configurable: false})
+	i.global.defineOwn(key, &Property{Value: fn, Writable: true, Enumerable: true, Configurable: configurable})
 }
 
 // checkGlobalDeclarations performs the early-error phase of
@@ -460,7 +464,7 @@ func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *E
 				// Global-scope vars live on the global object; others assign
 				// into their pre-hoisted binding.
 				if env == i.globalEnv {
-					i.defineGlobalVar(name, v)
+					i.defineGlobalVar(name, v, false)
 				} else if b := env.lookup(name); b != nil {
 					b.value = v
 					b.initialized = true

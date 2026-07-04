@@ -123,8 +123,15 @@ func (i *Interpreter) evalDelete(ctx context.Context, operand ast.Expr, env *Env
 					return Bool(deleted), nil
 				}
 			}
-			if _, ok := e.vars[id.Name]; ok {
-				// A declarative binding cannot be deleted.
+			if b, ok := e.vars[id.Name]; ok {
+				// A declarative binding is normally not deletable. The exception is
+				// a binding a non-strict direct eval created in the caller's
+				// VariableEnvironment (CreateMutableBinding with D = true): `delete`
+				// succeeds and removes it (§9.1.1.1.7 DeleteBinding).
+				if b.deletable {
+					delete(e.vars, id.Name)
+					return True, nil
+				}
 				return False, nil
 			}
 		}

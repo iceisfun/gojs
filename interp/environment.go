@@ -116,6 +116,11 @@ type binding struct {
 	// share the environment's binding map, so GlobalDeclarationInstantiation's
 	// HasLexicalDeclaration relies on this flag to tell them apart.
 	lexical bool
+	// deletable marks a binding created with CreateMutableBinding(N, true) — the
+	// var/function bindings a non-strict direct eval adds to the caller's
+	// (non-global) VariableEnvironment. Unlike ordinary declarative bindings, a
+	// `delete` of such a name succeeds and removes it (§19.2.1.3 / §9.1.1.1.7).
+	deletable bool
 }
 
 // NewEnvironment creates a child environment of parent. If fnScope is true, the
@@ -261,4 +266,17 @@ func (e *Environment) newTarget() Value {
 		}
 	}
 	return Undef
+}
+
+// hasNewTargetBinding reports whether a new.target meta-property is in scope: an
+// enclosing ordinary function (or method/constructor) establishes one, while
+// arrow functions are transparent to it and the global scope has none. A direct
+// eval may contain `new.target` only when this is true (§15.7.1 early error).
+func (e *Environment) hasNewTargetBinding() bool {
+	for env := e; env != nil; env = env.parent {
+		if env.newTgt != nil {
+			return true
+		}
+	}
+	return false
 }
