@@ -176,6 +176,12 @@ type Object struct {
 	// builtin_typedarray.go.
 	typedArray *typedArrayData
 
+	// namespace is non-nil for a Module Namespace exotic object (§10.4.6). When
+	// set, string keys name live module exports served from the module's scope,
+	// symbol keys (only @@toStringTag) are ordinary, and the essential internal
+	// methods take their exotic forms — see module_namespace.go.
+	namespace *nsExotic
+
 	// private holds ECMAScript private class elements (#fields, #methods, and
 	// private accessors), keyed by PrivateName identity. These are not ordinary
 	// properties: they are invisible to property enumeration, [[Get]]/[[Set]],
@@ -331,6 +337,23 @@ func (o *Object) denseCopy() []Value {
 // getOwn returns the own-property descriptor for key, synthesizing descriptors
 // for array elements and array length on demand.
 func (o *Object) getOwn(key PropertyKey) (*Property, bool) {
+	// A Module Namespace exotic object serves each string export as a data
+	// property whose live [[Value]] is read from the module scope (§10.4.6.5
+	// [[GetOwnProperty]]): writable, enumerable, and NON-configurable. A string
+	// that is not an export is absent. Symbol keys (@@toStringTag) fall through
+	// to ordinary storage. The value read cannot report a TDZ error here (getOwn
+	// has no error return); getWithReceiver performs the error-capable read.
+	if o.namespace != nil && !key.IsSymbol() {
+		reader, ok := o.namespace.read[key.Str]
+		if !ok {
+			return nil, false
+		}
+		v, err := reader(context.Background())
+		if err != nil {
+			v = Undef
+		}
+		return &Property{Value: v, Writable: true, Enumerable: true, Configurable: false}, true
+	}
 	// A TypedArray serves canonical numeric index keys from its backing buffer
 	// (IntegerIndexed [[GetOwnProperty]], §10.4.5.1). An out-of-bounds index is
 	// absent; other keys fall through to ordinary storage.
@@ -495,6 +518,11 @@ func (o *Object) deleteOwn(key PropertyKey) bool {
 // order mandated by the spec: integer indices ascending, then other string keys
 // in insertion order. Symbol keys are excluded.
 func (o *Object) OwnKeys() []string {
+	// A Module Namespace exotic object exposes its string exports sorted by code
+	// unit (§10.4.6.11); its only symbol key (@@toStringTag) is excluded here.
+	if o.namespace != nil {
+		return append([]string(nil), o.namespace.names...)
+	}
 	// A TypedArray enumerates its in-bounds integer indices (0..length-1)
 	// ascending, then its ordinary non-index string keys in insertion order
 	// (§10.4.5.6). A canonical numeric index is never stored ordinarily.

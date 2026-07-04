@@ -26,6 +26,17 @@ func (o *Object) getWithReceiver(ctx context.Context, key PropertyKey, receiver 
 		if cur.proxy != nil {
 			return cur.proxy.get(ctx, key, receiver)
 		}
+		// A Module Namespace exotic object [[Get]] (§10.4.6.8): a string key names
+		// a live export read from the module scope (a TDZ access throws), and a
+		// non-export string is undefined. The namespace has a null prototype, so
+		// the lookup never continues past it. Symbol keys (@@toStringTag) use the
+		// ordinary own-property path below.
+		if cur.namespace != nil && !key.IsSymbol() {
+			if reader, ok := cur.namespace.read[key.Str]; ok {
+				return reader(ctx)
+			}
+			return Undef, nil
+		}
 		// A TypedArray serves a canonical numeric index directly and never
 		// consults the prototype chain for it (§10.4.5.4, TypedArrayGetElement
 		// returns undefined for an invalid index).
@@ -90,6 +101,12 @@ func (o *Object) Set(ctx context.Context, key PropertyKey, v Value) error {
 // with the Throw flag set, e.g. RegExpBuiltinExec assigning lastIndex — must
 // raise a TypeError; see (*Interpreter).setThrow.
 func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool, error) {
+	// A Module Namespace exotic object's [[Set]] (§10.4.6.9) unconditionally
+	// returns false: every export binding is read-only through the namespace, so
+	// a sloppy assignment is dropped and a strict one throws.
+	if o.namespace != nil {
+		return false, nil
+	}
 	// A TypedArray's canonical numeric index [[Set]] (§10.4.5.5) writes through
 	// TypedArraySetElement: the value is coerced (which may run user code) and
 	// stored only when the index is in bounds; the write always "succeeds".

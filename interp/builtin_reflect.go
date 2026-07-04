@@ -167,6 +167,10 @@ func (i *Interpreter) preventExtensionsV(ctx context.Context, o *Object) (bool, 
 // ordinarySet implements OrdinarySet / OrdinarySetWithOwnDescriptor (§10.1.9)
 // with an explicit receiver, returning whether the assignment took effect.
 func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKey, v, receiver Value) (bool, error) {
+	// A Module Namespace exotic object's [[Set]] (§10.4.6.9) always returns false.
+	if o.namespace != nil {
+		return false, nil
+	}
 	// A TypedArray's canonical numeric index [[Set]] (§10.4.5.5): when the
 	// receiver is the typed array itself, write the element; otherwise an
 	// out-of-bounds index is a silent success and an in-bounds index falls
@@ -288,6 +292,20 @@ func (i *Interpreter) ordinarySetPrototypeOf(o *Object, proto Value) bool {
 // ascending order, then the remaining string keys in insertion order, then the
 // symbol keys in insertion order.
 func (o *Object) ownPropertyKeys() []PropertyKey {
+	// A Module Namespace exotic object lists its code-unit-sorted string exports
+	// first, then its symbol keys (@@toStringTag) — §10.4.6.11.
+	if o.namespace != nil {
+		out := make([]PropertyKey, 0, len(o.namespace.names)+len(o.keys))
+		for _, n := range o.namespace.names {
+			out = append(out, StrKey(n))
+		}
+		for _, k := range o.keys {
+			if k.IsSymbol() {
+				out = append(out, k)
+			}
+		}
+		return out
+	}
 	out := make([]PropertyKey, 0, len(o.keys)+1)
 	for _, name := range o.OwnKeys() {
 		out = append(out, StrKey(name))

@@ -65,6 +65,14 @@ var unsupportedFeatures = map[string]bool{
 	// immutable-arraybuffer (ArrayBuffer.prototype.transferToImmutable) is a
 	// separate proposal gojs does not implement; skip its tests rather than fail.
 	"immutable-arraybuffer": true,
+	// import-defer (import.defer(...)) and source-phase-imports (import.source(...))
+	// are separate TC39 proposals with their own import.* syntax gojs does not
+	// parse; skip their tests rather than fail on the SyntaxError.
+	"import-defer": true, "source-phase-imports": true,
+	// import-attributes (import(x, {with:{...}})) requires a host module-type
+	// system to honor and validate attributes; gojs evaluates the options
+	// argument but does not implement attributes, so skip like import-assertions.
+	"import-attributes": true,
 }
 
 // ParseMeta extracts the frontmatter metadata from a test's source.

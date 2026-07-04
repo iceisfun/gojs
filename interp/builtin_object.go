@@ -869,6 +869,12 @@ func (i *Interpreter) applyDescriptor(ctx context.Context, o *Object, key Proper
 // value/writable, or a non-callable getter/setter) — a ToPropertyDescriptor
 // failure that throws even for Reflect.defineProperty — yields a non-nil error.
 func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
+	// A Module Namespace exotic object's [[DefineOwnProperty]] (§10.4.6.7): a
+	// string export accepts only a redefinition that leaves its fixed attributes
+	// unchanged (and its value equal); symbol keys are ordinary.
+	if o.namespace != nil && !key.IsSymbol() {
+		return i.namespaceDefineOwn(ctx, o, key, desc)
+	}
 	// A TypedArray's canonical numeric index [[DefineOwnProperty]] (§10.4.5.3):
 	// only a {writable, enumerable, configurable} data descriptor for a valid
 	// index is accepted, and its value is written through TypedArraySetElement.

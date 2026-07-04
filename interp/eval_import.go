@@ -105,21 +105,8 @@ func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier strin
 		}
 	}
 
-	// Build the namespace object with a live accessor for each export.
-	ns := i.NewPlainObject()
-	for _, ex := range exports {
-		local := ex.local
-		getter := i.newNativeFunc("get "+ex.exported, 0, func(gctx context.Context, _ Value, _ []Value) (Value, error) {
-			if b := env.lookup(local); b != nil {
-				if !b.initialized {
-					return nil, i.throwError(gctx, "ReferenceError", "Cannot access '"+local+"' before initialization")
-				}
-				return b.value, nil
-			}
-			return Undef, nil
-		})
-		ns.DefineAccessor(ex.exported, getter, nil, true)
-	}
+	// Build the Module Namespace exotic object over the export bindings.
+	ns := i.newModuleNamespace(exports, env)
 	i.moduleNamespaces[id] = ns
 	return ns, nil
 }
