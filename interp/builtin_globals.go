@@ -26,7 +26,13 @@ func (i *Interpreter) initGlobals() {
 		}
 		radix := 0
 		if !IsUndefined(arg(args, 1)) {
-			radix, _ = i.argInt(ctx, args, 1)
+			// §19.2.5 step: R = ToInt32(radix). ToNumber runs first and any
+			// side-effect error (e.g. a throwing valueOf) must propagate.
+			f, err := i.argNum(ctx, args, 1)
+			if err != nil {
+				return nil, err
+			}
+			radix = int(ToInt32(f))
 		}
 		return Number(parseIntImpl(s, radix)), nil
 	})
