@@ -192,19 +192,61 @@ func (i *Interpreter) bindObjectPattern(ctx context.Context, pat *ast.ObjectLit,
 			return err
 		}
 		taken[key] = true
-		v, err := i.getProperty(ctx, obj, key)
-		if err != nil {
-			return err
-		}
 		targetExpr := prop.Value
 		if targetExpr == nil {
 			targetExpr = prop.Key
+		}
+		// KeyedBindingInitialization for a SingleNameBinding resolves the target
+		// binding (§8.6.2 step 2, ResolveBinding) BEFORE reading the value from
+		// the source (step 3, GetV). Inside a `with`, ResolveBinding consults the
+		// object environment record's [[HasProperty]] (a Proxy has trap), so the
+		// trap must fire before the source property is read. Nested-pattern
+		// targets have no such pre-resolution. Gated on an enclosing `with` since
+		// that is the only context where the resolution is observable.
+		if envHasWith(env) {
+			if name, ok := singleBindingName(targetExpr); ok {
+				if _, err := i.identWithBase(ctx, name, env); err != nil {
+					return err
+				}
+			}
+		}
+		v, err := i.getProperty(ctx, obj, key)
+		if err != nil {
+			return err
 		}
 		if err := i.bindPattern(ctx, targetExpr, v, env, bind); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// envHasWith reports whether an object environment record (`with`) appears
+// anywhere in the environment chain.
+func envHasWith(env *Environment) bool {
+	for e := env; e != nil; e = e.parent {
+		if e.withObj != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// singleBindingName returns the identifier of a SingleNameBinding target — a
+// bare BindingIdentifier or `ident = Initializer` — and false for a nested
+// BindingPattern (which does not pre-resolve a binding reference).
+func singleBindingName(target ast.Expr) (string, bool) {
+	switch t := target.(type) {
+	case *ast.Ident:
+		return t.Name, true
+	case *ast.AssignPattern:
+		return singleBindingName(t.Target)
+	case *ast.AssignExpr:
+		if t.Op == token.ASSIGN {
+			return singleBindingName(t.Target)
+		}
+	}
+	return "", false
 }
 
 // propertyKeyName computes the string key of an object-pattern property.
