@@ -342,6 +342,23 @@ func (i *Interpreter) fieldInitThunk(cd *classData, self *Object) *Object {
 	})
 }
 
+// fieldFuncName returns the name a class field's anonymous function/class
+// initializer receives under NamedEvaluation (§15.7.10 ClassFieldDefinition-
+// Evaluation): a private field #x names it "#x", a symbol key names it "[desc]"
+// (or "" for a descriptionless symbol), and any other key uses the key string.
+func fieldFuncName(m *ast.ClassMember, key PropertyKey) string {
+	if priv, ok := m.Key.(*ast.PrivateIdent); ok {
+		return priv.Name
+	}
+	if key.IsSymbol() {
+		if key.Sym.Desc != "" {
+			return "[" + key.Sym.Desc + "]"
+		}
+		return ""
+	}
+	return key.Str
+}
+
 // initInstanceFields evaluates and assigns instance field initializers.
 func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *classData, env *Environment) error {
 	for _, m := range cd.fieldInits {
@@ -355,7 +372,7 @@ func (i *Interpreter) initInstanceFields(ctx context.Context, self *Object, cd *
 			fieldEnv.setThis(self)
 			fieldEnv.homeObj = cd.proto
 			fieldEnv.fieldInit = true
-			v, err = i.evalExpr(ctx, m.Value, fieldEnv)
+			v, err = i.evalExprWithName(ctx, m.Value, fieldEnv, fieldFuncName(m, key))
 			if err != nil {
 				return err
 			}
@@ -404,7 +421,7 @@ func (i *Interpreter) initStaticField(ctx context.Context, cd *classData, ctor *
 		env.setThis(ctor)
 		env.homeObj = ctor
 		env.fieldInit = true
-		v, err = i.evalExpr(ctx, m.Value, env)
+		v, err = i.evalExprWithName(ctx, m.Value, env, fieldFuncName(m, key))
 		if err != nil {
 			return err
 		}

@@ -14,7 +14,14 @@ import (
 // short-circuit sentinel (produced by ?. on a nullish base) into undefined,
 // which is the observable result at the top of a chain.
 func (i *Interpreter) evalExpr(ctx context.Context, expr ast.Expr, env *Environment) (Value, error) {
-	v, err := i.evalExprNamed(ctx, expr, env, "")
+	return i.evalExprWithName(ctx, expr, env, "")
+}
+
+// evalExprWithName is evalExpr with a NamedEvaluation name for anonymous
+// function/class initializers (e.g. a class field `x = () => {}` names the arrow
+// "x"). It preserves the optional-chaining short-circuit collapse to undefined.
+func (i *Interpreter) evalExprWithName(ctx context.Context, expr ast.Expr, env *Environment, name string) (Value, error) {
+	v, err := i.evalExprNamed(ctx, expr, env, name)
 	if err != nil {
 		return nil, err
 	}
