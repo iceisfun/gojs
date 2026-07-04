@@ -758,18 +758,12 @@ func (i *Interpreter) assignObjectPattern(ctx context.Context, pat *ast.ObjectLi
 	taken := map[PropertyKey]bool{}
 	for _, prop := range pat.Properties {
 		if prop.Kind == ast.PropSpread {
+			// BindingRestProperty / AssignmentRestProperty: CopyDataProperties
+			// (§7.3.25) with the already-bound names excluded, so the excluded
+			// keys' descriptors and getters are never touched.
 			rest := NewObject(i.objectProto)
-			for _, k := range obj.ownPropertyKeys() {
-				if taken[k] {
-					continue
-				}
-				if p, ok := obj.getOwn(k); ok && p.Enumerable {
-					v, gerr := i.getProperty(ctx, obj, k)
-					if gerr != nil {
-						return gerr
-					}
-					rest.defineOwn(k, &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
-				}
+			if err := i.copyDataProperties(ctx, rest, obj, taken); err != nil {
+				return err
 			}
 			if aerr := i.assignPattern(ctx, prop.Value, rest, env); aerr != nil {
 				return aerr

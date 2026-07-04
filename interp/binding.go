@@ -171,34 +171,28 @@ func (i *Interpreter) bindObjectPattern(ctx context.Context, pat *ast.ObjectLit,
 	if err != nil {
 		return err
 	}
-	taken := map[string]bool{}
+	taken := map[PropertyKey]bool{}
 	for _, prop := range pat.Properties {
 		if prop.Kind == ast.PropSpread {
-			// Rest: collect remaining own enumerable properties.
+			// BindingRestProperty: CopyDataProperties (§7.3.25) with the
+			// already-bound names excluded (symbol keys included), reading
+			// through the Proxy-aware internal-method helpers so an excluded
+			// key's descriptor and getter are never touched.
 			rest := NewObject(i.objectProto)
-			for _, name := range obj.OwnKeys() {
-				if taken[name] {
-					continue
-				}
-				if p, ok := obj.getOwn(StrKey(name)); ok && p.Enumerable {
-					v, err := obj.GetStr(ctx, name)
-					if err != nil {
-						return err
-					}
-					rest.SetData(name, v)
-				}
+			if err := i.copyDataProperties(ctx, rest, obj, taken); err != nil {
+				return err
 			}
 			if err := i.bindPattern(ctx, prop.Value, rest, env, bind); err != nil {
 				return err
 			}
 			continue
 		}
-		key, err := i.propertyKeyName(ctx, prop, env)
+		key, err := i.patternPropertyKey(ctx, prop, env)
 		if err != nil {
 			return err
 		}
 		taken[key] = true
-		v, err := obj.GetStr(ctx, key)
+		v, err := i.getProperty(ctx, obj, key)
 		if err != nil {
 			return err
 		}

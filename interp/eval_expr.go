@@ -339,20 +339,18 @@ func (i *Interpreter) evalObjectLit(ctx context.Context, e *ast.ObjectLit, env *
 			if err != nil {
 				return nil, err
 			}
-			if src, ok := v.(*Object); ok {
-				// CopyDataProperties (§7.3.25): copy every own *enumerable* property in
-				// [[OwnPropertyKeys]] order — symbol keys included — reading each value
-				// through [[Get]] so accessors run.
-				for _, key := range src.ownPropertyKeys() {
-					p, ok := src.getOwn(key)
-					if !ok || !p.Enumerable {
-						continue
-					}
-					pv, err := src.getWithReceiver(ctx, key, src)
-					if err != nil {
-						return nil, err
-					}
-					obj.writeData(key, pv)
+			// CopyDataProperties (§7.3.25): a null/undefined source contributes
+			// nothing; any other value is boxed via ToObject and each own
+			// enumerable property copied in [[OwnPropertyKeys]] order through the
+			// Proxy-aware internal-method helpers so a Proxy source's ownKeys,
+			// getOwnPropertyDescriptor, and get traps run in the correct order.
+			if !IsNullish(v) {
+				src, err := i.ToObject(ctx, v)
+				if err != nil {
+					return nil, err
+				}
+				if err := i.copyDataProperties(ctx, obj, src, nil); err != nil {
+					return nil, err
 				}
 			}
 			continue

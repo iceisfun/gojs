@@ -79,6 +79,39 @@ func (i *Interpreter) ownKeysV(ctx context.Context, o *Object) ([]PropertyKey, e
 	return o.ownPropertyKeys(), nil
 }
 
+// copyDataProperties implements CopyDataProperties (§7.3.25): it copies every
+// own enumerable property of source (a possibly-Proxy object) onto target, in
+// source's [[OwnPropertyKeys]] order. A key present in excluded is skipped
+// WITHOUT invoking [[GetOwnPropertyDescriptor]] or [[Get]] (object rest's
+// excluded names); for every other key the descriptor is fetched first and only
+// an existing, enumerable property is read via [[Get]] and created on target
+// (CreateDataPropertyOrThrow). All operations dispatch through the internal-
+// method helpers so a Proxy source's traps run in the right order.
+func (i *Interpreter) copyDataProperties(ctx context.Context, target, source *Object, excluded map[PropertyKey]bool) error {
+	keys, err := i.ownKeysV(ctx, source)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if excluded != nil && excluded[key] {
+			continue
+		}
+		desc, ok, err := i.getOwnPropertyV(ctx, source, key)
+		if err != nil {
+			return err
+		}
+		if !ok || !desc.Enumerable {
+			continue
+		}
+		v, err := i.getV(ctx, source, key, source)
+		if err != nil {
+			return err
+		}
+		target.writeData(key, v)
+	}
+	return nil
+}
+
 // definePropertyV performs [[DefineOwnProperty]] from a descriptor object,
 // returning whether it was applied.
 func (i *Interpreter) definePropertyV(ctx context.Context, o *Object, key PropertyKey, desc *Object) (bool, error) {
