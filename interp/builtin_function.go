@@ -155,6 +155,14 @@ func (i *Interpreter) initFunction() {
 		if !ok || !fn.IsCallable() {
 			return nil, i.throwError(ctx, "TypeError", "Function.prototype.toString called on non-callable")
 		}
+		// Function.prototype.toString (§20.2.3.5): if the function has source text
+		// (an ECMAScript function/method/arrow with a captured [[SourceText]]),
+		// return it verbatim. A bound function, a native function, or one built by
+		// the Function constructor has no captured source and uses the
+		// NativeFunction form `function name() { [native code] }`.
+		if fn.fn.source != "" && fn.fn.boundTarget == nil {
+			return String(fn.fn.source), nil
+		}
 		name := fn.fn.name
 		var b strings.Builder
 		b.WriteString("function ")

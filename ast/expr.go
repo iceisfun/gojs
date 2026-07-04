@@ -396,6 +396,9 @@ type ArrowFunc struct {
 	Async      bool
 	Expression bool // true when Body is an expression (concise body)
 	Strict     bool // strict-mode code (own directive or lexically nested in strict code)
+	// Source is the exact source text of the arrow function, returned by
+	// Function.prototype.toString ([[SourceText]], §20.2.3.5).
+	Source string
 }
 
 func (e *ArrowFunc) Pos() token.Pos { return e.Start }

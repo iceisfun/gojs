@@ -52,11 +52,12 @@ func (p *parser) parseStmt() ast.Stmt {
 			return p.parseVarDecl()
 		}
 	case token.FUNCTION:
-		return p.parseFunctionDecl(false)
+		return p.parseFunctionDecl(false, p.cur().Pos)
 	case token.ASYNC:
 		if p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore {
+			start := p.cur().Pos
 			p.next() // async
-			return p.parseFunctionDecl(true)
+			return p.parseFunctionDecl(true, start)
 		}
 	case token.CLASS:
 		return p.parseClassDecl()
@@ -180,10 +181,11 @@ func (p *parser) parseExport() ast.Stmt {
 		es.Default = true
 		switch {
 		case p.at(token.FUNCTION):
-			es.Decl = p.parseDefaultFunctionDecl(false)
+			es.Decl = p.parseDefaultFunctionDecl(false, p.cur().Pos)
 		case p.at(token.ASYNC) && p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore:
+			start := p.cur().Pos
 			p.next() // async
-			es.Decl = p.parseDefaultFunctionDecl(true)
+			es.Decl = p.parseDefaultFunctionDecl(true, start)
 		case p.at(token.CLASS):
 			es.Decl = p.parseDefaultClassDecl()
 		default:
@@ -234,10 +236,11 @@ func (p *parser) parseExport() ast.Stmt {
 	case p.at(token.VAR), p.at(token.CONST), p.at(token.LET):
 		es.Decl = p.parseVarDecl()
 	case p.at(token.FUNCTION):
-		es.Decl = p.parseFunctionDecl(false)
+		es.Decl = p.parseFunctionDecl(false, p.cur().Pos)
 	case p.at(token.ASYNC) && p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore:
+		start := p.cur().Pos
 		p.next() // async
-		es.Decl = p.parseFunctionDecl(true)
+		es.Decl = p.parseFunctionDecl(true, start)
 	case p.at(token.CLASS):
 		es.Decl = p.parseClassDecl()
 	default:

@@ -172,7 +172,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 	}
 
 	length := countParams(def.Params)
-	fnObj.fn = &functionData{call: call, name: name, length: length, realm: i}
+	fnObj.fn = &functionData{call: call, name: name, length: length, realm: i, source: def.Source}
 	setFuncLength(fnObj, length)
 	setFuncNameProp(fnObj, name)
 

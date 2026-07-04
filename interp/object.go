@@ -113,6 +113,11 @@ type functionData struct {
 	name      string
 	length    int  // declared parameter count (arity)
 	ctor      bool // whether the function can be used with `new`
+	// source is the [[SourceText]] returned by Function.prototype.toString
+	// (§20.2.3.5) — the exact text of the function/method/arrow definition. Empty
+	// for native functions and dynamically-built ones, which fall back to the
+	// NativeFunction form.
+	source string
 	// boundTarget is the [[BoundTargetFunction]] of a function produced by
 	// Function.prototype.bind; nil for every other callable. It lets
 	// OrdinaryHasInstance delegate `instanceof` to the wrapped target.

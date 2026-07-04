@@ -203,6 +203,10 @@ func (p *parser) tryParseArrow() ast.Expr {
 	if !arrow.Expression {
 		p.checkParamBodyLexicalConflict(arrow.Params, arrow.Body.(*ast.BlockStmt))
 	}
+	// [[SourceText]]: the whole ArrowFunction from its first token (the `async`
+	// keyword, the parameter `(`, or a single binding identifier) to the end of
+	// its ConciseBody.
+	arrow.Source = p.srcSlice(start.Pos, arrow.Body.End())
 	return arrow
 }
 
@@ -558,7 +562,7 @@ func (p *parser) checkFuncExprName(name string, pos token.Pos, generator, async 
 
 // parseFuncDef parses the star/name/params/body of a function following the
 // `function` keyword (already consumed by the caller position-wise via kwPos).
-func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
+func (p *parser) parseFuncDef(requireName, async bool, start token.Pos) *ast.FuncDef {
 	def := &ast.FuncDef{}
 	if p.accept(token.STAR) {
 		def.Generator = true
@@ -632,22 +636,29 @@ func (p *parser) parseFuncDef(requireName, async bool) *ast.FuncDef {
 	if def.Name != nil {
 		p.checkStrictBindingName(def.Name.Name, def.Name.NamePos, def.Strict)
 	}
+	// [[SourceText]]: the whole definition from its first token (the `async`
+	// keyword when present, else `function`) through the closing brace.
+	if def.Body != nil {
+		def.Source = p.srcSlice(start, def.Body.End())
+	}
 	return def
 }
 
 // parseFunctionExpr parses a function expression. The async flag is applied by
-// the caller for `async function`.
-func (p *parser) parseFunctionExpr(async bool) *ast.FuncExpr {
+// the caller for `async function`; start is the position of the first token of
+// the definition (the `async` keyword when async, else `function`).
+func (p *parser) parseFunctionExpr(async bool, start token.Pos) *ast.FuncExpr {
 	kw := p.expect(token.FUNCTION)
-	def := p.parseFuncDef(false, async)
+	def := p.parseFuncDef(false, async, start)
 	def.Async = async
 	return &ast.FuncExpr{Keyword: kw.Pos, Def: def}
 }
 
-// parseFunctionDecl parses a function declaration statement.
-func (p *parser) parseFunctionDecl(async bool) *ast.FuncDecl {
+// parseFunctionDecl parses a function declaration statement. start is the first
+// token of the definition (`async` when async, else `function`).
+func (p *parser) parseFunctionDecl(async bool, start token.Pos) *ast.FuncDecl {
 	kw := p.expect(token.FUNCTION)
-	def := p.parseFuncDef(true, async)
+	def := p.parseFuncDef(true, async, start)
 	def.Async = async
 	return &ast.FuncDecl{Keyword: kw.Pos, Def: def}
 }
@@ -655,9 +666,9 @@ func (p *parser) parseFunctionDecl(async bool) *ast.FuncDecl {
 // parseDefaultFunctionDecl parses the function declaration of an `export
 // default` clause, where the BindingIdentifier is optional: an anonymous
 // `export default function () {}` binds under the synthetic *default* name.
-func (p *parser) parseDefaultFunctionDecl(async bool) *ast.FuncDecl {
+func (p *parser) parseDefaultFunctionDecl(async bool, start token.Pos) *ast.FuncDecl {
 	kw := p.expect(token.FUNCTION)
-	def := p.parseFuncDef(false, async)
+	def := p.parseFuncDef(false, async, start)
 	def.Async = async
 	return &ast.FuncDecl{Keyword: kw.Pos, Def: def}
 }
@@ -791,7 +802,7 @@ func (p *parser) parseProperty() *ast.Property {
 			}
 			key, computed := p.parsePropertyKey()
 			p.checkNoPrivateKey(key)
-			fn := p.parseMethodBody(false, false)
+			fn := p.parseMethodBody(false, false, tk.Pos)
 			p.checkObjectAccessorArity(kind, key.Pos(), fn)
 			return &ast.Property{KeyPos: tk.Pos, Key: key, Value: fn, Kind: kind, Computed: computed, Method: true}
 		}
@@ -816,7 +827,7 @@ func (p *parser) parseProperty() *ast.Property {
 		// Method definition. A private name (#x) is never a valid method key in an
 		// object literal (ECMA-262 §13.2.5.1: PrivateBoundNames must be empty).
 		p.checkNoPrivateKey(key)
-		fn := p.parseMethodBody(async, generator)
+		fn := p.parseMethodBody(async, generator, tk.Pos)
 		return &ast.Property{KeyPos: tk.Pos, Key: key, Value: fn, Kind: ast.PropInit, Computed: computed, Method: true}
 	case p.accept(token.COLON):
 		// `async`/`*` are only valid as a method-definition prefix; before a
@@ -956,7 +967,7 @@ func (p *parser) parsePropertyKey() (ast.Expr, bool) {
 
 // parseMethodBody parses the parameter list and body of a concise method,
 // returning it as a function expression.
-func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
+func (p *parser) parseMethodBody(async, generator bool, defStart token.Pos) *ast.FuncExpr {
 	start := p.cur()
 	def := &ast.FuncDef{Async: async, Generator: generator}
 	// A method establishes its own arguments/super scope and yield/await
@@ -988,6 +999,13 @@ func (p *parser) parseMethodBody(async, generator bool) *ast.FuncExpr {
 	p.checkParamDuplicates(def.Params, true)
 	p.checkStrictParamNames(def.Params, def.Strict)
 	p.checkParamBodyLexicalConflict(def.Params, def.Body)
+	// [[SourceText]]: the whole MethodDefinition from its first token (an
+	// async/get/set/* prefix or the property name, whichever the caller saw
+	// first — defStart) through the closing brace. A method has no `function`
+	// keyword, so this is the key-to-body span rather than a keyword-led one.
+	if def.Body != nil {
+		def.Source = p.srcSlice(defStart, def.Body.End())
+	}
 	return &ast.FuncExpr{Keyword: start.Pos, Def: def}
 }
 
@@ -1288,6 +1306,11 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 	generator := false
 	kind := ast.PropInit
 
+	// A method's [[SourceText]] is the MethodDefinition, which excludes the
+	// `static` modifier (that belongs to ClassElement), so the span starts here —
+	// at the get/set/async/* prefix or the property name.
+	methodStart := p.cur().Pos
+
 	if (p.at(token.GET) || p.at(token.SET)) && !isMemberEnd(p.peek(1).Type) && p.peek(1).Type != token.STAR {
 		if p.at(token.SET) {
 			kind = ast.PropSet
@@ -1319,7 +1342,7 @@ func (p *parser) parseClassMember() *ast.ClassMember {
 			!m.Static && !async && !generator && kind == ast.PropInit {
 			p.pendingSuperCall = p.classHeritage
 		}
-		fn := p.parseMethodBody(async, generator)
+		fn := p.parseMethodBody(async, generator, methodStart)
 		m.Value = fn
 		return m
 	}

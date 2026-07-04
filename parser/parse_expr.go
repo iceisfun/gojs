@@ -609,17 +609,18 @@ func (p *parser) parsePrimary() ast.Expr {
 	case token.LBRACE:
 		return p.parseObjectLit()
 	case token.FUNCTION:
-		return p.parseFunctionExpr(false)
+		return p.parseFunctionExpr(false, p.cur().Pos)
 	case token.CLASS:
 		return p.parseClassExpr()
 	case token.ASYNC:
 		// `async function …` expression; a bare `async` is otherwise an
 		// identifier (arrow forms are handled earlier in parseAssignExpr).
 		if p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore {
+			start := p.cur().Pos
 			p.next() // async
 			// Parse with async=true so the parameter list is parsed in an async
 			// context (an AwaitExpression in the parameters is an early error).
-			return p.parseFunctionExpr(true)
+			return p.parseFunctionExpr(true, start)
 		}
 		p.next()
 		return &ast.Ident{NamePos: tk.Pos, Name: "async"}

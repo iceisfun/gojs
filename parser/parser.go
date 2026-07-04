@@ -38,8 +38,9 @@ const maxDepth = 1000
 
 // parser holds the state for a single parse.
 type parser struct {
-	source string
-	toks   []token.Token // fully buffered token stream (always ends with EOF)
+	source  string // source NAME (filename or "<eval>"), used for positions/Program.Source
+	srcText string // the actual source TEXT, used to slice function [[SourceText]]
+	toks    []token.Token // fully buffered token stream (always ends with EOF)
 	idx    int           // cursor into toks
 	err    *token.SyntaxError
 	depth  int // current recursion depth
@@ -284,7 +285,7 @@ func newParser(sourceName, source string) (*parser, error) {
 	// parseFunctionDecl / parseMethod); an arrow function inherits the enclosing
 	// setting, so a global arrow keeps them forbidden. Direct eval seeds the
 	// caller's context via ParseEval.
-	return &parser{source: sourceName, toks: toks, parenthesized: map[ast.Expr]bool{}}, nil
+	return &parser{source: sourceName, srcText: source, toks: toks, parenthesized: map[ast.Expr]bool{}}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +294,17 @@ func newParser(sourceName, source string) (*parser, error) {
 
 // cur returns the current token.
 func (p *parser) cur() token.Token { return p.toks[p.idx] }
+
+// srcSlice returns the exact source text spanning [start, end) by byte offset,
+// used to capture a function/method definition's [[SourceText]]. It returns ""
+// if the span is degenerate or out of range (so callers fall back to the
+// NativeFunction form rather than emitting a bogus slice).
+func (p *parser) srcSlice(start, end token.Pos) string {
+	if start.Offset < 0 || end.Offset > len(p.srcText) || start.Offset >= end.Offset {
+		return ""
+	}
+	return p.srcText[start.Offset:end.Offset]
+}
 
 // peek returns the token n positions ahead of the cursor (peek(0) == cur),
 // clamped to the trailing EOF.

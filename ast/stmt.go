@@ -23,6 +23,11 @@ type FuncDef struct {
 	// because it carries its own "use strict" directive prologue or because it
 	// is lexically nested in strict code (a strict script, module, or function).
 	Strict bool
+	// Source is the exact source text of the whole function/method definition —
+	// the [[SourceText]] returned by Function.prototype.toString (§20.2.3.5). It
+	// is empty for functions with no available source (the Function constructor
+	// builds its own), in which case toString uses the NativeFunction form.
+	Source string
 }
 
 // ClassDef holds the shared shape of a class declaration or expression.
