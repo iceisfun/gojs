@@ -106,14 +106,25 @@ func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *E
 	// self-binding is required here.
 	_ = selfBind
 	// Establish the arguments object before binding parameters so it is visible
-	// to default-value initializers (gojs uses an unmapped snapshot, so there is
-	// no aliasing to defer); a parameter named "arguments" shadows it, which
-	// bindParams applies by overwriting the binding below.
+	// to default-value initializers; a parameter named "arguments" shadows it,
+	// which bindParams applies by overwriting the binding below. A sloppy-mode
+	// generator/async function with a simple parameter list gets a *mapped*
+	// arguments object (§10.4.4.6) whose indices alias the named parameters, just
+	// like an ordinary function; the alias is wired after bindParams creates the
+	// parameter bindings. Otherwise an unmapped snapshot (§10.4.4.7) is used.
+	mapped := !arrow && !env.strict && simpleParameterList(def.Params)
+	var argsObj *Object
 	if !arrow {
-		env.vars["arguments"] = &binding{value: i.makeArguments(args, nil, env.strict || !simpleParameterList(def.Params)), mutable: true, initialized: true}
+		argsObj = i.makeArguments(args, fnObj, !mapped)
+		env.vars["arguments"] = &binding{value: argsObj, mutable: true, initialized: true}
 	}
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
 		return nil, nil, err
+	}
+	if mapped {
+		if b, ok := env.vars["arguments"]; ok && b.value == argsObj {
+			i.mapArguments(argsObj, def.Params, args, env)
+		}
 	}
 	// A non-simple parameter list gives the body its own VariableEnvironment
 	// (§10.2.11 step 27). It is a fresh function scope, so the generator state —
