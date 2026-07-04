@@ -9,3 +9,5 @@ reference
 # test262 conformance mining (memory-capped docker harness)
 run-test262.sh
 test262-logs/
+test262-logs-off/
+test262-logs-on/
