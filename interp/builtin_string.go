@@ -81,6 +81,11 @@ func (i *Interpreter) initString() {
 	proto := i.stringProto
 	proto.class = "String"
 	proto.primitive = String("")
+	// %String.prototype% is itself a String exotic object whose [[StringData]]
+	// is the empty string (§22.1.3), so it carries an own "length" data property
+	// of 0 with attributes { [[Writable]]: false, [[Enumerable]]: false,
+	// [[Configurable]]: false }. Instances get theirs from newStringObject.
+	proto.defineOwn(StrKey("length"), &Property{Value: Number(0), Writable: false, Enumerable: false, Configurable: false})
 
 	strOf := func(ctx context.Context, this Value) (string, error) {
 		switch x := this.(type) {
