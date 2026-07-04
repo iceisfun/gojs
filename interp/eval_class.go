@@ -461,7 +461,17 @@ func (i *Interpreter) installClassMethod(ctx context.Context, cd *classData, tar
 	}
 	fnExpr := m.Value.(*ast.FuncExpr)
 	fn := i.makeFunction(fnExpr.Def, classEnv, kindNormal, home)
-	setFuncNameProp(fn, keyName(key))
+	// The function name follows SetFunctionName: a symbol key becomes "[desc]"
+	// (or "" for a descriptionless symbol), and an accessor takes a "get"/"set"
+	// prefix (§15.4.5 / §15.4.4 MethodDefinitionEvaluation).
+	prefix := ""
+	switch m.Kind {
+	case ast.PropGet:
+		prefix = "get"
+	case ast.PropSet:
+		prefix = "set"
+	}
+	i.setFuncName(fn, key, prefix)
 	switch m.Kind {
 	case ast.PropGet:
 		i.mergeAccessor(target, key, fn, nil)
