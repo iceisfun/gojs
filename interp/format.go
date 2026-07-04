@@ -10,7 +10,7 @@ import (
 // top-level strings print verbatim, but strings nested inside objects/arrays are
 // quoted. seen guards against cyclic structures.
 func (i *Interpreter) inspect(ctx context.Context, v Value, seen map[*Object]bool, quoteStrings bool) (string, error) {
-	switch x := v.(type) {
+	switch x := flattenRope(v).(type) {
 	case Undefined:
 		return "undefined", nil
 	case Null:

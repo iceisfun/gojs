@@ -58,6 +58,7 @@ func isShortCircuit(v Value) bool { _, ok := v.(shortCircuit); return ok }
 // getProperty reads key from any value, boxing primitives to their prototype so
 // e.g. "abc".length and (5).toString() work. A nullish base throws.
 func (i *Interpreter) getProperty(ctx context.Context, base Value, key PropertyKey) (Value, error) {
+	base = flattenRope(base)
 	switch b := base.(type) {
 	case *Object:
 		return b.Get(ctx, key)

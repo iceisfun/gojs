@@ -284,26 +284,35 @@ func (i *Interpreter) applyBinary(ctx context.Context, op token.Type, left, righ
 // evalAdd implements the addition operator, which concatenates when either
 // operand is a string after ToPrimitive, and otherwise adds numerically.
 func (i *Interpreter) evalAdd(ctx context.Context, left, right Value) (Value, error) {
-	lp, err := i.ToPrimitive(ctx, left, "")
-	if err != nil {
-		return nil, err
+	// A string primitive (String or a rope) is its own ToPrimitive, so skip the
+	// call for it — that keeps a rope accumulator (`s += chunk`) from flattening
+	// on every step, which is the whole point of the rope.
+	lp := left
+	if !isStringish(lp) {
+		var err error
+		if lp, err = i.ToPrimitive(ctx, left, ""); err != nil {
+			return nil, err
+		}
 	}
-	rp, err := i.ToPrimitive(ctx, right, "")
-	if err != nil {
-		return nil, err
+	rp := right
+	if !isStringish(rp) {
+		var err error
+		if rp, err = i.ToPrimitive(ctx, right, ""); err != nil {
+			return nil, err
+		}
 	}
-	_, lStr := lp.(String)
-	_, rStr := rp.(String)
-	if lStr || rStr {
-		ls, err := i.ToStringV(ctx, lp)
+	if isStringish(lp) || isStringish(rp) {
+		// Coerce only the non-string side; a string operand stays lazy so the
+		// concatenation is an O(1) rope node rather than an O(n) copy.
+		lv, err := i.toStringish(ctx, lp)
 		if err != nil {
 			return nil, err
 		}
-		rs, err := i.ToStringV(ctx, rp)
+		rv, err := i.toStringish(ctx, rp)
 		if err != nil {
 			return nil, err
 		}
-		return String(ls + rs), nil
+		return concatStrings(lv, rv), nil
 	}
 	if lb, ok := lp.(*BigInt); ok {
 		if rb, ok := rp.(*BigInt); ok {
@@ -440,6 +449,7 @@ func (i *Interpreter) evalRelational(ctx context.Context, op token.Type, left, r
 // operand). It supports String/String, Number/Number, BigInt/BigInt, and mixed
 // BigInt–Number / BigInt–String comparisons.
 func (i *Interpreter) abstractLessThan(ctx context.Context, px, py Value) (bool, bool, error) {
+	px, py = flattenRope(px), flattenRope(py)
 	ls, lok := px.(String)
 	rs, rok := py.(String)
 	if lok && rok {

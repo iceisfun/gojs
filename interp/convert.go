@@ -19,7 +19,9 @@ func isPrimitive(v Value) bool {
 func (i *Interpreter) ToPrimitive(ctx context.Context, v Value, hint string) (Value, error) {
 	obj, ok := v.(*Object)
 	if !ok {
-		return v, nil
+		// A rope is a string primitive; flatten it so every ToPrimitive consumer
+		// (==, relational compare, template concat, ToPropertyKey, …) sees a String.
+		return flattenRope(v), nil
 	}
 	// Symbol.toPrimitive takes precedence when present. GetMethod performs a
 	// real [[Get]] so accessor properties run (and can propagate errors).
@@ -68,12 +70,28 @@ func (i *Interpreter) ToPrimitive(ctx context.Context, v Value, hint string) (Va
 	return nil, i.throwError(ctx, "TypeError", "Cannot convert object to primitive value")
 }
 
+// toStringish returns v unchanged when it is already a string primitive (a
+// String or a rope), otherwise ToStringV-coerces it to a String. It lets the +
+// operator keep a rope operand lazy instead of flattening it.
+func (i *Interpreter) toStringish(ctx context.Context, v Value) (Value, error) {
+	if isStringish(v) {
+		return v, nil
+	}
+	s, err := i.ToStringV(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	return String(s), nil
+}
+
 // ToStringV converts a value to a Go string per §7.1.17, reducing objects via
 // ToPrimitive with a string hint.
 func (i *Interpreter) ToStringV(ctx context.Context, v Value) (string, error) {
 	switch x := v.(type) {
 	case String:
 		return string(x), nil
+	case *strRope:
+		return x.build(), nil
 	case Undefined:
 		return "undefined", nil
 	case Null:
@@ -149,6 +167,8 @@ func (i *Interpreter) ToObject(ctx context.Context, v Value) (*Object, error) {
 		return x, nil
 	case String:
 		return i.newStringObject(x), nil
+	case *strRope:
+		return i.newStringObject(String(x.build())), nil
 	case Number:
 		o := NewObject(i.numberProto)
 		o.class = "Number"

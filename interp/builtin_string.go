@@ -86,6 +86,8 @@ func (i *Interpreter) initString() {
 		switch x := this.(type) {
 		case String:
 			return string(x), nil
+		case *strRope:
+			return x.build(), nil
 		case *Object:
 			if s, ok := x.primitive.(String); ok {
 				return string(s), nil
@@ -752,6 +754,8 @@ func (i *Interpreter) thisStringValue(ctx context.Context, this Value) (string, 
 	switch x := this.(type) {
 	case String:
 		return string(x), nil
+	case *strRope:
+		return x.build(), nil
 	case *Object:
 		if s, ok := x.primitive.(String); ok {
 			return string(s), nil

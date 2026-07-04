@@ -12,6 +12,7 @@ import (
 // strictEquals implements the Strict Equality Comparison (===, §7.2.16). No
 // coercion is performed.
 func strictEquals(a, b Value) bool {
+	a, b = flattenRope(a), flattenRope(b)
 	switch x := a.(type) {
 	case Undefined:
 		_, ok := b.(Undefined)
@@ -45,6 +46,7 @@ func strictEquals(a, b Value) bool {
 // sameValue implements the SameValue comparison (§7.2.10): like strict equality
 // but NaN equals NaN and +0 is distinct from -0. It backs Object.is.
 func sameValue(a, b Value) bool {
+	a, b = flattenRope(a), flattenRope(b)
 	if xa, ok := a.(Number); ok {
 		if xb, ok := b.(Number); ok {
 			fa, fb := float64(xa), float64(xb)
@@ -63,6 +65,7 @@ func sameValue(a, b Value) bool {
 // sameValueZero is strictEquals except that NaN is considered equal to NaN
 // (§7.2.11). It backs Array.prototype.includes and Map/Set keys.
 func sameValueZero(a, b Value) bool {
+	a, b = flattenRope(a), flattenRope(b)
 	if xa, ok := a.(Number); ok {
 		if xb, ok := b.(Number); ok {
 			fa, fb := float64(xa), float64(xb)
@@ -78,6 +81,7 @@ func sameValueZero(a, b Value) bool {
 // looseEquals implements the Abstract Equality Comparison (==, §7.2.15),
 // including type coercion (which may call user methods, hence ctx).
 func (i *Interpreter) looseEquals(ctx context.Context, a, b Value) (bool, error) {
+	a, b = flattenRope(a), flattenRope(b)
 	// Same type: defer to strict equality.
 	if sameTypeCategory(a, b) {
 		return strictEquals(a, b), nil
@@ -142,6 +146,7 @@ func (i *Interpreter) looseEquals(ctx context.Context, a, b Value) (bool, error)
 // sameTypeCategory reports whether a and b share the same loose-equality type
 // category (both numbers, both strings, both objects, ...).
 func sameTypeCategory(a, b Value) bool {
+	a, b = flattenRope(a), flattenRope(b)
 	switch a.(type) {
 	case Undefined:
 		_, ok := b.(Undefined)

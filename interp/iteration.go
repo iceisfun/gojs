@@ -83,7 +83,7 @@ func (i *Interpreter) defineCollectionIteratorNext(proto *Object, slotKey, label
 // iterate consumes an iterable, invoking fn for each produced value. It fast-
 // paths arrays and strings, and otherwise drives the Symbol.iterator protocol.
 func (i *Interpreter) iterate(ctx context.Context, iterable Value, fn func(Value) error) error {
-	switch v := iterable.(type) {
+	switch v := flattenRope(iterable).(type) {
 	case *Object:
 		if v.isArray {
 			// Snapshot length to mirror spec-ish behavior on mutation.
