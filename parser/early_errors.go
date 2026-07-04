@@ -23,6 +23,15 @@ import (
 // from constitutes a directive prologue containing a "use strict" directive. It
 // walks a leading sequence of string-literal statements (each optionally
 // terminated by a semicolon) without consuming input.
+// isUseStrictRaw reports whether a StringLiteral's raw source text (quotes
+// included) is exactly "use strict" or 'use strict' — the only two forms that
+// constitute a Use Strict Directive (§11.2.1). Any escape sequence or line
+// continuation changes the raw text and disqualifies it, even when the decoded
+// value is still "use strict".
+func isUseStrictRaw(raw string) bool {
+	return raw == `"use strict"` || raw == `'use strict'`
+}
+
 func (p *parser) scanUseStrict(from int) bool {
 	i := from
 	for i < len(p.toks) {
@@ -30,10 +39,13 @@ func (p *parser) scanUseStrict(from int) bool {
 		if t.Type != token.STRING {
 			return false
 		}
-		// A directive is a StringLiteral whose source text (ignoring the quotes)
-		// is exactly "use strict". Using the decoded literal is a close-enough
-		// approximation for our purposes.
-		if t.Literal == "use strict" {
+		// A Use Strict Directive is a StringLiteral whose raw source is exactly
+		// "use strict" or 'use strict' (§11.2.1): it may contain neither an
+		// EscapeSequence nor a LineContinuation, so 'use strict' and
+		// 'use str\<LineContinuation>ict' — whose decoded value is still
+		// "use strict" — are NOT directives. Compare the raw token text (which
+		// includes the quotes), not the cooked value.
+		if isUseStrictRaw(t.Raw) {
 			return true
 		}
 		i++

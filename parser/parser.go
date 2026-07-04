@@ -415,8 +415,12 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 		prog.Strict = true
 	}
 
-	// Directive prologue: a leading run of string-literal expression
-	// statements, one of which may be "use strict".
+	// Directive prologue: the LEADING run of string-literal expression
+	// statements (§11.2.1). A "use strict" directive is honored only while still
+	// in that prologue — a `"use strict"` appearing after any other statement
+	// (e.g. `var x=1; "use strict";`) is an ordinary expression statement and
+	// does NOT make the code strict.
+	inPrologue := true
 	for p.err == nil && !p.at(token.EOF) {
 		stmt := p.parseStmt()
 		if p.err != nil {
@@ -425,10 +429,19 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 		if stmt == nil {
 			continue
 		}
-		if es, ok := stmt.(*ast.ExprStmt); ok && es.Directive == "use strict" {
-			prog.Strict = true
-			// A strict script propagates into every nested function.
-			p.strict = true
+		if inPrologue {
+			if es, ok := stmt.(*ast.ExprStmt); ok {
+				if sl, isStr := es.X.(*ast.StringLit); isStr {
+					if isUseStrictRaw(sl.Raw) {
+						prog.Strict = true
+						// A strict script propagates into every nested function.
+						p.strict = true
+					}
+					prog.Body = append(prog.Body, stmt)
+					continue
+				}
+			}
+			inPrologue = false
 		}
 		prog.Body = append(prog.Body, stmt)
 	}
