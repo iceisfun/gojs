@@ -872,6 +872,14 @@ func (i *Interpreter) taToLocaleString(ctx context.Context, this Value, args []V
 			b = append(b, ',')
 		}
 		v := taGetIdx(td, k)
+		// len is captured once (before the loop), but a user toLocaleString may
+		// shrink a resizable buffer mid-iteration, making later original indices
+		// out of bounds. Get then returns undefined, and §23.2.3.32 step 7.c only
+		// invokes toLocaleString when the element is not undefined — the separator
+		// is still emitted, so the trailing slots render as empty strings.
+		if v == Value(Undef) {
+			continue
+		}
 		// Invoke(nextElement, "toLocaleString"): the element's own
 		// toLocaleString is called (Number/BigInt.prototype.toLocaleString for a
 		// numeric element), and any thrown value propagates.
