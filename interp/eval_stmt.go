@@ -550,6 +550,17 @@ func (i *Interpreter) evalReturn(ctx context.Context, s *ast.ReturnStmt, env *En
 			return nil, err
 		}
 		v = val
+		// `return Expression` in an async generator awaits the value (§13.10.1
+		// step 3, GetGeneratorKind() is async), which costs one microtask tick.
+		// A bare `return;` and an implicit fall-off return carry no expression and
+		// are not awaited.
+		if gs := env.generator(); gs != nil && gs.asyncGen {
+			awaited, err := i.doAwait(gs, v)
+			if err != nil {
+				return nil, err
+			}
+			v = awaited
+		}
 	}
 	return nil, &returnSignal{value: v}
 }
