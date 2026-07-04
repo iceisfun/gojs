@@ -136,26 +136,25 @@ func (i *Interpreter) iteratorClose(ctx context.Context, rec *iterRecord, pendin
 
 // getIteratorFlattenable implements GetIteratorFlattenable (§7.4.3).
 func (i *Interpreter) getIteratorFlattenable(ctx context.Context, obj Value, stringPrimitives bool) (*iterRecord, error) {
-	o, isObj := obj.(*Object)
-	if !isObj {
+	if _, isObj := obj.(*Object); !isObj {
 		if !stringPrimitives {
 			return nil, i.throwError(ctx, "TypeError", briefValue(obj)+" is not an object")
 		}
 		if _, isStr := obj.(String); !isStr {
 			return nil, i.throwError(ctx, "TypeError", briefValue(obj)+" is not an object")
 		}
-		// Box the string so its @@iterator can be looked up on String.prototype.
-		o = i.newStringObject(obj.(String))
+		// The string primitive is NOT boxed: its @@iterator is looked up (and
+		// called) with the primitive as receiver, so getters observe a String.
 	}
-	method, err := i.getMethod(ctx, o, i.symIterator)
+	method, err := i.getMethod(ctx, obj, i.symIterator)
 	if err != nil {
 		return nil, err
 	}
 	var iterator Value
 	if method == nil {
-		iterator = o
+		iterator = obj
 	} else {
-		it, err := method.fn.call(ctx, o, nil)
+		it, err := method.fn.call(ctx, obj, nil)
 		if err != nil {
 			return nil, err
 		}

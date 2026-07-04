@@ -303,7 +303,9 @@ func (i *Interpreter) getMethod(ctx context.Context, v Value, sym *Symbol) (*Obj
 		}
 		o = boxed
 	}
-	fn, err := o.Get(ctx, SymKey(sym))
+	// GetV binds the getter's `this` to the original value V, not the box, so a
+	// primitive (e.g. a String) receiver observes itself as a primitive.
+	fn, err := o.getWithReceiver(ctx, SymKey(sym), v)
 	if err != nil {
 		return nil, err
 	}
