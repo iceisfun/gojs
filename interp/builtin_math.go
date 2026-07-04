@@ -3,6 +3,7 @@ package interp
 import (
 	"context"
 	"math"
+	"math/big"
 	"math/bits"
 )
 
@@ -188,6 +189,84 @@ func (i *Interpreter) initMath() {
 		}
 		return Number(lowest), nil
 	})
+	// Math.sumPrecise (sec-math.sumprecise) returns the correctly-rounded
+	// (round-to-nearest, ties-to-even) sum of an iterable of Numbers, as if the
+	// addition were carried out with unbounded precision and rounded once to a
+	// binary64 at the end. Only Numbers are accepted — a non-Number element
+	// throws a TypeError with no coercion, and the iterator is closed.
+	i.defineMethod(m, "sumPrecise", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		var items Value = Undef
+		if len(args) > 0 {
+			items = args[0]
+		}
+		rec, err := i.getIterator(ctx, items)
+		if err != nil {
+			return nil, err
+		}
+
+		// Exact accumulation of the finite summands as a rational: float64 →
+		// big.Rat is exact, so the running total is exact and a single final
+		// rounding yields the correctly-rounded binary64 result.
+		sum := new(big.Rat)
+		term := new(big.Rat)
+		sawNaN := false
+		hasPosInf := false
+		hasNegInf := false
+		// allNegZero stays true only while every finite element seen is -0 (or
+		// there are none); that is the sole case whose exact-zero sum is -0.
+		allNegZero := true
+
+		for {
+			v, done, sErr := i.iteratorStepValue(ctx, rec)
+			if sErr != nil {
+				return nil, sErr
+			}
+			if done {
+				break
+			}
+			num, ok := v.(Number)
+			if !ok {
+				terr := i.throwError(ctx, "TypeError", "Math.sumPrecise: expected a Number")
+				return nil, i.iteratorClose(ctx, rec, terr)
+			}
+			f := float64(num)
+			switch {
+			case math.IsNaN(f):
+				sawNaN = true
+			case math.IsInf(f, 1):
+				hasPosInf = true
+			case math.IsInf(f, -1):
+				hasNegInf = true
+			default:
+				if !(f == 0 && math.Signbit(f)) {
+					allNegZero = false
+				}
+				if f != 0 {
+					sum.Add(sum, term.SetFloat64(f))
+				}
+			}
+		}
+
+		switch {
+		case sawNaN:
+			return Number(math.NaN()), nil
+		case hasPosInf && hasNegInf:
+			return Number(math.NaN()), nil
+		case hasPosInf:
+			return Number(math.Inf(1)), nil
+		case hasNegInf:
+			return Number(math.Inf(-1)), nil
+		}
+		if sum.Sign() == 0 {
+			if allNegZero {
+				return Number(math.Copysign(0, -1)), nil
+			}
+			return Number(0), nil
+		}
+		f, _ := sum.Float64()
+		return Number(f), nil
+	})
+
 	// Math.random uses a per-interpreter deterministic PRNG so that one
 	// interpreter's sequence does not depend on any other's.
 	i.defineMethod(m, "random", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
