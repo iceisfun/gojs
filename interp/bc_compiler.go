@@ -422,18 +422,26 @@ func (c *bcCompiler) call(ex *ast.CallExpr) {
 		c.fail()
 		return
 	}
+	// A super() call needs the derived-constructor machinery; delegate the whole
+	// call to the tree-walker (a bare SuperExpr is not a valid standalone value).
+	if _, ok := ex.Callee.(*ast.SuperExpr); ok {
+		c.emit(opEvalNode, c.code.nodeIndex(ex), 0)
+		return
+	}
 	// Method call: preserve `this` = the base object. Only a static, non-super,
-	// non-optional member callee is handled natively.
+	// non-optional member callee is handled natively. The method property is
+	// fetched (opMethod) BEFORE the arguments are evaluated, matching the spec
+	// order (GetValue of the callee reference precedes ArgumentListEvaluation).
 	if m, ok := ex.Callee.(*ast.MemberExpr); ok {
 		_, super := m.Object.(*ast.SuperExpr)
 		_, priv := m.Property.(*ast.PrivateIdent)
 		if !super && !priv && !m.Optional && !m.Computed {
 			c.expr(m.Object)
+			c.emit(opMethod, c.code.nameIndex(m.Property.(*ast.Ident).Name), 0)
 			for _, a := range ex.Arguments {
 				c.expr(a)
 			}
-			name := m.Property.(*ast.Ident).Name
-			c.emit(opCallMethod, c.code.nameIndex(name), int32(len(ex.Arguments)))
+			c.emit(opCall, int32(len(ex.Arguments)), 0)
 			return
 		}
 		c.emit(opEvalNode, c.code.nodeIndex(ex), 0)
@@ -498,7 +506,13 @@ func (c *bcCompiler) assign(ex *ast.AssignExpr, _ string) {
 	}
 	switch tgt := ex.Target.(type) {
 	case *ast.Ident:
-		c.exprNamed(ex.Value, tgt.Name)
+		// NamedEvaluation applies only to a bare identifier target, not a covered
+		// `(x) = fn` (§13.15.2), so suppress the name hint when parenthesized.
+		inferName := tgt.Name
+		if tgt.Parenthesized {
+			inferName = ""
+		}
+		c.exprNamed(ex.Value, inferName)
 		c.emit(opDup, 0, 0)
 		c.emit(opStoreName, c.code.nameIndex(tgt.Name), 0)
 	case *ast.MemberExpr:

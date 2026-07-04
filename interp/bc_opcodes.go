@@ -66,9 +66,9 @@ const (
 	opJumpIfNotNull // a=target; peek, jump when NOT null/undefined, else pop (??)
 
 	// Calls / construction.
-	opCall       // a=argc; stack: fn, this, arg0..argN-1 → push result
-	opCallMethod // a=name index, b=argc; stack: base, arg0.. → this=base, push result
-	opNew        // a=argc; stack: ctor, arg0.. → push result
+	opCall   // a=argc; stack: fn, this, arg0..argN-1 → push result
+	opMethod // a=name index; [base] → [fn=base.name, this=base] (fetch before args)
+	opNew    // a=argc; stack: ctor, arg0.. → push result
 
 	// Loops (runtime loop stack for break/continue + scope/stack restoration).
 	opEnterLoop // a=breakIP, b=contIP → push a loop record

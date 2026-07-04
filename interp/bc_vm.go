@@ -105,8 +105,19 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 			}
 			fr.push(v)
 		case opStoreName:
-			v := fr.pop()
-			if err := i.assignIdent(ctx, code.names[in.a], v, fr.env); err != nil {
+			// Assignment (not declaration): resolve the target reference and
+			// PutValue, so strict writes to an unresolved name throw ReferenceError,
+			// const reassignment throws TypeError, and a with/global record is
+			// honored — exactly as evalAssign's simple-identifier path. (In compiled
+			// code no with/eval can run between the RHS and this resolution — both
+			// force a fallback — so resolving here matches the spec's resolve-first
+			// ordering observably.)
+			value := fr.pop()
+			ref, err := i.resolveIdentRef(ctx, code.names[in.a], fr.env)
+			if err != nil {
+				return nil, err
+			}
+			if err := i.putRefValue(ctx, ref, value); err != nil {
 				return nil, err
 			}
 		case opTypeofName:
@@ -210,18 +221,14 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 				return nil, err
 			}
 			fr.push(v)
-		case opCallMethod:
-			args := fr.popN(int(in.b))
+		case opMethod:
 			base := fr.pop()
 			fn, err := i.getRefValue(ctx, &reference{kind: refProp, strict: fr.env.isStrict(), base: base, key: StrKey(code.names[in.a]), keyDone: true})
 			if err != nil {
 				return nil, err
 			}
-			v, err := i.call(ctx, fn, base, args)
-			if err != nil {
-				return nil, err
-			}
-			fr.push(v)
+			fr.push(fn)
+			fr.push(base)
 		case opNew:
 			args := fr.popN(int(in.a))
 			callee := fr.pop()

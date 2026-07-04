@@ -107,6 +107,17 @@ var bcDiffCases = []string{
 	`function f(){ return undefinedFn() } f()`,
 	`function f(){ null.prop = 1 } f()`,
 	`function f(){ const c=1; c=2 } f()`,
+
+	// regression: strict assignment to an undeclared name throws ReferenceError
+	`"use strict"; function f(){ undeclaredX = 1 } try { f() } catch(e){ e.name }`,
+	`"use strict"; function f(){ try { undeclaredX = 1; return "no" } catch(e){ return e.name } } f()`,
+	// regression: method callee property is fetched BEFORE arguments are evaluated
+	`function f(){ var log=0; var o={}; try { o.a.b(log=1) } catch(e){} return log } f()`,
+	`function f(){ var seq=[]; var o={m(){seq.push("m")}}; o.m(seq.push("arg")); return seq.join(",") } f()`,
+	// regression: super() reached from within an arrow inside a derived constructor
+	`class A{constructor(){this.x=1}} class B extends A{constructor(){ (()=>{ super() })(); this.y=2 }} function f(){ var b=new B(); return b.x+b.y } f()`,
+	// regression: parenthesized assignment target suppresses NamedEvaluation
+	`function f(){ var g; (g) = function(){}; return g.name } f()`,
 }
 
 func TestBytecodeDiff(t *testing.T) {

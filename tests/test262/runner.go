@@ -333,6 +333,12 @@ func runMode(path, src string, m Meta, mode string) Result {
 		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
 	}
+	// GOJS_T262_BYTECODE=1 forces the optional bytecode VM on for every test, so a
+	// conformance run doubles as a differential check of the VM against the
+	// tree-walker at scale (any construct the compiler declines falls back).
+	if os.Getenv("GOJS_T262_BYTECODE") != "" {
+		opts = append(opts, interp.WithBytecode())
+	}
 	// Dynamic import() tests reference sibling fixture modules by relative
 	// specifier; serve them from the test's own directory so import() can resolve
 	// and evaluate them. Gated on the feature tag so ordinary tests keep no
