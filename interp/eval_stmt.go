@@ -13,7 +13,14 @@ import (
 // the last value-producing statement (used by the REPL) and the first error or
 // control-flow signal.
 func (i *Interpreter) execStmts(ctx context.Context, stmts []ast.Stmt, env *Environment) (Value, error) {
-	var result Value = Undef
+	// result tracks the StatementList completion value with nil == empty
+	// (§14.2.2 UpdateEmpty). An empty list, or one whose statements all produce
+	// empty completions (declarations, an empty statement, an empty nested
+	// block), yields nil — NOT undefined — so an enclosing StatementList
+	// preserves a preceding non-empty value. Callers that must surface a JS
+	// value (eval/script, and the if/with/try constructs whose spec completion
+	// is UpdateEmpty(C, undefined)) map a nil result to undefined via orUndef.
+	var result Value = nil
 	for _, s := range stmts {
 		v, err := i.evalStmt(ctx, s, env)
 		// Preserve an abrupt completion's value (e.g. a switch that ends in a
@@ -374,10 +381,16 @@ func (i *Interpreter) evalWith(ctx context.Context, s *ast.WithStmt, env *Enviro
 	// A block body introduces its own inner declarative scope (child of the
 	// object environment record) so its lexical declarations shadow the
 	// with-object; a single-statement body runs directly in the object scope.
+	// WithStatement completion is UpdateEmpty(C, undefined) (§14.11.7): an empty
+	// body completion surfaces as undefined.
+	var v Value
 	if block, ok := s.Body.(*ast.BlockStmt); ok {
-		return i.evalBlock(ctx, block, scope)
+		v, err = i.evalBlock(ctx, block, scope)
+	} else {
+		v, err = i.evalStmt(ctx, s.Body, scope)
 	}
-	return i.evalStmt(ctx, s.Body, scope)
+	// UpdateEmpty(C, undefined) applies to normal and abrupt completions alike.
+	return orUndef(v), err
 }
 
 // withHasBinding implements the object environment record HasBinding
@@ -532,11 +545,19 @@ func (i *Interpreter) evalIf(ctx context.Context, s *ast.IfStmt, env *Environmen
 	if err != nil {
 		return nil, err
 	}
+	// IfStatement completion is UpdateEmpty(stmtCompletion, undefined)
+	// (§14.6.2), applied to normal AND abrupt completions: a taken branch that
+	// completes empty (e.g. `if(x){}` or `if(x) break;`, where the break carries
+	// an empty value) yields undefined, and an untaken if with no else yields
+	// undefined. orUndef maps an empty (nil) completion value to undefined while
+	// preserving the control-flow signal in err.
 	if ToBoolean(test) {
-		return i.evalStmt(ctx, s.Consequent, env)
+		v, err := i.evalStmt(ctx, s.Consequent, env)
+		return orUndef(v), err
 	}
 	if s.Alternate != nil {
-		return i.evalStmt(ctx, s.Alternate, env)
+		v, err := i.evalStmt(ctx, s.Alternate, env)
+		return orUndef(v), err
 	}
 	return Undef, nil
 }

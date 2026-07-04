@@ -119,7 +119,12 @@ func (inner *Interpreter) shadowRun(prog *ast.Program) (Value, error) {
 	if err := inner.evalDeclarationInstantiation(inner.ctx, prog.Body, varEnv, lexEnv, prog.Strict); err != nil {
 		return nil, err
 	}
-	return inner.execStmts(inner.ctx, prog.Body, lexEnv)
+	v, err := inner.execStmts(inner.ctx, prog.Body, lexEnv)
+	if err != nil {
+		return nil, err
+	}
+	// ShadowRealm.prototype.evaluate surfaces an empty completion as undefined.
+	return orUndef(v), nil
 }
 
 // wrapCrossRealmError converts an error raised in another realm into a TypeError

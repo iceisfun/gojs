@@ -63,7 +63,8 @@ func (i *Interpreter) evalProgram(ctx context.Context, prog *ast.Program) (Value
 	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	// ScriptEvaluation surfaces an empty completion value as undefined.
+	return orUndef(result), nil
 }
 
 // normalizeError converts internal control-flow signals that escaped to the top

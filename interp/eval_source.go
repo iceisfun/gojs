@@ -52,7 +52,12 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 	if err := i.evalDeclarationInstantiation(ctx, prog.Body, varEnv, lexEnv, prog.Strict); err != nil {
 		return nil, err
 	}
-	return i.execStmts(ctx, prog.Body, lexEnv)
+	v, err := i.execStmts(ctx, prog.Body, lexEnv)
+	if err != nil {
+		return nil, err
+	}
+	// PerformEval / ScriptEvaluation: an empty completion value is undefined.
+	return orUndef(v), nil
 }
 
 // directEval implements a direct call to eval (the callee is the identifier
@@ -123,7 +128,12 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 	if err := i.evalDeclarationInstantiation(ctx, prog.Body, varEnv, lexEnv, strict); err != nil {
 		return nil, err
 	}
-	return i.execStmts(ctx, prog.Body, lexEnv)
+	v, err := i.execStmts(ctx, prog.Body, lexEnv)
+	if err != nil {
+		return nil, err
+	}
+	// PerformEval / ScriptEvaluation: an empty completion value is undefined.
+	return orUndef(v), nil
 }
 
 // evalDeclarationInstantiation implements EvalDeclarationInstantiation

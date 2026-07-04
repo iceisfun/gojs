@@ -21,12 +21,17 @@ func (i *Interpreter) evalTry(ctx context.Context, s *ast.TryStmt, env *Environm
 
 	if s.Finalizer != nil {
 		finResult, finErr := i.evalBlock(ctx, s.Finalizer, env)
-		// If finally completes abruptly, it wins.
+		// If finally completes abruptly, it replaces the pending completion
+		// (§14.15.8 step 3), and UpdateEmpty(F, undefined) still applies.
 		if finErr != nil {
-			return finResult, finErr
+			return orUndef(finResult), finErr
 		}
 	}
-	return result, err
+	// TryStatement completion is UpdateEmpty(C, undefined) (§14.15.8), applied to
+	// normal AND abrupt completions: an empty completion value (an empty try/
+	// catch block, or an empty-valued break/continue out of it) surfaces as
+	// undefined; a non-empty accumulated value is preserved.
+	return orUndef(result), err
 }
 
 // evalCatch runs a catch clause, binding the caught value to its parameter.
