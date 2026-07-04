@@ -113,7 +113,7 @@ func (m *machine) step() bool {
 type prog struct {
 	entry     matcher
 	numGroups int
-	names     map[string]int
+	names     map[string][]int
 	flags     Flags
 	unicode   bool
 }

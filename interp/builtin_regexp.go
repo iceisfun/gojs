@@ -470,12 +470,11 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 	if len(names) > 0 {
 		groups := NewObject(nil)
 		for _, name := range orderedNames {
-			idx := names[name]
-			s, e := m[2*idx], m[2*idx+1]
-			if idx >= n || s < 0 {
+			idx, ok := participatingGroupIndex(m, n, names[name])
+			if !ok {
 				groups.SetData(name, Undef)
 			} else {
-				groups.SetData(name, String(jsregexp.FromUnits(units[s:e])))
+				groups.SetData(name, String(jsregexp.FromUnits(units[m[2*idx]:m[2*idx+1]])))
 			}
 		}
 		arr.SetData("groups", groups)
@@ -501,8 +500,8 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 		if len(names) > 0 {
 			ig := NewObject(nil)
 			for _, name := range orderedNames {
-				idx := names[name]
-				if idx >= n {
+				idx, ok := participatingGroupIndex(m, n, names[name])
+				if !ok {
 					ig.SetData(name, Undef)
 				} else {
 					ig.SetData(name, pair(m[2*idx], m[2*idx+1]))
@@ -520,7 +519,7 @@ func (i *Interpreter) submatchToArray(re reEngine, units []uint16, m []int) *Obj
 // orderedGroupNames returns the named-capture names sorted by capture index, so
 // the exec result's `groups` object enumerates in source (left-to-right) order
 // rather than the nondeterministic order of the underlying map (§22.2.7.2).
-func orderedGroupNames(names map[string]int) []string {
+func orderedGroupNames(names map[string][]int) []string {
 	if len(names) == 0 {
 		return nil
 	}
@@ -528,8 +527,33 @@ func orderedGroupNames(names map[string]int) []string {
 	for name := range names {
 		out = append(out, name)
 	}
-	sort.Slice(out, func(a, b int) bool { return names[out[a]] < names[out[b]] })
+	sort.Slice(out, func(a, b int) bool { return minIndex(names[out[a]]) < minIndex(names[out[b]]) })
 	return out
+}
+
+// minIndex returns the smallest capture index among idxs (a name's first
+// left-to-right occurrence), used to order the `groups` object.
+func minIndex(idxs []int) int {
+	lo := idxs[0]
+	for _, i := range idxs[1:] {
+		if i < lo {
+			lo = i
+		}
+	}
+	return lo
+}
+
+// participatingGroupIndex returns the capture index for a (possibly duplicated)
+// group name that actually participated in match m — the one whose start offset
+// is set. Duplicate names are mutually exclusive, so at most one qualifies. ok is
+// false when none did (the name's value is `undefined`).
+func participatingGroupIndex(m []int, n int, idxs []int) (int, bool) {
+	for _, idx := range idxs {
+		if idx < n && m[2*idx] >= 0 {
+			return idx, true
+		}
+	}
+	return 0, false
 }
 
 // stringSplitString implements String.prototype.split with a string separator.

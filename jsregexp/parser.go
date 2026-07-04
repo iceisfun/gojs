@@ -13,7 +13,7 @@ type parser struct {
 	flags Flags
 
 	numGroups int            // total capturing groups (from the pre-scan)
-	names     map[string]int // group name -> capture index (from the pre-scan)
+	names     map[string][]int // group name -> capture indices (from the pre-scan)
 	capIndex  int            // capture counter during the main parse
 }
 
@@ -275,9 +275,14 @@ func (p *parser) parseGroup() (Node, bool) {
 		body := p.parseDisjunction()
 		p.expect(')')
 		name := ""
-		for n, i := range p.names {
-			if i == idx {
-				name = n
+		for n, idxs := range p.names {
+			for _, i := range idxs {
+				if i == idx {
+					name = n
+					break
+				}
+			}
+			if name != "" {
 				break
 			}
 		}
@@ -429,7 +434,9 @@ func (p *parser) readGroupName() string {
 				p.fail("invalid group name escape")
 			}
 			p.advance() // 'u'
-			c = p.readUnicodeEscapeValue()
+			// Group-name escapes always use the +UnicodeMode grammar (\u{...} and
+			// surrogate-pair combining) regardless of the pattern's u/v flag.
+			c = p.readUnicodeEscapeValueMode(true)
 		}
 		if first {
 			if !isIDStart(c) {

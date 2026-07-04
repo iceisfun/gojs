@@ -116,7 +116,16 @@ func (p *parser) parseCharacterEscape() rune {
 // surrogate pair; otherwise it requires exactly four hex digits and falls back
 // to the identity escape 'u' in Annex B.
 func (p *parser) readUnicodeEscapeValue() rune {
-	if p.flags.UnicodeMode() && p.peek() == '{' {
+	return p.readUnicodeEscapeValueMode(p.flags.UnicodeMode())
+}
+
+// readUnicodeEscapeValueMode decodes a \u escape body (the 'u' already consumed).
+// unicode selects the +UnicodeMode grammar (the \u{...} code-point form and
+// surrogate-pair combining). Pattern escapes pass the actual u/v flag; group
+// names (RegExpIdentifierName) always pass true — RegExpIdentifierStart uses
+// RegExpUnicodeEscapeSequence[+UnicodeMode] regardless of the pattern's flags.
+func (p *parser) readUnicodeEscapeValueMode(unicode bool) rune {
+	if unicode && p.peek() == '{' {
 		p.advance() // '{'
 		start := p.pos
 		v := 0
@@ -133,13 +142,13 @@ func (p *parser) readUnicodeEscapeValue() rune {
 		return rune(v)
 	}
 	if !p.has4Hex() {
-		if p.flags.UnicodeMode() {
+		if unicode {
 			p.fail("invalid Unicode escape")
 		}
 		return 'u'
 	}
 	hi := p.read4Hex()
-	if p.flags.UnicodeMode() && hi >= 0xD800 && hi <= 0xDBFF && p.peek() == '\\' && p.peekAt(1) == 'u' {
+	if unicode && hi >= 0xD800 && hi <= 0xDBFF && p.peek() == '\\' && p.peekAt(1) == 'u' {
 		save := p.pos
 		p.advance() // '\'
 		p.advance() // 'u'

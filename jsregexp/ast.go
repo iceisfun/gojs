@@ -14,7 +14,7 @@ type Node interface{ isNode() }
 type Pattern struct {
 	Body       Node
 	GroupCount int
-	GroupNames map[string]int
+	GroupNames map[string][]int // name -> every capture index with that name (ES2025 duplicates)
 	Flags      Flags
 }
 

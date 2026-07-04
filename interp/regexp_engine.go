@@ -21,7 +21,9 @@ type reEngine interface {
 	FindSubmatchIndex(ctx context.Context, units []uint16, start int) ([]int, error)
 	Source() string
 	Flags() jsregexp.Flags
-	GroupNames() map[string]int
+	// GroupNames maps each named capture to the capture indices carrying that
+	// name; a name has more than one index only with ES2025 duplicate names.
+	GroupNames() map[string][]int
 }
 
 // compileRegExp compiles a pattern/flags pair with the interpreter's configured
@@ -40,7 +42,7 @@ type re2Engine struct {
 	re     *regexp.Regexp
 	source string
 	flags  jsregexp.Flags
-	names  map[string]int
+	names  map[string][]int
 }
 
 func compileRE2(pattern, flags string) (reEngine, error) {
@@ -71,10 +73,10 @@ func compileRE2(pattern, flags string) (reEngine, error) {
 		// with the conformant prefix the RegExp constructor expects.
 		return nil, fmt.Errorf("Invalid regular expression: %s", re2Reason(err))
 	}
-	names := map[string]int{}
+	names := map[string][]int{}
 	for idx, n := range re.SubexpNames() {
 		if n != "" {
-			names[n] = idx
+			names[n] = append(names[n], idx)
 		}
 	}
 	return &re2Engine{re: re, source: pattern, flags: f, names: names}, nil
@@ -92,7 +94,7 @@ func re2Reason(err error) string {
 
 func (e *re2Engine) Source() string             { return e.source }
 func (e *re2Engine) Flags() jsregexp.Flags      { return e.flags }
-func (e *re2Engine) GroupNames() map[string]int { return e.names }
+func (e *re2Engine) GroupNames() map[string][]int { return e.names }
 
 // FindSubmatchIndex runs RE2 and maps its byte offsets back to code-unit
 // offsets. RE2 is linear-time, so it needs no step budget; ctx is not consulted

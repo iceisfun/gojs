@@ -11,7 +11,7 @@ import "unicode/utf16"
 
 type compiler struct {
 	flags Flags
-	names map[string]int
+	names map[string][]int
 	ic    bool // ignoreCase
 	ml    bool // multiline
 	da    bool // dotAll
@@ -87,11 +87,11 @@ func (c *compiler) node(n Node) (matcher, error) {
 		return c.backref(t.Index), nil
 
 	case *NamedBackRef:
-		idx, ok := c.names[t.Name]
-		if !ok {
+		idxs, ok := c.names[t.Name]
+		if !ok || len(idxs) == 0 {
 			return nil, &SyntaxError{Msg: "reference to undefined named group " + t.Name, Pos: -1}
 		}
-		return c.backref(idx), nil
+		return c.namedBackref(idxs), nil
 
 	case *Lookaround:
 		return c.lookaround(t)
@@ -480,8 +480,30 @@ func (c *compiler) capture(cap *Capture) (matcher, error) {
 	}, nil
 }
 
+// backref matches the text captured by a single group.
 func (c *compiler) backref(index int) matcher {
 	i2, i2p1 := 2*index, 2*index+1
+	return c.refMatcher(func(m *machine) (int, int) { return m.caps[i2], m.caps[i2p1] })
+}
+
+// namedBackref matches \k<name> where name may be an ES2025 duplicate spanning
+// several mutually exclusive alternatives. It resolves at match time to the one
+// occurrence that participated (a group's start is -1 until it matches); if none
+// did, the reference behaves as an unmatched group and matches the empty string.
+func (c *compiler) namedBackref(indices []int) matcher {
+	return c.refMatcher(func(m *machine) (int, int) {
+		for _, idx := range indices {
+			if s := m.caps[2*idx]; s >= 0 {
+				return s, m.caps[2*idx+1]
+			}
+		}
+		return -1, -1
+	})
+}
+
+// refMatcher builds a backreference matcher over a capture span resolved at
+// match time by resolve (returning start<0 for an unmatched reference).
+func (c *compiler) refMatcher(resolve func(m *machine) (int, int)) matcher {
 	ic := c.ic
 	u := c.u
 	back := c.back
@@ -489,7 +511,7 @@ func (c *compiler) backref(index int) matcher {
 		if m.err != nil || !m.step() {
 			return false
 		}
-		s, e := m.caps[i2], m.caps[i2p1]
+		s, e := resolve(m)
 		if s < 0 || e < 0 {
 			return k(sp) // an unmatched group backreference matches the empty string
 		}

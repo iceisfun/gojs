@@ -57,7 +57,7 @@ func (re *Regexp) NumSubexp() int { return re.pattern.GroupCount }
 
 // GroupNames returns the name→index map for named capturing groups (empty when
 // there are none). The returned map must not be mutated.
-func (re *Regexp) GroupNames() map[string]int { return re.pattern.GroupNames }
+func (re *Regexp) GroupNames() map[string][]int { return re.pattern.GroupNames }
 
 // AST exposes the parsed pattern tree, primarily for tests and tooling.
 func (re *Regexp) AST() *Pattern { return re.pattern }

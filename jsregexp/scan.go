@@ -5,8 +5,8 @@ package jsregexp
 // parse because numeric and named backreferences may refer to groups that
 // appear later in the source. It only needs paren structure, so it skips escaped
 // characters and character-class interiors (where '(' is a literal).
-func scanGroups(src []rune) (int, map[string]int, error) {
-	names := map[string]int{}
+func scanGroups(src []rune) (int, map[string][]int, error) {
+	names := map[string][]int{}
 	count := 0
 	inClass := false
 	for i := 0; i < len(src); {
@@ -30,11 +30,10 @@ func scanGroups(src []rune) (int, map[string]int, error) {
 					if !ok {
 						return 0, nil, errAt(i, "invalid capture group name")
 					}
-					// Keep the first occurrence's index so a name duplicated
-					// across alternatives (ES2025) enumerates in source order.
-					if _, dup := names[name]; !dup {
-						names[name] = count
-					}
+					// Record every occurrence's index; a name duplicated across
+					// alternatives (ES2025) has several, and \k<name> / .groups
+					// resolve to whichever one participated in the match.
+					names[name] = append(names[name], count)
 					i = end
 					continue
 				}
@@ -68,6 +67,16 @@ func scanGroupName(src []rune, i int) (string, int, bool) {
 				r, ni, ok := scanUnicodeEscape(src, i+2)
 				if !ok {
 					return "", 0, false
+				}
+				// Combine a \uHHHH high surrogate with a following \uHHHH low
+				// surrogate into the astral code point they denote, so an escaped
+				// group name matches the raw astral one (must agree with the main
+				// parser's readGroupName).
+				if r >= 0xD800 && r <= 0xDBFF && ni+1 < len(src) && src[ni] == '\\' && src[ni+1] == 'u' {
+					if lo, ni2, ok2 := scanUnicodeEscape(src, ni+2); ok2 && lo >= 0xDC00 && lo <= 0xDFFF {
+						r = (r-0xD800)<<10 + (lo - 0xDC00) + 0x10000
+						ni = ni2
+					}
 				}
 				name = append(name, r)
 				i = ni
