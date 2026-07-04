@@ -148,6 +148,10 @@ var bcDiffCases = []string{
 	`function f(){ return arguments.length; var arguments } f(1,2,3)`,
 	`function f(arguments){ return arguments } f(7)`,                      // param named arguments shadows object
 	`function f(){ return arguments.length } f(1,2,3,4)`,                  // bare arguments ⇒ name mode
+	// regression: duplicate param, last occurrence wins even with no argument
+	`function f(x,a,b,x){ return x } f(1,2)`,                              // → undefined (last x unset)
+	`function f(x,a,b,x){ return x } f(1,2,3,4)`,                          // → 4 (last x set)
+	`function f(y,y){ return y } f(1,2)`,                                  // → 2
 }
 
 func TestBytecodeDiff(t *testing.T) {

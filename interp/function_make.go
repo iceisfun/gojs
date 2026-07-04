@@ -621,10 +621,14 @@ func (i *Interpreter) runFunctionBodyBCSlots(ctx context.Context, name string, c
 		locals[j] = Undef // var hoisting: every slot starts undefined
 	}
 	// Bind parameters by position; a duplicated name's later position wins because
-	// paramSlots maps both positions to the same slot.
+	// paramSlots maps both positions to the same slot. Bind UNCONDITIONALLY (undef
+	// when the caller supplied no argument) so that for `function f(x,a,b,x)` the
+	// last x with no argument overrides an earlier x that did receive one.
 	for pos, slot := range code.paramSlots {
 		if pos < len(args) {
 			locals[slot] = args[pos]
+		} else {
+			locals[slot] = Undef
 		}
 	}
 	return i.execCode(ctx, code, env, locals)
