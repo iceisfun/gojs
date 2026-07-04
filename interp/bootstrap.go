@@ -71,6 +71,7 @@ func (i *Interpreter) bootstrap() {
 	i.initArrayBuffer()
 	i.initDataView()
 	i.initTypedArray()
+	i.initAtomics()
 	i.initPromise()
 	i.initAsyncGenerator()
 	i.initAsyncFromSyncIterator()
