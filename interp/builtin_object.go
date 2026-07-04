@@ -1214,9 +1214,12 @@ func (i *Interpreter) arrayDefineLengthAttrs(ctx context.Context, o *Object, des
 	}
 
 	oldLen := o.ArrayLen()
-	// Shrinking a non-writable length is rejected (ArraySetLength step 12); a
-	// value that leaves length unchanged is a no-op regardless of writability.
-	if int(*newLen) < oldLen && o.lengthNonWritable {
+	// Any change to length's value while it is non-writable is rejected: growing
+	// routes through OrdinaryDefineOwnProperty (ArraySetLength step 10), which
+	// refuses to change a non-writable data property's value, and shrinking is
+	// rejected by ArraySetLength step 12. A value that leaves length unchanged is
+	// a no-op regardless of writability.
+	if int(*newLen) != oldLen && o.lengthNonWritable {
 		return false, nil
 	}
 	// Apply the new length. Growing past the dense limit records a sparse tail
