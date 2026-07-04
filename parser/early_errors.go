@@ -546,15 +546,19 @@ func (p *parser) checkForDeclaration(vd *ast.VarDecl) {
 	p.checkBindingPattern(target)
 }
 
-// checkForBodyVarConflict reports a SyntaxError when a lexical ForDeclaration
-// (for (let/const <target> in ...)) binds a name that also appears among the
-// VarDeclaredNames of the loop body (ECMA-262 13.7.5.1).
+// checkForBodyVarConflict reports a SyntaxError when a lexical for-head
+// declaration binds a name that also appears among the VarDeclaredNames of the
+// loop body. This covers both the for-in/of ForDeclaration (ECMA-262 §14.7.5.1)
+// and the C-style for LexicalDeclaration (§14.7.4.1); the latter may bind
+// several names (for (let x, y; …)), so every declarator is scanned.
 func (p *parser) checkForBodyVarConflict(head *ast.VarDecl, body ast.Stmt) {
 	if head == nil || (head.Kind != token.LET && head.Kind != token.CONST) || len(head.Decls) == 0 {
 		return
 	}
 	bound := map[string]bool{}
-	p.collectBindingNames(head.Decls[0].Target, func(name string, _ token.Pos) { bound[name] = true })
+	for _, d := range head.Decls {
+		p.collectBindingNames(d.Target, func(name string, _ token.Pos) { bound[name] = true })
+	}
 	if len(bound) == 0 {
 		return
 	}

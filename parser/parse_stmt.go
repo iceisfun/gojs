@@ -503,6 +503,11 @@ func (p *parser) parseFor() ast.Stmt {
 	}
 	p.expect(token.RPAREN)
 	stmt.Body = p.parseLoopBody()
+	// §14.7.4.1: a C-style for with a LexicalDeclaration head may not bind a name
+	// that also occurs in the body's VarDeclaredNames (for (let x;;){ var x }).
+	if vd, ok := initNode.(*ast.VarDecl); ok {
+		p.checkForBodyVarConflict(vd, stmt.Body)
+	}
 	return stmt
 }
 
