@@ -88,6 +88,16 @@ func propertyOfStrings(name string) (charSetV, bool) {
 			strs = append(strs, []rune{base, 0xFE0F, 0x20E3})
 		}
 		return charSetV{set: &runeSet{}, strings: strs}, true
+	case "RGI_Emoji":
+		var b setBuilder
+		for _, r := range rgiEmojiSingleRanges {
+			b.addRange(r[0], r[1])
+		}
+		strs := make([][]rune, 0, len(rgiEmojiSequences))
+		for _, s := range rgiEmojiSequences {
+			strs = append(strs, []rune(s))
+		}
+		return charSetV{set: b.build(), strings: strs}, true
 	}
 	return charSetV{}, false
 }
