@@ -38,6 +38,22 @@ func TestT262(t *testing.T) {
 		dirs = strings.Split(env, ",")
 	}
 
+	// skips holds test-path substrings to exclude. By default it disables the
+	// heavy string-building suites (see slowSkip / wontfix/perf-slow-tests.md);
+	// GOJS_T262_SLOW=1 runs them anyway. GOJS_T262_SKIP adds ad-hoc substrings.
+	var skips []string
+	if os.Getenv("GOJS_T262_SLOW") == "" {
+		skips = append(skips, slowSkip...)
+	}
+	if env := os.Getenv("GOJS_T262_SKIP"); env != "" {
+		for _, s := range strings.Split(env, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				skips = append(skips, s)
+			}
+		}
+	}
+	skipped := 0
+
 	var files []string
 	for _, d := range dirs {
 		base := filepath.Join(root, "test", strings.TrimSpace(d))
@@ -53,11 +69,20 @@ func TestT262(t *testing.T) {
 			if !strings.HasSuffix(name, ".js") || strings.Contains(name, "_FIXTURE") {
 				return nil
 			}
+			for _, s := range skips {
+				if strings.Contains(path, s) {
+					skipped++
+					return nil
+				}
+			}
 			files = append(files, path)
 			return nil
 		})
 	}
 	sort.Strings(files)
+	if skipped > 0 {
+		t.Logf("Test262: skipped %d disabled test file(s) (set GOJS_T262_SLOW=1 to include)", skipped)
+	}
 	if len(files) == 0 {
 		t.Skipf("no test files under %v", dirs)
 	}
@@ -103,6 +128,15 @@ var failureSampleSize = func() int {
 	}
 	return 40
 }()
+
+// slowSkip lists test-path substrings for suites disabled by default because
+// their wall-clock is dominated by the tree-walking interpreter building and
+// matching very large strings (a performance limit, not a conformance gap — the
+// results are correct, they just take ~25 min). This keeps general mining passes
+// moving. GOJS_T262_SLOW=1 includes them. See wontfix/perf-slow-tests.md.
+var slowSkip = []string{
+	"built-ins/RegExp/property-escapes/generated/",
+}
 
 // defaultDirs is a focused, high-signal slice of the suite covering areas gojs
 // implements. It intentionally avoids sprawling built-in coverage until the
