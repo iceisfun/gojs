@@ -814,7 +814,9 @@ func (i *Interpreter) resolveSuperCall(ctx context.Context, env *Environment) (V
 				}
 			}
 		}
-		return Undef, nil
+		// A SuperCall evaluates to the newly bound `this` (§13.3.7.1 step 8 returns
+		// the result of BindThisValue), so `x = super()` observes the new object.
+		return self, nil
 	})
 	return caller, Undef, nil
 }

@@ -1836,7 +1836,7 @@ func (i *Interpreter) newArrayIterator(ctx context.Context, this Value, kind arr
 	if err != nil {
 		return nil, err
 	}
-	if o.isArray && o.proxy == nil {
+	if o.isArray && o.proxy == nil && !o.hasDeoptIndex() {
 		idx := 0
 		done := false
 		return i.newArrayIteratorObj(func(ctx context.Context) (Value, bool, error) {

@@ -719,7 +719,15 @@ func (i *Interpreter) evalInstanceof(ctx context.Context, left, right Value) (Va
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "Right-hand side of 'instanceof' is not callable")
 	}
-	if hasInstance, ok := i.methodBySymbol(ctor, i.symHasInstance); ok {
+	// InstanceofOperator (§13.10.2): GetMethod(C, @@hasInstance) runs BEFORE the
+	// IsCallable(C) fallback, and it uses [[Get]] — so a @@hasInstance defined as
+	// an accessor is honored and a throwing getter propagates its error (rather
+	// than being masked by a "not callable" TypeError).
+	hasInstance, err := i.getMethod(ctx, ctor, i.symHasInstance)
+	if err != nil {
+		return nil, err
+	}
+	if hasInstance != nil {
 		res, err := hasInstance.fn.call(ctx, ctor, []Value{left})
 		if err != nil {
 			return nil, err

@@ -325,6 +325,23 @@ func undefIfHole(v Value) Value {
 // undefined. The caller must ensure j is within range.
 func elemAt(o *Object, j int) Value { return undefIfHole(o.elems[j]) }
 
+// hasDeoptIndex reports whether the array has any canonical integer-index
+// property de-optimized into the ordinary props map (a redefined descriptor or
+// an accessor). Such an index shadows dense storage, so a consumer that reads
+// straight from elems (e.g. the fast array-iterator path) would miss it and
+// must fall back to [[Get]].
+func (o *Object) hasDeoptIndex() bool {
+	for k := range o.props {
+		if k.IsSymbol() {
+			continue
+		}
+		if _, ok := arrayIndex(k.Str); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // denseCopy returns a copy of the element slice with holes densified to
 // undefined, matching the [[Get]]-over-0..len behavior of the copying array
 // methods (toReversed, toSorted, toSpliced, with).
