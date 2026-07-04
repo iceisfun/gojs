@@ -4,20 +4,23 @@ import (
 	"context"
 	"math"
 	"math/big"
+	"sync"
+	"time"
 )
 
 // initAtomics installs the Atomics namespace object (§25.4).
 //
 // gojs runs a single agent — one VM has one thread of control — so the
 // read-modify-write operations are atomic by construction: nothing can
-// interleave between the read and the write within an agent. SharedArrayBuffer,
-// the cross-agent shared memory these operations exist to coordinate, is not
-// implemented, so Atomics.wait (which requires a shared buffer) always throws a
-// TypeError and Atomics.notify always reports zero woken agents. Every other
-// operation — add/sub/and/or/xor, exchange, compareExchange, load, store,
-// isLockFree and pause — is fully functional on an ordinary integer TypedArray,
-// which is the primitive a host would build cross-VM coordination on if it ever
-// shares a buffer between agents.
+// interleave between the read and the write within an agent. The
+// add/sub/and/or/xor, exchange, compareExchange, load, store, isLockFree and
+// pause operations are fully functional on any integer TypedArray (shared or
+// not). SharedArrayBuffer is implemented (Phase 1, single-agent): Atomics.wait,
+// waitAsync and notify recognise a shared buffer and use a waiter registry, but
+// with only one agent there is never another thread to issue a notify, so the
+// only outcomes are "not-equal", "timed-out" and zero woken. On a non-shared
+// buffer wait/waitAsync throw a TypeError and notify reports 0. See
+// atomicsDoWait for the Phase-1 blocking semantics.
 func (i *Interpreter) initAtomics() {
 	a := NewObject(i.objectProto)
 	a.class = "Atomics"
@@ -190,23 +193,50 @@ func (i *Interpreter) initAtomics() {
 		return Boolean(n == 1 || n == 2 || n == 4 || n == 8), nil
 	})
 
-	// wait(ta, index, value, timeout): only valid on an Int32Array/BigInt64Array
-	// over a SharedArrayBuffer. gojs has no shared buffers, so — after the same
-	// validation a conforming engine performs — this always throws a TypeError.
+	// wait(ta, index, value, timeout) — §25.4.11. Valid only on an Int32Array/
+	// BigInt64Array over a SharedArrayBuffer; a non-shared buffer throws a
+	// TypeError. On a shared buffer it performs a single-agent synchronous wait
+	// (see atomicsWaitSync for the Phase-1 blocking semantics).
 	i.defineMethod(a, "wait", 4, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if _, _, err := i.atomicAccess(ctx, args, true); err != nil {
-			return nil, err
-		}
-		return nil, i.throwError(ctx, "TypeError", "Atomics.wait cannot be used on a non-shared ArrayBuffer")
+		return i.atomicsDoWait(ctx, args, false)
 	})
 
-	// notify(ta, index, count): wake agents waiting on the location. With no
-	// shared memory there are never any waiters, so this reports 0.
+	// notify(ta, index, count) — §25.4.12. Wakes up to count agents waiting on
+	// the location, returning the number woken. A non-shared buffer has no
+	// waiters and reports 0.
 	i.defineMethod(a, "notify", 3, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		if _, _, err := i.atomicAccess(ctx, args, true); err != nil {
+		td, idx, err := i.atomicAccess(ctx, args, true)
+		if err != nil {
 			return nil, err
 		}
-		return Number(0), nil
+		count := -1 // undefined => +Infinity => "all"
+		if v := arg(args, 2); !IsUndefined(v) {
+			f, err := i.ToNumberV(ctx, v)
+			if err != nil {
+				return nil, err
+			}
+			c := integerOrInfinity(f)
+			if c < 0 {
+				c = 0
+			}
+			if !math.IsInf(c, 1) {
+				count = int(c)
+			}
+		}
+		ab, ok := arrayBufferOf(td.buffer)
+		if !ok || !ab.shared {
+			return Number(0), nil
+		}
+		return Number(float64(i.atomicsNotify(ab, idx, count))), nil
+	})
+
+	// waitAsync(ta, index, value, timeout) — §25.4.13. Like wait, but never
+	// blocks: it returns a result record { async, value }. When the element does
+	// not match, or the timeout is 0, it resolves synchronously
+	// (async:false, value:"not-equal"/"timed-out"); otherwise async:true with a
+	// Promise as value.
+	i.defineMethod(a, "waitAsync", 4, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		return i.atomicsDoWait(ctx, args, true)
 	})
 
 	// pause(N): a hint that the caller is in a spin-wait loop (§25.4.14). N, when
@@ -301,6 +331,237 @@ func (td *typedArrayData) numBits(f float64) uint64 {
 // bigBits returns the low 64 bits of v, the pattern setElementBig stores.
 func (td *typedArrayData) bigBits(v *big.Int) uint64 {
 	return bigIntToUint64(v)
+}
+
+// ---------------------------------------------------------------------------
+// Atomics.wait / notify / waitAsync — shared-buffer coordination
+// ---------------------------------------------------------------------------
+//
+// Phase 1 runs a single agent, so there is never another thread to issue the
+// notify that would wake a waiter. The machinery below is nonetheless a real
+// waiter registry (buffer+index -> waiters) so a future Phase 2 that spawns
+// worker agents can wake waiters correctly; in Phase 1 the only outcomes are
+// "not-equal" (value mismatch), "timed-out" (finite timeout elapsed, or a zero
+// timeout), and — from a notify with no registered waiter — zero woken.
+//
+// SIMPLIFICATION (Phase 1): a synchronous Atomics.wait with an *infinite*
+// timeout would block the agent's single goroutine forever (nothing can notify
+// it), i.e. a program-authored deadlock. We honour it literally (block on the
+// waiter channel) rather than silently returning; callers should pass a finite
+// timeout in a single-agent VM. A finite timeout blocks the goroutine only for
+// its duration and then returns "timed-out".
+
+// waiterKey identifies a wait location: a specific buffer and element index.
+type waiterKey struct {
+	ab  *arrayBufferData
+	idx int
+}
+
+// sabWaiter is a single parked waiter. notify closes ch (setting notified);
+// a timed-out or resolved waiter is removed from the list.
+type sabWaiter struct {
+	ch       chan struct{}
+	notified bool
+}
+
+// waiterList is the per-interpreter registry of parked waiters.
+type waiterList struct {
+	mu sync.Mutex
+	m  map[waiterKey][]*sabWaiter
+}
+
+func (i *Interpreter) waiters() *waiterList {
+	if i.sabWaiters == nil {
+		i.sabWaiters = &waiterList{m: map[waiterKey][]*sabWaiter{}}
+	}
+	return i.sabWaiters
+}
+
+func (reg *waiterList) add(key waiterKey, w *sabWaiter) {
+	reg.mu.Lock()
+	reg.m[key] = append(reg.m[key], w)
+	reg.mu.Unlock()
+}
+
+func (reg *waiterList) remove(key waiterKey, w *sabWaiter) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	list := reg.m[key]
+	for j, x := range list {
+		if x == w {
+			reg.m[key] = append(list[:j], list[j+1:]...)
+			break
+		}
+	}
+	if len(reg.m[key]) == 0 {
+		delete(reg.m, key)
+	}
+}
+
+// atomicsNotify wakes up to count waiters on (ab, idx), returning the number
+// woken. count < 0 means "all".
+func (i *Interpreter) atomicsNotify(ab *arrayBufferData, idx, count int) int {
+	reg := i.waiters()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	key := waiterKey{ab, idx}
+	list := reg.m[key]
+	n := 0
+	for len(list) > 0 && (count < 0 || n < count) {
+		w := list[0]
+		list = list[1:]
+		if !w.notified {
+			w.notified = true
+			close(w.ch)
+			n++
+		}
+	}
+	if len(list) == 0 {
+		delete(reg.m, key)
+	} else {
+		reg.m[key] = list
+	}
+	return n
+}
+
+// atomicsDoWait implements the shared body of Atomics.wait (async=false) and
+// Atomics.waitAsync (async=true). It validates the access, requires a shared
+// buffer, coerces the expected value and timeout, and either blocks (wait) or
+// returns a { async, value } result record (waitAsync).
+func (i *Interpreter) atomicsDoWait(ctx context.Context, args []Value, async bool) (Value, error) {
+	td, idx, err := i.atomicAccess(ctx, args, true)
+	if err != nil {
+		return nil, err
+	}
+	ab, ok := arrayBufferOf(td.buffer)
+	if !ok || !ab.shared {
+		name := "Atomics.wait"
+		if async {
+			name = "Atomics.waitAsync"
+		}
+		return nil, i.throwError(ctx, "TypeError", name+" cannot be used on a non-shared ArrayBuffer")
+	}
+
+	// Coerce the expected value in the element's domain (§25.4.3.11 / 25.4.3.12).
+	var expectedBig *big.Int
+	var expectedI32 int32
+	bigKind := taKinds[td.kind].bigInt
+	if bigKind {
+		bv, err := i.toBigInt(ctx, arg(args, 2))
+		if err != nil {
+			return nil, err
+		}
+		expectedBig = bv.(*BigInt).Int
+	} else {
+		f, err := i.ToNumberV(ctx, arg(args, 2))
+		if err != nil {
+			return nil, err
+		}
+		expectedI32 = ToInt32(f)
+	}
+
+	// Coerce the timeout (§25.4.3.13 ToTimeout): ToNumber, NaN -> +Infinity, then
+	// clamp to a non-negative value; the unit is milliseconds.
+	tf, err := i.ToNumberV(ctx, arg(args, 3))
+	if err != nil {
+		return nil, err
+	}
+	timeoutMs := tf
+	if math.IsNaN(timeoutMs) {
+		timeoutMs = math.Inf(1)
+	} else if timeoutMs < 0 {
+		timeoutMs = 0
+	}
+
+	// Re-validate the index (value/timeout coercion can run user code; a shared
+	// buffer never detaches and never shrinks, but a growable one can move idx
+	// back in bounds — validIndex is cheap insurance).
+	if _, okIdx := td.validIndex(float64(idx)); !okIdx {
+		return nil, i.throwError(ctx, "RangeError", "Atomics wait index is out of bounds")
+	}
+
+	// Compare the current element to the expected value.
+	matched := false
+	if bigKind {
+		cur := td.getElement(idx).(*BigInt)
+		matched = td.bigBits(cur.Int) == td.bigBits(expectedBig)
+	} else {
+		cur := int32(float64(td.getElement(idx).(Number)))
+		matched = cur == expectedI32
+	}
+
+	if async {
+		return i.atomicsWaitAsyncResult(ab, idx, matched, timeoutMs), nil
+	}
+	return String(i.atomicsWaitSync(ab, idx, matched, timeoutMs)), nil
+}
+
+// atomicsWaitSync performs the blocking wait for Atomics.wait, returning
+// "not-equal", "timed-out" or "ok".
+func (i *Interpreter) atomicsWaitSync(ab *arrayBufferData, idx int, matched bool, timeoutMs float64) string {
+	if !matched {
+		return "not-equal"
+	}
+	if timeoutMs == 0 {
+		return "timed-out"
+	}
+	key := waiterKey{ab, idx}
+	w := &sabWaiter{ch: make(chan struct{})}
+	i.waiters().add(key, w)
+
+	if math.IsInf(timeoutMs, 1) {
+		// No notifier exists in a single-agent VM; this blocks until a Phase-2
+		// agent notifies (or forever). Program-authored; honoured literally.
+		<-w.ch
+		return "ok"
+	}
+	t := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer t.Stop()
+	select {
+	case <-w.ch:
+		return "ok"
+	case <-t.C:
+		i.waiters().remove(key, w)
+		return "timed-out"
+	}
+}
+
+// atomicsWaitAsyncResult builds the { async, value } result record for
+// Atomics.waitAsync without ever blocking the agent.
+func (i *Interpreter) atomicsWaitAsyncResult(ab *arrayBufferData, idx int, matched bool, timeoutMs float64) Value {
+	res := NewObject(i.objectProto)
+	if !matched {
+		res.SetData("async", Boolean(false))
+		res.SetData("value", String("not-equal"))
+		return res
+	}
+	if timeoutMs == 0 {
+		res.SetData("async", Boolean(false))
+		res.SetData("value", String("timed-out"))
+		return res
+	}
+	// async:true — a genuine pending Promise. In Phase 1 there is no notifier;
+	// for a finite timeout we schedule a "timed-out" resolution on the event loop
+	// when a TimerProvider is available, otherwise the Promise stays pending
+	// (best-effort, as documented for Phase 1). An infinite timeout stays pending.
+	p, resolve, _ := i.newPromise()
+	key := waiterKey{ab, idx}
+	w := &sabWaiter{ch: make(chan struct{})}
+	i.waiters().add(key, w)
+	if !math.IsInf(timeoutMs, 1) && i.timer != nil {
+		i.loop.addTimer()
+		i.timer.AfterFunc(i.ctx, time.Duration(timeoutMs)*time.Millisecond, func() {
+			i.loop.pushMacro(func() error {
+				i.waiters().remove(key, w)
+				i.loop.removeTimer()
+				resolve(String("timed-out"))
+				return nil
+			})
+		})
+	}
+	res.SetData("async", Boolean(true))
+	res.SetData("value", p)
+	return res
 }
 
 // integerOrInfinity implements ToIntegerOrInfinity on an already-computed Number:

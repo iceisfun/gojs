@@ -147,6 +147,12 @@ func (i *Interpreter) DetachArrayBuffer(v Value) bool {
 	if !ok {
 		return false
 	}
+	// A SharedArrayBuffer's [[ArrayBufferData]] is never detachable
+	// (DetachArrayBuffer asserts a non-shared buffer, §25.1.3.5): its bytes may be
+	// aliased by views in other agents.
+	if ab.shared {
+		return false
+	}
 	ab.data = nil
 	ab.detached = true
 	return true

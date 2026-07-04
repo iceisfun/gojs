@@ -32,10 +32,34 @@ type arrayBufferData struct {
 	// detached mirrors [[ArrayBufferData]] being null.
 	detached bool
 	// resizable is true when the buffer was allocated with a maxByteLength
-	// (it then has an [[ArrayBufferMaxByteLength]] internal slot).
+	// (it then has an [[ArrayBufferMaxByteLength]] internal slot). For a shared
+	// buffer this models "growable".
 	resizable bool
 	// maxByteLength is [[ArrayBufferMaxByteLength]] for resizable buffers.
 	maxByteLength int
+	// shared is true for a SharedArrayBuffer (§25.2). It is stored in the same
+	// "ArrayBuffer" internal slot so TypedArray/DataView/Atomics view it
+	// transparently; the flag distinguishes it where the spec cares (Atomics.wait,
+	// detach refusal, the SharedArrayBuffer prototype).
+	shared bool
+	// byteLen is the live [[ArrayBufferByteLength]] for a *growable shared* buffer.
+	// A shared buffer must never reallocate on grow (its bytes are aliased by
+	// views in other agents), so growable SharedArrayBuffers pre-allocate
+	// maxByteLength bytes (len(data) == maxByteLength) and track the live length
+	// here, bumping it up on grow. For every other buffer byteLen is unused and
+	// the length is len(data); curByteLength encapsulates that distinction so the
+	// non-shared path is byte-for-byte unchanged.
+	byteLen int
+}
+
+// curByteLength returns the buffer's live byte length. For a growable shared
+// buffer this is the tracked byteLen (data is pre-allocated to maxByteLength and
+// never reallocated); for every other buffer it is len(data).
+func (ab *arrayBufferData) curByteLength() int {
+	if ab.shared && ab.resizable {
+		return ab.byteLen
+	}
+	return len(ab.data)
 }
 
 // arrayBufferOf returns the ArrayBuffer backing data for v, or (nil, false) when

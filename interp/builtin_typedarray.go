@@ -93,7 +93,7 @@ func (td *typedArrayData) outOfBounds() (bool, int) {
 	if !ok || ab.detached {
 		return true, 0
 	}
-	bufLen := len(ab.data)
+	bufLen := ab.curByteLength()
 	size := taKinds[td.kind].size
 	if td.autoLength {
 		if td.byteOffset > bufLen {
@@ -506,7 +506,7 @@ func (i *Interpreter) initTAFromArrayBuffer(ctx context.Context, o, buffer *Obje
 	if ab.detached {
 		return i.throwError(ctx, "TypeError", "Cannot construct a TypedArray on a detached ArrayBuffer")
 	}
-	bufferByteLength := len(ab.data)
+	bufferByteLength := ab.curByteLength()
 	if !hasLength && !bufferIsFixedLength {
 		if offset > bufferByteLength {
 			return i.throwError(ctx, "RangeError", "start offset is outside the bounds of the buffer")

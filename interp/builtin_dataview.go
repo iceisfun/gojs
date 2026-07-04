@@ -34,7 +34,7 @@ func viewOutOfBounds(dv *dataViewData) (bool, int) {
 	if !ok || ab.detached {
 		return true, 0
 	}
-	bufLen := len(ab.data)
+	bufLen := ab.curByteLength()
 	if dv.byteOffset > bufLen {
 		return true, 0
 	}
@@ -66,7 +66,7 @@ func (i *Interpreter) initDataView() {
 		if ab.detached {
 			return nil, i.throwError(ctx, "TypeError", "DataView: ArrayBuffer is detached")
 		}
-		bufferByteLength := len(ab.data)
+		bufferByteLength := ab.curByteLength()
 		if offset > bufferByteLength {
 			return nil, i.throwError(ctx, "RangeError", "DataView: byteOffset is out of bounds")
 		}
@@ -98,7 +98,7 @@ func (i *Interpreter) initDataView() {
 		if ab.detached {
 			return nil, i.throwError(ctx, "TypeError", "DataView: ArrayBuffer is detached")
 		}
-		bufferByteLength = len(ab.data)
+		bufferByteLength = ab.curByteLength()
 		if offset > bufferByteLength {
 			return nil, i.throwError(ctx, "RangeError", "DataView: byteOffset is out of bounds")
 		}

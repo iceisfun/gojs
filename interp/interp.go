@@ -215,18 +215,19 @@ type intrinsics struct {
 	// The generator/async function-family intrinsics. These constructors are not
 	// global bindings; they are reachable only through the prototype chains of
 	// generator/async functions (e.g. Object.getPrototypeOf(function*(){}).constructor).
-	genFuncProto      *Object // %GeneratorFunction.prototype% (aka %Generator%)
-	genFuncCtor       *Object // %GeneratorFunction%
-	asyncGenFuncProto *Object // %AsyncGeneratorFunction.prototype% (aka %AsyncGenerator%)
-	asyncGenFuncCtor  *Object // %AsyncGeneratorFunction%
-	asyncFuncProto    *Object // %AsyncFunction.prototype%
-	asyncFuncCtor     *Object // %AsyncFunction%
-	arrayValuesFn     *Object // %Array.prototype.values% (== Array.prototype[Symbol.iterator])
-	dateProto         *Object
-	arrayBufferProto  *Object // %ArrayBuffer.prototype%
-	dataViewProto     *Object // %DataView.prototype%
-	typedArrayProto   *Object // %TypedArray.prototype%
-	typedArrayCtor    *Object // %TypedArray% (the abstract intrinsic)
+	genFuncProto           *Object // %GeneratorFunction.prototype% (aka %Generator%)
+	genFuncCtor            *Object // %GeneratorFunction%
+	asyncGenFuncProto      *Object // %AsyncGeneratorFunction.prototype% (aka %AsyncGenerator%)
+	asyncGenFuncCtor       *Object // %AsyncGeneratorFunction%
+	asyncFuncProto         *Object // %AsyncFunction.prototype%
+	asyncFuncCtor          *Object // %AsyncFunction%
+	arrayValuesFn          *Object // %Array.prototype.values% (== Array.prototype[Symbol.iterator])
+	dateProto              *Object
+	arrayBufferProto       *Object // %ArrayBuffer.prototype%
+	sharedArrayBufferProto *Object // %SharedArrayBuffer.prototype%
+	dataViewProto          *Object // %DataView.prototype%
+	typedArrayProto        *Object // %TypedArray.prototype%
+	typedArrayCtor         *Object // %TypedArray% (the abstract intrinsic)
 	// typedArrayKindProtos / typedArrayKindCtors map each concrete kind to its
 	// per-kind %TypedArray.prototype% subclass and constructor.
 	typedArrayKindProtos map[taKind]*Object
@@ -243,11 +244,16 @@ type intrinsics struct {
 	// (strict) arguments objects.
 	throwTypeError *Object
 
-	objectCtor      *Object
-	functionCtor    *Object
-	arrayCtor       *Object
-	arrayBufferCtor *Object // %ArrayBuffer%
-	dataViewCtor    *Object // %DataView%
+	objectCtor            *Object
+	functionCtor          *Object
+	arrayCtor             *Object
+	arrayBufferCtor       *Object // %ArrayBuffer%
+	sharedArrayBufferCtor *Object // %SharedArrayBuffer%
+	dataViewCtor          *Object // %DataView%
+
+	// sabWaiters is the process-wide-per-interpreter waiter registry backing
+	// Atomics.wait/notify/waitAsync on shared buffers. Lazily initialised.
+	sabWaiters *waiterList
 
 	// nativeErrorProtos maps an error name (TypeError, RangeError, ...) to its
 	// prototype, so runtime code can raise the right error kind.
