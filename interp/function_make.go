@@ -143,7 +143,8 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 				i.mapArguments(argsObj, def.Params, args, env)
 			}
 		}
-		return i.runFunctionBody(ctx, funcFrameName(fnObj, name), def.Body, env)
+		bodyEnv := bodyVarEnv(def.Params, def.Body, env)
+		return i.runFunctionBody(ctx, funcFrameName(fnObj, name), def.Body, bodyEnv)
 	}
 
 	length := countParams(def.Params)
@@ -463,6 +464,82 @@ func simpleParameterList(params []ast.Expr) bool {
 		}
 	}
 	return true
+}
+
+// hasParameterExpressions reports whether a formal parameter list "contains an
+// expression" in the sense of ECMA-262 ContainsExpression: a default
+// initializer, or a computed property key inside a destructuring pattern. Rest
+// elements and plain (nested) BindingIdentifiers do not count. When true, the
+// function body runs in a VariableEnvironment separate from the parameter
+// environment (§10.2.11 step 27).
+func hasParameterExpressions(params []ast.Expr) bool {
+	var walk func(ast.Expr) bool
+	walk = func(e ast.Expr) bool {
+		switch t := e.(type) {
+		case *ast.AssignPattern:
+			return true
+		case *ast.AssignExpr:
+			if t.Op == token.ASSIGN {
+				return true
+			}
+		case *ast.RestElement:
+			return walk(t.Target)
+		case *ast.ArrayLit:
+			for _, el := range t.Elements {
+				if el != nil && walk(el) {
+					return true
+				}
+			}
+		case *ast.ObjectLit:
+			for _, pr := range t.Properties {
+				if pr.Computed {
+					return true
+				}
+				if pr.Value != nil && walk(pr.Value) {
+					return true
+				}
+			}
+		case *ast.SpreadElement:
+			return walk(t.Argument)
+		}
+		return false
+	}
+	for _, p := range params {
+		if walk(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyVarEnv returns the environment in which a function body's var/function
+// declarations and top-level statements execute. When the parameter list has
+// parameter expressions, the body gets a fresh VariableEnvironment that is a
+// child of the parameter environment (§10.2.11 step 27), so a parameter
+// default's closure and the body observe distinct bindings for a name the body
+// re-declares with `var`. Parameter values are copied in for any var-declared
+// name that shadows a parameter (function-declared names are excluded — they are
+// (re)bound to their function objects when the body is instantiated). When there
+// are no parameter expressions, the parameter environment is reused as-is.
+func bodyVarEnv(params []ast.Expr, body *ast.BlockStmt, paramEnv *Environment) *Environment {
+	if body == nil || !hasParameterExpressions(params) {
+		return paramEnv
+	}
+	varEnv := NewEnvironment(paramEnv, true)
+	paramNames := map[string]bool{}
+	for _, n := range collectParamNames(params) {
+		paramNames[n] = true
+	}
+	varNames := map[string]bool{}
+	collectVarNames(body.Body, varNames)
+	for n := range varNames {
+		if paramNames[n] {
+			if pb := paramEnv.vars[n]; pb != nil {
+				varEnv.vars[n] = &binding{value: pb.value, mutable: true, initialized: true}
+			}
+		}
+	}
+	return varEnv
 }
 
 // runFunctionBody hoists declarations in the body and executes it, translating a
