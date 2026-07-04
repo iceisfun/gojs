@@ -35,28 +35,40 @@ func (i *Interpreter) initErrorStack(proto *Object) {
 		return String(""), nil
 	})
 	set := i.newNativeFunc("set stack", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		// set Error.prototype.stack (error-stack-accessor proposal):
+		//   1. If E is not an Object, throw a TypeError.
+		//   2. If v is not a String, throw a TypeError.
+		//   3. Perform ? SetterThatIgnoresPrototypeProperties(E, %Error.prototype%, "stack", v).
 		o, ok := this.(*Object)
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Error.prototype.stack setter called on non-object")
 		}
 		v := arg(args, 0)
-		if _, ok := v.(String); !ok {
+		// A string primitive may be either a String or a lazy rope; both satisfy
+		// "v is a String".
+		if !isStringish(v) {
 			return nil, i.throwError(ctx, "TypeError", "Error.prototype.stack setter requires a string value")
 		}
-		// SetterThatIgnoresPrototypeProperties(this, %Error.prototype%, "stack", v):
-		// writing to the home object itself emulates a non-writable data property.
+		// SetterThatIgnoresPrototypeProperties(this, home=%Error.prototype%, "stack", v):
+		//   2. If SameValue(this, home), throw a TypeError (emulates writing a
+		//      non-writable own data property on the home object). The check is
+		//      object identity, so a Proxy wrapping %Error.prototype% is NOT home.
 		if o == proto {
 			return nil, i.throwError(ctx, "TypeError", "Cannot assign to read only property 'stack' of Error.prototype")
 		}
-		if _, has := o.getOwn(StrKey("stack")); !has {
-			// CreateDataPropertyOrThrow: fails on a non-extensible receiver.
-			if !o.extensible {
-				return nil, i.throwError(ctx, "TypeError", "Cannot define property stack, object is not extensible")
+		//   3. Let desc be ? this.[[GetOwnProperty]]("stack") (trap-aware).
+		_, has, err := i.getOwnPropertyV(ctx, o, StrKey("stack"))
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			//   4a. Perform ? CreateDataPropertyOrThrow(this, "stack", v).
+			if err := i.createDataPropertyOrThrow(ctx, o, StrKey("stack"), v); err != nil {
+				return nil, err
 			}
-			o.defineOwn(StrKey("stack"), &Property{Value: v, Writable: true, Enumerable: true, Configurable: true})
 			return Undef, nil
 		}
-		// Otherwise perform an ordinary [[Set]] with Throw=true.
+		//   5a. Perform ? Set(this, "stack", v, true).
 		if err := i.setThrow(ctx, o, "stack", v); err != nil {
 			return nil, err
 		}

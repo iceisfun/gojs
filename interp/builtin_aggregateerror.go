@@ -13,8 +13,10 @@ func (i *Interpreter) initAggregateError(errorCtor *Object) {
 	// Recorded so Promise.any can build a spec-correct AggregateError instance.
 	i.aggregateErrorProto = proto
 
-	build := func(ctx context.Context, this Value, args []Value) (Value, error) {
-		obj := NewObject(proto)
+	// buildInto materializes the AggregateError with instProto as its
+	// [[Prototype]] (§20.5.7.1.1, OrdinaryCreateFromConstructor).
+	buildInto := func(ctx context.Context, instProto *Object, args []Value) (Value, error) {
+		obj := NewObject(instProto)
 		obj.class = "Error"
 
 		// Step 3: message (the second argument).
@@ -26,14 +28,8 @@ func (i *Interpreter) initAggregateError(errorCtor *Object) {
 			obj.defineOwn(StrKey("message"), &Property{Value: String(s), Writable: true, Enumerable: false, Configurable: true})
 		}
 		// Step 4: InstallErrorCause(O, options) — the third argument.
-		if opts, ok := arg(args, 2).(*Object); ok {
-			if opts.Has(StrKey("cause")) {
-				c, err := opts.GetStr(ctx, "cause")
-				if err != nil {
-					return nil, err
-				}
-				obj.defineOwn(StrKey("cause"), &Property{Value: c, Writable: true, Enumerable: false, Configurable: true})
-			}
+		if err := i.installErrorCause(ctx, obj, arg(args, 2)); err != nil {
+			return nil, err
 		}
 		// Step 5: errorsList = IterableToList(errors) — the first argument.
 		errs, err := i.iterableToList(ctx, arg(args, 0))
@@ -46,8 +42,18 @@ func (i *Interpreter) initAggregateError(errorCtor *Object) {
 		setErrorStack(obj, "AggregateError: captured stack unavailable")
 		return obj, nil
 	}
+	call := func(ctx context.Context, _ Value, args []Value) (Value, error) {
+		return buildInto(ctx, proto, args)
+	}
+	construct := func(ctx context.Context, newTarget Value, args []Value) (Value, error) {
+		instProto, err := i.protoFromConstructor(ctx, newTarget, proto)
+		if err != nil {
+			return nil, err
+		}
+		return buildInto(ctx, instProto, args)
+	}
 
-	ctor := i.newNativeCtor("AggregateError", 2, build, build)
+	ctor := i.newNativeCtor("AggregateError", 2, call, construct)
 	// AggregateError inherits from Error (its [[Prototype]] is %Error%).
 	ctor.SetProto(errorCtor)
 	linkCtor(ctor, proto)
