@@ -126,41 +126,49 @@ func (i *Interpreter) initString() {
 		return String(s), nil
 	})
 	m("charAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
+		v := viewOf(s)
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
 		}
-		if idx < 0 || idx >= float64(len(rs)) {
+		if idx < 0 || idx >= float64(v.Len()) {
 			return String(""), nil
 		}
-		return String(string(rs[int(idx)])), nil
+		return String(v.Slice(int(idx), int(idx)+1)), nil
 	})
 	m("charCodeAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
+		v := viewOf(s)
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
 		}
-		if idx < 0 || idx >= float64(len(rs)) {
+		if idx < 0 || idx >= float64(v.Len()) {
 			return Number(nan()), nil
 		}
-		return Number(float64(rs[int(idx)])), nil
+		return Number(float64(v.At(int(idx)))), nil
 	})
 	m("codePointAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
+		// §22.1.3.4: position is a code-unit index; the result is the code point
+		// beginning there (a high surrogate followed by a low surrogate combines).
+		v := viewOf(s)
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
 		}
-		if idx < 0 || idx >= float64(len(rs)) {
+		if idx < 0 || idx >= float64(v.Len()) {
 			return Undef, nil
 		}
-		return Number(float64(rs[int(idx)])), nil
+		k := int(idx)
+		cu := v.At(k)
+		if cu >= 0xD800 && cu <= 0xDBFF && k+1 < v.Len() && v.At(k+1) >= 0xDC00 && v.At(k+1) <= 0xDFFF {
+			cp := 0x10000 + (rune(cu)-0xD800)<<10 + (rune(v.At(k+1)) - 0xDC00)
+			return Number(float64(cp)), nil
+		}
+		return Number(float64(cu)), nil
 	})
 	m("at", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
-		n := len(rs)
+		v := viewOf(s)
+		n := v.Len()
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -171,7 +179,7 @@ func (i *Interpreter) initString() {
 		if idx < 0 || idx >= float64(n) {
 			return Undef, nil
 		}
-		return String(string(rs[int(idx)])), nil
+		return String(v.Slice(int(idx), int(idx)+1)), nil
 	})
 	// Search methods operate over runes (gojs indexes strings by code point) and
 	// honor their position/endPosition arguments.
@@ -184,9 +192,9 @@ func (i *Interpreter) initString() {
 		if err != nil {
 			return nil, err
 		}
-		rs, rsub := []rune(s), []rune(sub)
-		from := clampIndexF(pos, len(rs))
-		return Number(float64(runeIndex(rs, rsub, from))), nil
+		sv, subv := viewOf(s), viewOf(sub)
+		from := clampIndexF(pos, sv.Len())
+		return Number(float64(sv.IndexOf(subv, from))), nil
 	})
 	m("lastIndexOf", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		sub, err := i.argStr(ctx, args, 0)
@@ -205,15 +213,9 @@ func (i *Interpreter) initString() {
 				pos = ToInteger(num)
 			}
 		}
-		rs, rsub := []rune(s), []rune(sub)
-		start := clampIndexF(pos, len(rs))
-		last := -1
-		for k := 0; k+len(rsub) <= len(rs) && k <= start; k++ {
-			if runeHasAt(rs, rsub, k) {
-				last = k
-			}
-		}
-		return Number(float64(last)), nil
+		sv, subv := viewOf(s), viewOf(sub)
+		start := clampIndexF(pos, sv.Len())
+		return Number(float64(sv.LastIndexOf(subv, start))), nil
 	})
 	m("includes", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		if err := i.rejectRegExpArg(ctx, args, "includes"); err != nil {
@@ -227,9 +229,9 @@ func (i *Interpreter) initString() {
 		if err != nil {
 			return nil, err
 		}
-		rs, rsub := []rune(s), []rune(sub)
-		from := clampIndexF(pos, len(rs))
-		return Bool(runeIndex(rs, rsub, from) >= 0), nil
+		sv, subv := viewOf(s), viewOf(sub)
+		from := clampIndexF(pos, sv.Len())
+		return Bool(sv.IndexOf(subv, from) >= 0), nil
 	})
 	m("startsWith", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		if err := i.rejectRegExpArg(ctx, args, "startsWith"); err != nil {
@@ -243,8 +245,8 @@ func (i *Interpreter) initString() {
 		if err != nil {
 			return nil, err
 		}
-		rs, rsub := []rune(s), []rune(sub)
-		return Bool(runeHasAt(rs, rsub, clampIndexF(pos, len(rs)))), nil
+		sv, subv := viewOf(s), viewOf(sub)
+		return Bool(sv.HasAt(subv, clampIndexF(pos, sv.Len()))), nil
 	})
 	m("endsWith", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		if err := i.rejectRegExpArg(ctx, args, "endsWith"); err != nil {
@@ -254,21 +256,21 @@ func (i *Interpreter) initString() {
 		if err != nil {
 			return nil, err
 		}
-		rs, rsub := []rune(s), []rune(sub)
-		end := len(rs)
+		sv, subv := viewOf(s), viewOf(sub)
+		end := sv.Len()
 		if !IsUndefined(arg(args, 1)) {
-			pos, err := i.argInteger(ctx, args, 1, float64(len(rs)))
+			pos, err := i.argInteger(ctx, args, 1, float64(sv.Len()))
 			if err != nil {
 				return nil, err
 			}
-			end = clampIndexF(pos, len(rs))
+			end = clampIndexF(pos, sv.Len())
 		}
-		start := end - len(rsub)
-		return Bool(start >= 0 && runeHasAt(rs, rsub, start)), nil
+		start := end - subv.Len()
+		return Bool(start >= 0 && sv.HasAt(subv, start)), nil
 	})
 	m("slice", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
-		n := len(rs)
+		v := viewOf(s)
+		n := v.Len()
 		startF, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -285,11 +287,11 @@ func (i *Interpreter) initString() {
 		if start > end {
 			return String(""), nil
 		}
-		return String(string(rs[start:end])), nil
+		return String(v.Slice(start, end)), nil
 	})
 	m("substring", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
-		n := len(rs)
+		v := viewOf(s)
+		n := v.Len()
 		aF, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -306,11 +308,11 @@ func (i *Interpreter) initString() {
 		if a > b {
 			a, b = b, a
 		}
-		return String(string(rs[a:b])), nil
+		return String(v.Slice(a, b)), nil
 	})
 	m("substr", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
-		rs := []rune(s)
-		n := len(rs)
+		v := viewOf(s)
+		n := v.Len()
 		startF, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -330,7 +332,7 @@ func (i *Interpreter) initString() {
 			return String(""), nil
 		}
 		end := start + clampIndexF(lengthF, n-start)
-		return String(string(rs[start:end])), nil
+		return String(v.Slice(start, end)), nil
 	})
 	m("toUpperCase", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return String(toUpperCaseFull(s)), nil
@@ -407,38 +409,44 @@ func (i *Interpreter) initString() {
 		return String(f.String(s)), nil
 	})
 	// isWellFormed (§22.1.3.9) / toWellFormed (§22.1.3.35): report or repair
-	// unpaired UTF-16 surrogates. gojs indexes strings by code point (Go
-	// strings are valid UTF-8), so unpaired surrogates written as \uD800-style
-	// escapes are folded to U+FFFD before storage; these methods therefore
-	// implement the algorithm faithfully but rarely observe a raw surrogate.
+	// unpaired UTF-16 surrogates, viewing the string as its code-unit sequence.
 	m("isWellFormed", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		for _, r := range s {
-			if r >= 0xD800 && r <= 0xDFFF {
-				return Boolean(false), nil
+		units := codeUnits(s)
+		for k := 0; k < len(units); k++ {
+			cu := units[k]
+			if cu >= 0xD800 && cu <= 0xDBFF {
+				if k+1 < len(units) && units[k+1] >= 0xDC00 && units[k+1] <= 0xDFFF {
+					k++ // valid pair
+					continue
+				}
+				return Boolean(false), nil // unpaired high surrogate
+			}
+			if cu >= 0xDC00 && cu <= 0xDFFF {
+				return Boolean(false), nil // unpaired low surrogate
 			}
 		}
 		return Boolean(true), nil
 	})
 	m("toWellFormed", 0, func(ctx context.Context, s string, args []Value) (Value, error) {
-		hasSurrogate := false
-		for _, r := range s {
-			if r >= 0xD800 && r <= 0xDFFF {
-				hasSurrogate = true
-				break
+		units := codeUnits(s)
+		out := make([]uint16, 0, len(units))
+		for k := 0; k < len(units); k++ {
+			cu := units[k]
+			switch {
+			case cu >= 0xD800 && cu <= 0xDBFF:
+				if k+1 < len(units) && units[k+1] >= 0xDC00 && units[k+1] <= 0xDFFF {
+					out = append(out, cu, units[k+1])
+					k++
+				} else {
+					out = append(out, 0xFFFD)
+				}
+			case cu >= 0xDC00 && cu <= 0xDFFF:
+				out = append(out, 0xFFFD)
+			default:
+				out = append(out, cu)
 			}
 		}
-		if !hasSurrogate {
-			return String(s), nil
-		}
-		var b strings.Builder
-		for _, r := range s {
-			if r >= 0xD800 && r <= 0xDFFF {
-				b.WriteRune('�')
-			} else {
-				b.WriteRune(r)
-			}
-		}
-		return String(b.String()), nil
+		return String(unitsToString(out)), nil
 	})
 	m("padStart", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return i.stringPad(ctx, s, args, true)
@@ -454,7 +462,9 @@ func (i *Interpreter) initString() {
 		if count < 0 || math.IsInf(count, 1) {
 			return nil, i.throwError(ctx, "RangeError", "Invalid count value")
 		}
-		return String(strings.Repeat(s, int(count))), nil
+		// Repetition can place s's trailing surrogate before the next copy's
+		// leading surrogate; coalesce any pair so the result stays canonical.
+		return String(canonicalizeWTF8(strings.Repeat(s, int(count)))), nil
 	})
 	m("concat", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
 		var b strings.Builder
@@ -466,7 +476,7 @@ func (i *Interpreter) initString() {
 			}
 			b.WriteString(as)
 		}
-		return String(b.String()), nil
+		return String(canonicalizeWTF8(b.String())), nil
 	})
 	m("split", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return i.stringSplitString(ctx, s, args)
@@ -517,30 +527,22 @@ func (i *Interpreter) initString() {
 	linkCtor(ctor, proto)
 
 	i.defineMethod(ctor, "fromCharCode", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var b strings.Builder
-		for _, a := range args {
+		// §22.1.2.1: each argument becomes one UTF-16 code unit. Building the
+		// code-unit slice and re-encoding it (unitsToString) yields well-formed
+		// WTF-8, so two adjacent surrogate arguments that form a pair coalesce
+		// into the single astral scalar value they denote.
+		units := make([]uint16, len(args))
+		for k, a := range args {
 			n, err := i.ToNumberV(ctx, a)
 			if err != nil {
 				return nil, err
 			}
-			cu := uint16(int64(n))
-			if cu >= 0xD800 && cu <= 0xDFFF {
-				// A surrogate code unit is not a Unicode scalar value, so
-				// strings.Builder.WriteRune would fold it to U+FFFD and lose
-				// the code unit. Preserve it verbatim using WTF-8 (generalized
-				// UTF-8) so operations that interpret the string as UTF-16 —
-				// notably Encode (encodeURI) — can recover and pair surrogates.
-				b.WriteByte(0xE0 | byte(cu>>12))
-				b.WriteByte(0x80 | byte((cu>>6)&0x3F))
-				b.WriteByte(0x80 | byte(cu&0x3F))
-			} else {
-				b.WriteRune(rune(cu))
-			}
+			units[k] = uint16(int64(n))
 		}
-		return String(b.String()), nil
+		return String(unitsToString(units)), nil
 	})
 	i.defineMethod(ctor, "fromCodePoint", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		var b strings.Builder
+		var units []uint16
 		for _, a := range args {
 			n, err := i.ToNumberV(ctx, a)
 			if err != nil {
@@ -550,9 +552,15 @@ func (i *Interpreter) initString() {
 			if n != ToInteger(n) || n < 0 || n > 0x10FFFF {
 				return nil, i.throwError(ctx, "RangeError", "Invalid code point "+NumberToString(n))
 			}
-			b.WriteRune(rune(int64(n)))
+			cp := rune(int64(n))
+			if cp >= 0x10000 {
+				cp -= 0x10000
+				units = append(units, uint16(0xD800+(cp>>10)), uint16(0xDC00+(cp&0x3FF)))
+			} else {
+				units = append(units, uint16(cp))
+			}
 		}
-		return String(b.String()), nil
+		return String(unitsToString(units)), nil
 	})
 	// String.raw (§22.1.3.28): the tag function for template literals. It
 	// concatenates the raw literal segments interleaved with the string forms
@@ -683,15 +691,16 @@ func (i *Interpreter) stringReplace(ctx context.Context, s string, args []Value,
 				return nil, err
 			}
 			b.WriteString(r0)
-			for _, ch := range s {
-				b.WriteRune(ch)
+			units := codeUnits(s)
+			for k := range units {
+				b.WriteString(unitsToString(units[k : k+1]))
 				rN, err := doReplace("", 0)
 				if err != nil {
 					return nil, err
 				}
 				b.WriteString(rN)
 			}
-			return String(b.String()), nil
+			return String(canonicalizeWTF8(b.String())), nil
 		}
 		var b strings.Builder
 		rest := s
@@ -711,7 +720,7 @@ func (i *Interpreter) stringReplace(ctx context.Context, s string, args []Value,
 			rest = rest[idx+len(pattern):]
 			offset += idx + len(pattern)
 		}
-		return String(b.String()), nil
+		return String(canonicalizeWTF8(b.String())), nil
 	}
 	idx := strings.Index(s, pattern)
 	if idx < 0 {
@@ -721,11 +730,11 @@ func (i *Interpreter) stringReplace(ctx context.Context, s string, args []Value,
 	if err != nil {
 		return nil, err
 	}
-	return String(s[:idx] + r + s[idx+len(pattern):]), nil
+	return String(canonicalizeWTF8(s[:idx] + r + s[idx+len(pattern):])), nil
 }
 
-// runeHasAt reports whether sub appears in rs starting exactly at index at.
-func runeHasAt(rs, sub []rune, at int) bool {
+// unitHasAt reports whether sub appears in rs starting exactly at index at.
+func unitHasAt(rs, sub []uint16, at int) bool {
 	if at < 0 || at+len(sub) > len(rs) {
 		return false
 	}
@@ -737,9 +746,9 @@ func runeHasAt(rs, sub []rune, at int) bool {
 	return true
 }
 
-// runeIndex returns the first index >= from at which sub occurs in rs, or -1.
+// unitIndex returns the first index >= from at which sub occurs in rs, or -1.
 // An empty sub matches at from (clamped to len(rs)).
-func runeIndex(rs, sub []rune, from int) int {
+func unitIndex(rs, sub []uint16, from int) int {
 	if from < 0 {
 		from = 0
 	}
@@ -750,7 +759,7 @@ func runeIndex(rs, sub []rune, from int) int {
 		return from
 	}
 	for k := from; k+len(sub) <= len(rs); k++ {
-		if runeHasAt(rs, sub, k) {
+		if unitHasAt(rs, sub, k) {
 			return k
 		}
 	}
@@ -789,13 +798,14 @@ func (i *Interpreter) rejectRegExpArg(ctx context.Context, args []Value, method 
 
 // stringPad implements the StringPad abstraction (§22.1.3.16.1) for padStart /
 // padEnd: maxLength is coerced before the fill string, and the fill is repeated
-// over whole code points (never split mid-character).
+// then truncated to the exact number of code units required (a surrogate pair
+// may be split at the truncation boundary, per spec).
 func (i *Interpreter) stringPad(ctx context.Context, s string, args []Value, start bool) (Value, error) {
 	maxF, err := i.argInteger(ctx, args, 0, 0)
 	if err != nil {
 		return nil, err
 	}
-	stringLength := len([]rune(s))
+	stringLength := codeUnitLen(s)
 	if maxF <= float64(stringLength) {
 		return String(s), nil
 	}
@@ -810,14 +820,15 @@ func (i *Interpreter) stringPad(ctx context.Context, s string, args []Value, sta
 		return String(s), nil
 	}
 	need := int(maxF) - stringLength
-	fillRunes := []rune(filler)
-	var b strings.Builder
+	fillUnits := codeUnits(filler)
+	padding := make([]uint16, need)
 	for j := 0; j < need; j++ {
-		b.WriteRune(fillRunes[j%len(fillRunes)])
+		padding[j] = fillUnits[j%len(fillUnits)]
 	}
-	padding := b.String()
+	pad := unitsToString(padding)
+	// The pad/string boundary may join a high and low surrogate; canonicalize.
 	if start {
-		return String(padding + s), nil
+		return String(canonicalizeWTF8(pad + s)), nil
 	}
-	return String(s + padding), nil
+	return String(canonicalizeWTF8(s + pad)), nil
 }

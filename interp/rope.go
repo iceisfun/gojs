@@ -81,5 +81,8 @@ func (r *strRope) build() string {
 			stack = append(stack, x.right, x.left) // left popped (written) first
 		}
 	}
-	return b.String()
+	// Concatenation may have placed a high surrogate immediately before a low
+	// surrogate across a join; coalesce the pair so the result is well-formed
+	// (canonical) WTF-8. Cheap no-op for the overwhelmingly common case.
+	return canonicalizeWTF8(b.String())
 }

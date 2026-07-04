@@ -1166,7 +1166,7 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 		}
 		out += s
 	}
-	return String(out), nil
+	return String(canonicalizeWTF8(out)), nil
 }
 
 func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Value) (Value, error) {

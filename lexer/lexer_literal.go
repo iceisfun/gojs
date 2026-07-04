@@ -373,18 +373,32 @@ func (l *Lexer) scanUnicodeEscapeCombining(b *strings.Builder) {
 		l.readRune() // consume 'u'
 		lo, loBraced, ok := l.scanUnicodeEscape()
 		if !ok {
-			b.WriteRune(hi)
+			writeStrCodePoint(b, hi)
 			return
 		}
 		if !loBraced && lo >= 0xDC00 && lo <= 0xDFFF {
 			b.WriteRune((hi-0xD800)<<10 + (lo - 0xDC00) + 0x10000)
 			return
 		}
-		b.WriteRune(hi)
-		b.WriteRune(lo)
+		writeStrCodePoint(b, hi)
+		writeStrCodePoint(b, lo)
 		return
 	}
-	b.WriteRune(hi)
+	writeStrCodePoint(b, hi)
+}
+
+// writeStrCodePoint writes a decoded string-literal code point. A lone surrogate
+// (U+D800..U+DFFF), which strings.Builder.WriteRune would fold to U+FFFD, is
+// preserved verbatim in WTF-8 so that "\uD83D" and String.fromCharCode(0xD83D)
+// produce identical internal strings (matching the interp storage format).
+func writeStrCodePoint(b *strings.Builder, r rune) {
+	if r >= 0xD800 && r <= 0xDFFF {
+		b.WriteByte(0xE0 | byte(r>>12))
+		b.WriteByte(0x80 | byte((r>>6)&0x3F))
+		b.WriteByte(0x80 | byte(r&0x3F))
+		return
+	}
+	b.WriteRune(r)
 }
 
 // scanTemplate scans a template literal segment. When head is true the current

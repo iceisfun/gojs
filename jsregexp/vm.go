@@ -3,7 +3,7 @@ package jsregexp
 import (
 	"context"
 	"errors"
-	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // ErrBudget is returned when a match exceeds the configured step budget. This is
@@ -120,11 +120,52 @@ type prog struct {
 
 // ToUnits encodes a Go string to the UTF-16 code-unit slice the matcher operates
 // on. Match offsets are indices into this slice, matching ECMAScript's string
-// indexing (lastIndex, match indices, etc.).
-func ToUnits(s string) []uint16 { return utf16.Encode([]rune(s)) }
+// indexing (lastIndex, match indices, etc.). The host stores strings as WTF-8,
+// so a lone surrogate — encoded as 0xED 0xA0-0xBF 0x80-0xBF — is recovered as a
+// single surrogate code unit rather than being folded to U+FFFD.
+func ToUnits(s string) []uint16 {
+	units := make([]uint16, 0, len(s))
+	for i := 0; i < len(s); {
+		if s[i] == 0xED && i+2 < len(s) && s[i+1] >= 0xA0 && s[i+1] <= 0xBF && s[i+2] >= 0x80 && s[i+2] <= 0xBF {
+			units = append(units, uint16(rune(s[i]&0x0F)<<12|rune(s[i+1]&0x3F)<<6|rune(s[i+2]&0x3F)))
+			i += 3
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r >= 0x10000 {
+			r -= 0x10000
+			units = append(units, uint16(0xD800+(r>>10)), uint16(0xDC00+(r&0x3FF)))
+		} else {
+			units = append(units, uint16(r))
+		}
+		i += size
+	}
+	return units
+}
 
-// FromUnits decodes a UTF-16 code-unit slice back to a Go string.
-func FromUnits(u []uint16) string { return string(utf16.Decode(u)) }
+// FromUnits decodes a UTF-16 code-unit slice back to a (WTF-8) Go string. A
+// high/low surrogate pair combines into its astral scalar value; any other
+// surrogate is preserved as a lone surrogate in WTF-8 (so `/./g` extracting one
+// half of a pair yields the exact lone-surrogate code unit, not U+FFFD).
+func FromUnits(u []uint16) string {
+	buf := make([]byte, 0, len(u))
+	for k := 0; k < len(u); {
+		cu := u[k]
+		if cu >= 0xD800 && cu <= 0xDBFF && k+1 < len(u) && u[k+1] >= 0xDC00 && u[k+1] <= 0xDFFF {
+			cp := 0x10000 + (rune(cu)-0xD800)<<10 + (rune(u[k+1]) - 0xDC00)
+			buf = utf8.AppendRune(buf, cp)
+			k += 2
+			continue
+		}
+		if cu >= 0xD800 && cu <= 0xDFFF {
+			buf = append(buf, 0xE0|byte(cu>>12), 0x80|byte((cu>>6)&0x3F), 0x80|byte(cu&0x3F))
+		} else {
+			buf = utf8.AppendRune(buf, rune(cu))
+		}
+		k++
+	}
+	return string(buf)
+}
 
 // Match reports whether re matches anywhere in input, using the default budget.
 func (re *Regexp) Match(ctx context.Context, input string) (bool, error) {

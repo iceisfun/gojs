@@ -177,7 +177,7 @@ func (i *Interpreter) jsonPropertyList(ctx context.Context, arr *Object) ([]stri
 		}
 		var item string
 		var ok bool
-		switch x := v.(type) {
+		switch x := flattenRope(v).(type) {
 		case String:
 			item, ok = string(x), true
 		case Number:
@@ -218,7 +218,7 @@ func (i *Interpreter) jsonGap(ctx context.Context, space Value) (string, error) 
 			space = String(s)
 		}
 	}
-	switch x := space.(type) {
+	switch x := flattenRope(space).(type) {
 	case Number:
 		n := int(ToInteger(float64(x)))
 		if n > 10 {
@@ -229,12 +229,12 @@ func (i *Interpreter) jsonGap(ctx context.Context, space Value) (string, error) 
 		}
 		return strings.Repeat(" ", n), nil
 	case String:
-		s := string(x)
-		// Truncate to 10 code units (code points here).
-		if r := []rune(s); len(r) > 10 {
-			s = string(r[:10])
+		// Truncate to the first 10 UTF-16 code units (§25.5.2.1 step 6).
+		units := codeUnits(string(x))
+		if len(units) > 10 {
+			return unitsToString(units[:10]), nil
 		}
-		return s, nil
+		return string(x), nil
 	default:
 		return "", nil
 	}
@@ -307,6 +307,11 @@ func (st *jsonState) serializeProperty(ctx context.Context, b *strings.Builder, 
 			value = o.primitive
 		}
 	}
+
+	// A concatenation value is a string primitive held as a lazy rope; flatten
+	// it so the String case below matches (otherwise it would fall through and
+	// be treated as unserializable).
+	value = flattenRope(value)
 
 	switch x := value.(type) {
 	case Undefined, *Symbol:
@@ -452,11 +457,23 @@ func writeNewlineIndent(b *strings.Builder, indent, cur string) {
 	}
 }
 
-// writeJSONString writes a JSON-quoted string.
+// writeJSONString writes a JSON-quoted string, implementing QuoteJSONString
+// (§25.5.2.2): it iterates UTF-16 code units so that a lone surrogate is emitted
+// as a \uXXXX escape (well-formed JSON) rather than being folded to U+FFFD.
 func writeJSONString(b *strings.Builder, s string) {
+	const hex = "0123456789abcdef"
+	writeUnicodeEscape := func(cu uint16) {
+		b.WriteString(`\u`)
+		b.WriteByte(hex[(cu>>12)&0xF])
+		b.WriteByte(hex[(cu>>8)&0xF])
+		b.WriteByte(hex[(cu>>4)&0xF])
+		b.WriteByte(hex[cu&0xF])
+	}
 	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
+	units := codeUnits(s)
+	for k := 0; k < len(units); k++ {
+		cu := units[k]
+		switch cu {
 		case '"':
 			b.WriteString(`\"`)
 		case '\\':
@@ -472,15 +489,23 @@ func writeJSONString(b *strings.Builder, s string) {
 		case '\f':
 			b.WriteString(`\f`)
 		default:
-			if r < 0x20 {
-				b.WriteString(`\u`)
-				const hex = "0123456789abcdef"
-				b.WriteByte(hex[(r>>12)&0xF])
-				b.WriteByte(hex[(r>>8)&0xF])
-				b.WriteByte(hex[(r>>4)&0xF])
-				b.WriteByte(hex[r&0xF])
-			} else {
-				b.WriteRune(r)
+			switch {
+			case cu < 0x20:
+				writeUnicodeEscape(cu)
+			case cu >= 0xD800 && cu <= 0xDBFF:
+				// A high surrogate paired with a following low surrogate is an
+				// astral code point, written verbatim; an unpaired one escapes.
+				if k+1 < len(units) && units[k+1] >= 0xDC00 && units[k+1] <= 0xDFFF {
+					cp := 0x10000 + (rune(cu)-0xD800)<<10 + (rune(units[k+1]) - 0xDC00)
+					b.WriteRune(cp)
+					k++
+				} else {
+					writeUnicodeEscape(cu)
+				}
+			case cu >= 0xDC00 && cu <= 0xDFFF:
+				writeUnicodeEscape(cu) // unpaired low surrogate
+			default:
+				b.WriteRune(rune(cu))
 			}
 		}
 	}

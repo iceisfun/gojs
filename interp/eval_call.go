@@ -65,12 +65,20 @@ func (i *Interpreter) getProperty(ctx context.Context, base Value, key PropertyK
 	case String:
 		if !key.IsSymbol() {
 			if key.Str == "length" {
-				return Number(float64(len([]rune(string(b))))), nil
+				return Number(float64(codeUnitLen(string(b)))), nil
 			}
 			if idx, ok := arrayIndex(key.Str); ok {
-				rs := []rune(string(b))
-				if idx < len(rs) {
-					return String(string(rs[idx])), nil
+				s := string(b)
+				// ASCII fast path: byte index == code-unit index.
+				if isASCIIStr(s) {
+					if idx < len(s) {
+						return String(s[idx : idx+1]), nil
+					}
+					return Undef, nil
+				}
+				units := codeUnits(s)
+				if idx < len(units) {
+					return String(unitsToString(units[idx : idx+1])), nil
 				}
 				return Undef, nil
 			}

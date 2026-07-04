@@ -598,8 +598,11 @@ func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Va
 	}
 	var parts []string
 	if sep == "" {
-		for _, r := range s {
-			parts = append(parts, string(r))
+		// §22.1.3.21 step 12: an empty separator splits into individual UTF-16
+		// code units, not code points (a surrogate pair yields two elements).
+		units := codeUnits(s)
+		for k := range units {
+			parts = append(parts, unitsToString(units[k:k+1]))
 		}
 	} else {
 		parts = strings.Split(s, sep)

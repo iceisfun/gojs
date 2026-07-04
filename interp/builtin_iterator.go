@@ -550,16 +550,24 @@ func (i *Interpreter) initStringIterator() {
 		if !ok || o.internal == nil {
 			return nil, i.throwError(ctx, "TypeError", "next called on an incompatible receiver")
 		}
-		runes, ok := o.internal["strIterRunes"].([]rune)
+		units, ok := o.internal["strIterUnits"].([]uint16)
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "next called on an incompatible receiver")
 		}
 		pos, _ := o.internal["strIterPos"].(int)
-		if pos >= len(runes) {
+		if pos >= len(units) {
 			return i.newIterResult(Undef, true), nil
 		}
-		o.internal["strIterPos"] = pos + 1
-		return i.newIterResult(String(string(runes[pos])), false), nil
+		// §22.1.3.37: the String iterator yields one code point per step. A high
+		// surrogate followed by a low surrogate advances two code units; any
+		// other code unit (including a lone surrogate) advances one.
+		span := 1
+		cu := units[pos]
+		if cu >= 0xD800 && cu <= 0xDBFF && pos+1 < len(units) && units[pos+1] >= 0xDC00 && units[pos+1] <= 0xDFFF {
+			span = 2
+		}
+		o.internal["strIterPos"] = pos + span
+		return i.newIterResult(String(unitsToString(units[pos:pos+span])), false), nil
 	})
 	sp.defineOwn(SymKey(i.symToStringTag), &Property{
 		Value: String("String Iterator"), Writable: false, Enumerable: false, Configurable: true,
@@ -577,7 +585,7 @@ func (i *Interpreter) initStringIterator() {
 			}
 			it := NewObject(i.stringIteratorProto)
 			it.class = "String Iterator"
-			it.internal = map[string]any{"strIterRunes": []rune(s), "strIterPos": 0}
+			it.internal = map[string]any{"strIterUnits": codeUnits(s), "strIterPos": 0}
 			return it, nil
 		})
 }

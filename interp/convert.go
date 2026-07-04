@@ -204,11 +204,11 @@ func (i *Interpreter) newStringObject(s String) *Object {
 	// property { [[Writable]]: false, [[Enumerable]]: true, [[Configurable]]:
 	// false }, and "length" as { [[Writable]]: false, [[Enumerable]]: false,
 	// [[Configurable]]: false }.
-	runes := []rune(string(s))
-	for idx, r := range runes {
-		o.defineOwn(StrKey(intToStr(idx)), &Property{Value: String(string(r)), Writable: false, Enumerable: true, Configurable: false})
+	units := codeUnits(string(s))
+	for idx := range units {
+		o.defineOwn(StrKey(intToStr(idx)), &Property{Value: String(unitsToString(units[idx : idx+1])), Writable: false, Enumerable: true, Configurable: false})
 	}
-	o.defineOwn(StrKey("length"), &Property{Value: Number(float64(len(runes))), Writable: false, Enumerable: false, Configurable: false})
+	o.defineOwn(StrKey("length"), &Property{Value: Number(float64(len(units))), Writable: false, Enumerable: false, Configurable: false})
 	return o
 }
 

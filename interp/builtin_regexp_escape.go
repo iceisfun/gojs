@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"unicode/utf16"
 )
 
 // initRegExpStatics installs the RegExp constructor's own members that are not
@@ -24,13 +23,26 @@ func (i *Interpreter) initRegExpStatics(ctor *Object) {
 // regexpEscape implements RegExp.escape (§22.2.5.2): return a copy of the string
 // in which characters potentially special in a Pattern are escaped.
 func (i *Interpreter) regexpEscape(ctx context.Context, this Value, args []Value) (Value, error) {
-	s, ok := arg(args, 0).(String)
+	s, ok := flattenRope(arg(args, 0)).(String)
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "RegExp.escape argument must be a string")
 	}
+	// §22.2.5.2 iterates the code points of S: a surrogate pair combines into
+	// its astral scalar value, while a lone surrogate is yielded as its own
+	// (surrogate) code point and escaped as \uXXXX below.
+	units := codeUnits(string(s))
 	var b strings.Builder
 	first := true
-	for _, cp := range string(s) {
+	for k := 0; k < len(units); first = false {
+		cu := units[k]
+		var cp rune
+		if cu >= 0xD800 && cu <= 0xDBFF && k+1 < len(units) && units[k+1] >= 0xDC00 && units[k+1] <= 0xDFFF {
+			cp = 0x10000 + (rune(cu)-0xD800)<<10 + (rune(units[k+1]) - 0xDC00)
+			k += 2
+		} else {
+			cp = rune(cu)
+			k++
+		}
 		if first && isASCIIAlnum(cp) {
 			// A leading digit/letter is hex-escaped so it cannot extend a
 			// preceding \0/\1/\c sequence in the surrounding pattern.
@@ -38,7 +50,6 @@ func (i *Interpreter) regexpEscape(ctx context.Context, this Value, args []Value
 		} else {
 			b.WriteString(encodeForRegExpEscape(cp))
 		}
-		first = false
 	}
 	return String(b.String()), nil
 }
@@ -68,11 +79,10 @@ func encodeForRegExpEscape(cp rune) string {
 		if cp <= 0xFF {
 			return fmt.Sprintf("\\x%02x", cp)
 		}
-		var b strings.Builder
-		for _, u := range utf16.Encode([]rune{cp}) {
-			fmt.Fprintf(&b, "\\u%04x", u)
-		}
-		return b.String()
+		// A lone surrogate is escaped as its own code unit; utf16.Encode would
+		// fold it to U+FFFD, so emit it directly. (All other characters reaching
+		// this branch are BMP and encode to a single code unit == cp.)
+		return fmt.Sprintf("\\u%04x", cp)
 	}
 	return string(cp)
 }
