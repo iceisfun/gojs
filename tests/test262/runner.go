@@ -354,7 +354,9 @@ func runMode(path, src string, m Meta, mode string) Result {
 	// specifier; serve them from the test's own directory so import() can resolve
 	// and evaluate them. Gated on the feature tag so ordinary tests keep no
 	// module provider (and thus no `require` global).
-	if hasFeature(m, "dynamic-import") {
+	// ShadowRealm.prototype.importValue imports modules in the inner realm, so
+	// those tests need a module provider too (they carry only the ShadowRealm tag).
+	if hasFeature(m, "dynamic-import") || hasFeature(m, "ShadowRealm") {
 		opts = append(opts, interp.WithModuleProvider(interp.NewDirModuleProvider(filepath.Dir(path))))
 	}
 	vm := interp.New(opts...)

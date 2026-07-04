@@ -95,9 +95,16 @@ func (i *Interpreter) initSymbol() {
 	wellKnown("isConcatSpreadable", i.symIsConcatSpreadable)
 
 	// The GlobalSymbolRegistry backs Symbol.for/Symbol.keyFor. It maps a
-	// string key to its registered symbol and back (§20.4.2.2, §20.4.2.6).
-	byKey := map[string]*Symbol{}
-	bySym := map[*Symbol]string{}
+	// string key to its registered symbol and back (§20.4.2.2, §20.4.2.6). The
+	// registry is shared by every realm in an agent (a ShadowRealm's inner realm
+	// inherits its parent's maps), so Symbol.for observes registrations made in
+	// another realm — hence it lives on the Interpreter rather than in a local.
+	if i.symByKey == nil {
+		i.symByKey = map[string]*Symbol{}
+		i.symBySym = map[*Symbol]string{}
+	}
+	byKey := i.symByKey
+	bySym := i.symBySym
 	i.defineMethod(ctor, "for", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
 		key, err := i.argStr(ctx, args, 0)
 		if err != nil {

@@ -88,6 +88,16 @@ type Interpreter struct {
 	// live local value from the module that actually declares it.
 	moduleEnvs map[string]*Environment
 
+	// symByKey / symBySym are the agent-wide GlobalSymbolRegistry backing
+	// Symbol.for / Symbol.keyFor. A ShadowRealm's inner realm shares its parent's
+	// maps so a registered symbol is the same value across realms.
+	symByKey map[string]*Symbol
+	symBySym map[*Symbol]string
+	// childRealms are the inner realms created by ShadowRealm constructors on this
+	// realm; they are closed when this interpreter is closed so their event-loop
+	// goroutines do not leak.
+	childRealms []*Interpreter
+
 	// templateCache is the realm's [[TemplateMap]] (§13.2.8.4 GetTemplateObject).
 	// It canonicalizes tagged-template objects by source location: each distinct
 	// TemplateLiteral Parse Node maps to the single frozen strings array handed to
@@ -415,6 +425,10 @@ func (i *Interpreter) Close() error {
 		i.loop.stop()
 	}
 	i.wg.Wait()
+	// Close any inner realms (ShadowRealm) so their event-loop goroutines stop.
+	for _, child := range i.childRealms {
+		child.Close()
+	}
 	return nil
 }
 

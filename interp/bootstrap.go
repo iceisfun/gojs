@@ -81,6 +81,7 @@ func (i *Interpreter) bootstrap() {
 	i.initGlobals()
 	i.initTimers()
 	i.initModules()
+	i.initShadowRealm()
 }
 
 // setGlobalHidden defines a non-enumerable global (used for constructors and
