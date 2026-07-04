@@ -278,7 +278,11 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 	case *ast.EmptyStmt, *ast.DebuggerStmt:
 		return Undef, nil
 	case *ast.VarDecl:
-		return Undef, i.evalVarDecl(ctx, s, env)
+		// A VariableStatement and a LexicalDeclaration both produce an empty
+		// completion (ECMA-262 §14.3.2.1, §14.3.1.1), so they must not overwrite
+		// the completion value of a preceding statement — e.g. the value of
+		// `eval('7; let x;')` is 7. Return nil (empty) rather than undefined.
+		return nil, i.evalVarDecl(ctx, s, env)
 	case *ast.FuncDecl:
 		return Undef, nil // already bound during hoisting
 	case *ast.ClassDecl:

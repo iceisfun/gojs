@@ -330,6 +330,19 @@ func (p *parser) parseVarDecl() *ast.VarDecl {
 			break
 		}
 	}
+	// A LexicalDeclaration (let/const) may not bind the name `let`, even when it
+	// appears on a new line after the `let` keyword: `let\nlet;` matches
+	// LexicalDeclaration (no ASI) and is then rejected by static semantics
+	// (ECMA-262 §14.3.1.1). This mirrors checkForDeclaration for for-in/of heads.
+	if kw.Type == token.LET || kw.Type == token.CONST {
+		for _, d := range decl.Decls {
+			p.collectBindingNames(d.Target, func(name string, pos token.Pos) {
+				if name == "let" {
+					p.earlyError(pos, "'let' is not a valid binding name in a lexical declaration")
+				}
+			})
+		}
+	}
 	decl.EndPos = p.cur().Pos
 	p.expectSemicolon()
 	return decl

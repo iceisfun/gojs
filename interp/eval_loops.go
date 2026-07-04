@@ -107,8 +107,14 @@ func (i *Interpreter) evalFor(ctx context.Context, s *ast.ForStmt, env *Environm
 }
 
 func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environment, label string) (Value, error) {
-	// The loop header gets its own scope so `let` bindings are per-loop.
+	// The loop header gets its own scope so `let` bindings are per-loop. When the
+	// initializer is a lexical declaration (let/const), its bound names are
+	// "perIterationBindings": each iteration runs in a fresh environment seeded
+	// with the previous iteration's values (ECMA-262 §14.7.4.7 ForBodyEvaluation
+	// and CreatePerIterationEnvironment). Closures created in the test, body, or
+	// update thus capture that iteration's binding rather than a single shared one.
 	loopEnv := NewEnvironment(env, false)
+	var perIterNames []string
 	if s.Init != nil {
 		switch init := s.Init.(type) {
 		case *ast.VarDecl:
@@ -118,16 +124,28 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 			if err := i.evalVarDecl(ctx, init, loopEnv); err != nil {
 				return nil, err
 			}
+			if init.Kind == token.LET || init.Kind == token.CONST {
+				for _, d := range init.Decls {
+					forEachPatternName(d.Target, func(n string) {
+						perIterNames = append(perIterNames, n)
+					})
+				}
+			}
 		case ast.Expr:
 			if _, err := i.evalExpr(ctx, init, loopEnv); err != nil {
 				return nil, err
 			}
 		}
 	}
+	// CreatePerIterationEnvironment before the first test.
+	curEnv := loopEnv
+	if len(perIterNames) > 0 {
+		curEnv = i.createPerIterationEnvironment(curEnv, env, perIterNames)
+	}
 	var completion Value = Undef
 	for {
 		if s.Test != nil {
-			test, err := i.evalExpr(ctx, s.Test, loopEnv)
+			test, err := i.evalExpr(ctx, s.Test, curEnv)
 			if err != nil {
 				return nil, err
 			}
@@ -135,9 +153,7 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 				return completion, nil
 			}
 		}
-		// Each iteration runs in a copy so closures capture per-iteration lets.
-		iterEnv := i.copyLoopScope(loopEnv, env)
-		bodyVal, err := i.evalStmt(ctx, s.Body, iterEnv)
+		bodyVal, err := i.evalStmt(ctx, s.Body, curEnv)
 		if bodyVal != nil {
 			completion = bodyVal
 		}
@@ -149,34 +165,32 @@ func (i *Interpreter) runFor(ctx context.Context, s *ast.ForStmt, env *Environme
 		default:
 			return completion, err
 		}
-		i.writeBackLoopScope(loopEnv, iterEnv)
+		// CreatePerIterationEnvironment after the body, before the update: the
+		// increment runs in the fresh environment so closures captured during the
+		// previous iteration keep their own copy of the loop variables.
+		if len(perIterNames) > 0 {
+			curEnv = i.createPerIterationEnvironment(curEnv, env, perIterNames)
+		}
 		if s.Update != nil {
-			if _, err := i.evalExpr(ctx, s.Update, loopEnv); err != nil {
+			if _, err := i.evalExpr(ctx, s.Update, curEnv); err != nil {
 				return nil, err
 			}
 		}
 	}
 }
 
-// copyLoopScope creates a per-iteration environment seeded with the current
-// loop-variable values, so closures created in the body capture distinct
-// bindings per iteration (matching `let` semantics in for loops).
-func (i *Interpreter) copyLoopScope(loopEnv, parent *Environment) *Environment {
-	iter := NewEnvironment(parent, false)
-	for name, b := range loopEnv.vars {
-		iter.vars[name] = &binding{value: b.value, mutable: b.mutable, initialized: b.initialized}
-	}
-	return iter
-}
-
-// writeBackLoopScope copies iteration-local variable values back so the update
-// clause and next test see the latest values.
-func (i *Interpreter) writeBackLoopScope(loopEnv, iterEnv *Environment) {
-	for name, b := range loopEnv.vars {
-		if ib, ok := iterEnv.vars[name]; ok {
-			b.value = ib.value
+// createPerIterationEnvironment implements CreatePerIterationEnvironment
+// (ECMA-262 §14.7.4.4): a new declarative environment whose outer scope is the
+// loop's outer scope, with each per-iteration binding copied from the previous
+// iteration's environment.
+func (i *Interpreter) createPerIterationEnvironment(last, outer *Environment, names []string) *Environment {
+	iter := NewEnvironment(outer, false)
+	for _, name := range names {
+		if b, ok := last.vars[name]; ok {
+			iter.vars[name] = &binding{value: b.value, mutable: b.mutable, initialized: b.initialized}
 		}
 	}
+	return iter
 }
 
 // evalForIn evaluates for-in and for-of loops.
