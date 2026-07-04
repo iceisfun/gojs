@@ -62,6 +62,26 @@ type Lexer struct {
 	templateBraceStack []int
 	braceDepth         int
 
+	// braceKinds records, for each currently-open '{' emitted as an LBRACE
+	// token, whether closing it ends a value expression (true) — an object
+	// literal or the body of a function expression — as opposed to a block or
+	// statement body (false). lastRBraceObject holds the kind of the most
+	// recently closed '}' so regexAllowed can treat a value-ending '}' as the
+	// end of an expression (a following '/' is then division, not a regex).
+	braceKinds       []bool
+	lastRBraceObject bool
+
+	// Function-expression body tracking. A function expression is a value, so a
+	// '/' after its body's '}' is division (`function(){}/2`), whereas a '/'
+	// after a function *declaration* or a plain block begins a regex. When the
+	// `function` keyword appears in operand position, funcExprParamNext marks
+	// that its parameter '(' is next; parenIsFuncParams records which open
+	// parens are such lists; funcExprBodyNext marks that the next '{' opens the
+	// body of a function expression.
+	parenIsFuncParams []bool
+	funcExprParamNext bool
+	funcExprBodyNext  bool
+
 	// legacyEscape records, while a string literal is being scanned, that it
 	// contained a legacy octal escape (\1..\7, \0 followed by a digit) or a
 	// non-octal decimal escape (\8, \9). These are legal in sloppy mode but are
@@ -264,6 +284,13 @@ func (l *Lexer) emit(t token.Token) token.Token {
 		t.End = l.pos()
 	}
 	if t.Type != token.COMMENT {
+		// A `function` keyword in operand position introduces a function
+		// expression, whose body's closing '}' ends a value (so a following '/'
+		// is division). Compute this against the *previous* token, before
+		// prevType is overwritten below. The parameter '(' is the next paren.
+		if t.Type == token.FUNCTION {
+			l.funcExprParamNext = l.braceOpensObjectLiteral(t.NewlineBefore)
+		}
 		l.prevType = t.Type
 	}
 	return t
@@ -360,8 +387,51 @@ func (l *Lexer) regexAllowed() bool {
 		// those are deliberately excluded and keep starting a regex.
 		token.OF, token.LET, token.STATIC, token.GET, token.SET, token.ASYNC:
 		return false
+	case token.RBRACE:
+		// A '}' is ambiguous: it may close an object literal (a value, after
+		// which '/' is division) or a block/function body (after which '/'
+		// begins a regex, e.g. `{}` `/re/`). braceKinds tracked which one this
+		// '}' closed; only an object-literal close switches to division.
+		return !l.lastRBraceObject
 	default:
 		return true
+	}
+}
+
+// braceOpensObjectLiteral reports whether a '{' just scanned begins an object
+// literal (an expression) rather than a block statement, based on the preceding
+// significant token. It is only ever true in operand position — after a token
+// that requires an expression to follow — so a block-opening '{' is never
+// misclassified. nl reports whether a line terminator preceded the '{', which
+// matters for the newline-restricted productions (`return`/`throw`/`yield`),
+// where an intervening newline triggers ASI and makes '{' a block.
+func (l *Lexer) braceOpensObjectLiteral(nl bool) bool {
+	switch l.prevType {
+	// Punctuators and operators that require an operand next.
+	case token.LPAREN, token.LBRACKET, token.COMMA, token.QUESTION, token.ELLIPSIS,
+		token.ASSIGN, token.PLUS_ASSIGN, token.MINUS_ASSIGN, token.STAR_ASSIGN,
+		token.SLASH_ASSIGN, token.PERCENT_ASSIGN, token.EXP_ASSIGN,
+		token.SHL_ASSIGN, token.SHR_ASSIGN, token.USHR_ASSIGN,
+		token.BIT_AND_ASSIGN, token.BIT_OR_ASSIGN, token.BIT_XOR_ASSIGN,
+		token.AND_ASSIGN, token.OR_ASSIGN, token.NULLISH_ASSIGN,
+		token.PLUS, token.MINUS, token.STAR, token.SLASH, token.PERCENT, token.EXP,
+		token.EQ, token.NE, token.STRICT_EQ, token.STRICT_NE,
+		token.LT, token.GT, token.LE, token.GE,
+		token.AND, token.OR, token.NOT, token.NULLISH,
+		token.BIT_AND, token.BIT_OR, token.BIT_XOR, token.BIT_NOT,
+		token.SHL, token.SHR, token.USHR,
+		// Keyword operators/expression heads after which '{' is an object literal
+		// and no ASI can intervene to make it a block.
+		token.TYPEOF, token.VOID, token.DELETE, token.NEW,
+		token.IN, token.INSTANCEOF, token.AWAIT, token.CASE:
+		return true
+	// Newline-restricted productions: `return {}`, `throw {}`, `yield {}` open an
+	// object literal only when the '{' is on the same line; a preceding newline
+	// triggers ASI, making '{' a block statement.
+	case token.RETURN, token.THROW, token.YIELD:
+		return !nl
+	default:
+		return false
 	}
 }
 
@@ -374,10 +444,33 @@ func (l *Lexer) scanPunct(start token.Pos, nl bool) token.Token {
 		for i := 0; i < n; i++ {
 			l.readRune()
 		}
-		if typ == token.LBRACE {
+		switch typ {
+		case token.LBRACE:
 			l.braceDepth++
-		} else if typ == token.RBRACE {
+			valueEnding := l.funcExprBodyNext || l.braceOpensObjectLiteral(nl)
+			l.funcExprBodyNext = false
+			l.braceKinds = append(l.braceKinds, valueEnding)
+		case token.RBRACE:
 			l.braceDepth--
+			if n := len(l.braceKinds); n > 0 {
+				l.lastRBraceObject = l.braceKinds[n-1]
+				l.braceKinds = l.braceKinds[:n-1]
+			} else {
+				l.lastRBraceObject = false
+			}
+		case token.LPAREN:
+			isParams := l.funcExprParamNext
+			l.funcExprParamNext = false
+			l.parenIsFuncParams = append(l.parenIsFuncParams, isParams)
+		case token.RPAREN:
+			if n := len(l.parenIsFuncParams); n > 0 {
+				isParams := l.parenIsFuncParams[n-1]
+				l.parenIsFuncParams = l.parenIsFuncParams[:n-1]
+				if isParams {
+					// The next '{' opens this function expression's body.
+					l.funcExprBodyNext = true
+				}
+			}
 		}
 		return token.Token{Type: typ, Literal: raw, Raw: raw, Pos: start, NewlineBefore: nl}
 	}
