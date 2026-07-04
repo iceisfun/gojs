@@ -93,6 +93,12 @@ func ParseMeta(src string) Meta {
 	}
 	block := src[start+len("/*---") : start+end]
 
+	// A test may use CR or CRLF line terminators (the line-terminator-normalisation
+	// tests do), so normalize the frontmatter block before splitting — otherwise a
+	// CR-only file collapses to one line and includes:/flags:/features: go unseen.
+	// Only the metadata block is normalized; the test body keeps its terminators.
+	block = strings.ReplaceAll(block, "\r\n", "\n")
+	block = strings.ReplaceAll(block, "\r", "\n")
 	lines := strings.Split(block, "\n")
 	for idx := 0; idx < len(lines); idx++ {
 		line := strings.TrimRight(lines[idx], " \t")
