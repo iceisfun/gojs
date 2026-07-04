@@ -325,8 +325,12 @@ func (p *parser) checkStatementPosition(annexBFunc bool) {
 // position, rejecting declarations the grammar forbids there. annexBFunc is
 // true for the if/else and labelled-statement bodies where Annex B (B.3.2/B.3.4)
 // relaxes a plain FunctionDeclaration in sloppy code, and false for iteration
-// bodies where no such relaxation applies.
-func (p *parser) parseSubStatement(annexBFunc bool) ast.Stmt {
+// bodies where no such relaxation applies. labelledBody is true only for the
+// body of a LabelledStatement, the sole position where a *labelled* function
+// declaration is permitted (Annex B.3.2); every other single-statement position
+// (if/else, iteration) makes IsLabelledFunction(Statement) a Syntax Error
+// (§13.6.1, §14.7.1).
+func (p *parser) parseSubStatement(annexBFunc, labelledBody bool) ast.Stmt {
 	// A leading `let` in a Statement-only position is the identifier `let` used
 	// as an ExpressionStatement, never a LexicalDeclaration. The one exception is
 	// the lookahead-restricted `let [` form, which is an early error here.
@@ -340,9 +344,11 @@ func (p *parser) parseSubStatement(annexBFunc bool) ast.Stmt {
 	}
 	p.checkStatementPosition(annexBFunc)
 	stmt := p.parseStmt()
-	// In an iteration-statement body a LabelledFunctionDeclaration is a Syntax
-	// Error (ECMA-262 B.3.2); annexBFunc is false only for those loop bodies.
-	if !annexBFunc && isLabeledFunction(stmt) {
+	// A LabelledFunctionDeclaration is permitted only as the body of another
+	// LabelledStatement (Annex B.3.2). In every other single-statement position
+	// — an if/else consequent or an iteration body — IsLabelledFunction of the
+	// Statement is a Syntax Error.
+	if !labelledBody && isLabeledFunction(stmt) {
 		p.errorAt(stmt.Pos(), "Labelled function declaration cannot appear in a single-statement context")
 	}
 	return stmt

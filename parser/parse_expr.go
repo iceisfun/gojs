@@ -94,7 +94,7 @@ func (p *parser) parseAssignExpr() ast.Expr {
 	// is never a valid identifier and parseYield reports the error). In sloppy
 	// non-generator code `yield` is an ordinary IdentifierReference, so fall
 	// through to the normal expression path, which yields an Ident.
-	if p.at(token.YIELD) && (p.inGenerator || p.strict) {
+	if p.at(token.YIELD) && p.yieldIsReserved() {
 		return p.parseYield()
 	}
 
@@ -274,7 +274,7 @@ func (p *parser) parseUnary() ast.Expr {
 		// functions and generators, script global code, and any function nested
 		// inside an async one — `await` is a plain IdentifierReference, so fall
 		// through to parsePrimary, which yields an Ident.
-		if p.inAsync || (p.moduleMode && p.inFunction == 0) {
+		if p.awaitIsReserved() {
 			op := p.next()
 			// An AwaitExpression may not appear in an async function's formal
 			// parameter list (ECMA-262 CreateDynamicFunction, step for

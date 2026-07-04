@@ -16,10 +16,13 @@ func (p *parser) parseStmt() ast.Stmt {
 
 	tk := p.cur()
 
-	// Labeled statement: IDENT ':' Statement. Detected before the concrete
-	// statement dispatch so the label chain can accumulate before an iteration
-	// statement consumes it (see parseLabeledStmt).
-	if tk.Type == token.IDENT && p.peek(1).Type == token.COLON {
+	// Labeled statement: LabelIdentifier ':' Statement. Detected before the
+	// concrete statement dispatch so the label chain can accumulate before an
+	// iteration statement consumes it (see parseLabeledStmt). The label may be
+	// `yield`/`await` where those are not reserved (sloppy non-generator code,
+	// and non-async/non-module code respectively), matching their availability
+	// as an IdentifierReference.
+	if p.peek(1).Type == token.COLON && p.startsLabelIdent() {
 		return p.parseLabeledStmt()
 	}
 
@@ -99,6 +102,35 @@ func (p *parser) parseStmt() ast.Stmt {
 // same function (ECMA-262 §14.13.1 ContainsDuplicateLabels), and appends it to
 // the pending-label chain so an immediately-following IterationStatement can
 // treat it as a legal `continue` target.
+// yieldIsReserved reports whether `yield` is the reserved YieldExpression
+// keyword in the current context (inside a generator, or in strict-mode code)
+// rather than a usable IdentifierReference/LabelIdentifier.
+func (p *parser) yieldIsReserved() bool { return p.inGenerator || p.strict }
+
+// awaitIsReserved reports whether `await` is the reserved AwaitExpression
+// keyword in the current context — an async function/arrow (p.inAsync), the top
+// level of a module (p.moduleMode && p.inFunction == 0), or a class static
+// initialization block — rather than a usable identifier.
+func (p *parser) awaitIsReserved() bool {
+	return p.staticBlockAwait || p.inAsync || (p.moduleMode && p.inFunction == 0)
+}
+
+// startsLabelIdent reports whether the current token is a LabelIdentifier that
+// may begin a LabelledStatement. Besides a plain identifier this includes
+// `yield`/`await` wherever they are not reserved, matching their use as an
+// IdentifierReference.
+func (p *parser) startsLabelIdent() bool {
+	switch p.cur().Type {
+	case token.IDENT:
+		return true
+	case token.YIELD:
+		return !p.yieldIsReserved()
+	case token.AWAIT:
+		return !p.awaitIsReserved()
+	}
+	return false
+}
+
 func (p *parser) parseLabeledStmt() ast.Stmt {
 	label := p.next()
 	p.checkEscapedReserved(label)
@@ -111,7 +143,7 @@ func (p *parser) parseLabeledStmt() ast.Stmt {
 	p.next() // ':'
 	p.labelSet = append(p.labelSet, labelInfo{name: name})
 	p.pendingLabels = append(p.pendingLabels, name)
-	body := p.parseSubStatement(true)
+	body := p.parseSubStatement(true, true)
 	p.labelSet = p.labelSet[:len(p.labelSet)-1]
 	return &ast.LabeledStmt{Label: &ast.Ident{NamePos: label.Pos, Name: name}, Body: body}
 }
@@ -372,10 +404,10 @@ func (p *parser) parseIf() ast.Stmt {
 	p.expect(token.LPAREN)
 	test := p.parseExpression()
 	p.expect(token.RPAREN)
-	cons := p.parseSubStatement(true)
+	cons := p.parseSubStatement(true, false)
 	stmt := &ast.IfStmt{Keyword: kw.Pos, Test: test, Consequent: cons}
 	if p.accept(token.ELSE) {
-		stmt.Alternate = p.parseSubStatement(true)
+		stmt.Alternate = p.parseSubStatement(true, false)
 	}
 	return stmt
 }
@@ -486,7 +518,7 @@ func (p *parser) forRight(isOf bool) ast.Expr {
 // parseLoopBody parses a loop body while tracking loop context for break/continue.
 func (p *parser) parseLoopBody() ast.Stmt {
 	p.inLoop++
-	body := p.parseSubStatement(false)
+	body := p.parseSubStatement(false, false)
 	p.inLoop--
 	return body
 }
@@ -515,7 +547,7 @@ func (p *parser) parseWith() ast.Stmt {
 	// The body is a Statement: no Annex B relaxation applies to a `with` (B.3.4
 	// covers only IfStatement clauses, B.3.2 only StatementList positions), so a
 	// plain or labelled FunctionDeclaration here is a SyntaxError (§14.11.1).
-	body := p.parseSubStatement(false)
+	body := p.parseSubStatement(false, false)
 	return &ast.WithStmt{Keyword: kw.Pos, Object: obj, Body: body}
 }
 
