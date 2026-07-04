@@ -3,8 +3,9 @@ package parser
 import "testing"
 
 // TestDynamicImportValid checks that the well-formed dynamic import forms parse
-// without error: a required specifier, an optional trailing comma, an optional
-// second (options/attributes) argument, and the import.meta meta-property.
+// without error in Script goal: a required specifier, an optional trailing
+// comma, and an optional second (options/attributes) argument. import.meta is a
+// module-only meta-property and is covered separately by TestImportMetaGoal.
 func TestDynamicImportValid(t *testing.T) {
 	valid := []string{
 		`import('./mod.js');`,
@@ -13,13 +14,24 @@ func TestDynamicImportValid(t *testing.T) {
 		`import('./mod.js', {},);`,
 		`import(x);`,
 		`import(x + y);`,
-		`import.meta;`,
-		`import.meta.url;`,
 		`x = import('./mod.js');`,
 	}
 	for _, src := range valid {
 		if _, err := Parse("test", src); err != nil {
 			t.Errorf("Parse(%q) = %v, want success", src, err)
+		}
+	}
+}
+
+// TestImportMetaGoal checks that import.meta is a Syntax Error in Script goal
+// (ECMA-262 §13.3.12.1 early error) but parses in Module goal.
+func TestImportMetaGoal(t *testing.T) {
+	for _, src := range []string{`import.meta;`, `import.meta.url;`} {
+		if _, err := Parse("test", src); err == nil {
+			t.Errorf("Parse(%q) = nil error, want SyntaxError (Script goal)", src)
+		}
+		if _, err := ParseModule("test", src); err != nil {
+			t.Errorf("ParseModule(%q) = %v, want success (Module goal)", src, err)
 		}
 	}
 }
