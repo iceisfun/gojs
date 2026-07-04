@@ -280,7 +280,10 @@ func (i *Interpreter) evalStmt(ctx context.Context, stmt ast.Stmt, env *Environm
 	case *ast.ExprStmt:
 		return i.evalExpr(ctx, s.X, env)
 	case *ast.EmptyStmt, *ast.DebuggerStmt:
-		return Undef, nil
+		// Both produce NormalCompletion(empty) (§14.4.1, §14.16.1), so they must
+		// not overwrite a preceding statement's completion value — the value of
+		// `eval('2;;')` is 2. Return nil (empty) rather than undefined.
+		return nil, nil
 	case *ast.VarDecl:
 		// A VariableStatement and a LexicalDeclaration both produce an empty
 		// completion (ECMA-262 §14.3.2.1, §14.3.1.1), so they must not overwrite
@@ -558,6 +561,14 @@ func (i *Interpreter) evalLabeled(ctx context.Context, s *ast.LabeledStmt, env *
 	}
 	if err != nil {
 		if b, ok := err.(*breakSignal); ok && b.label == label {
+			// §14.13.4 step 4a: a break targeting this label yields
+			// NormalCompletion(stmtResult.[[Value]]). gojs's break carries an empty
+			// value and execStmts hands out the LabelledItem's accumulated value as
+			// v (already UpdateEmpty-folded), so v is that completion value; an
+			// empty (nil) value becomes undefined.
+			if v != nil {
+				return v, nil
+			}
 			return Undef, nil
 		}
 		return v, err
