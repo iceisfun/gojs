@@ -57,6 +57,16 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 	// nested in strict code; modules force strict globally.
 	strict := def.Strict || i.forceStrict()
 
+	// When the bytecode VM is enabled, try to compile the body once (generators
+	// and async functions keep their coroutine drivers and are never compiled).
+	// A nil result means the compiler declined; the tree-walker path runs instead.
+	var bcCode *codeObject
+	if i.useBytecode && !def.Generator && !def.Async {
+		if code, ok := i.compileFunctionBody(def, strict); ok {
+			bcCode = code
+		}
+	}
+
 	call := func(ctx context.Context, this Value, args []Value) (Value, error) {
 		if err := i.checkContext(); err != nil {
 			return nil, err
@@ -149,6 +159,9 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 			}
 		}
 		bodyEnv := bodyVarEnv(def.Params, def.Body, env)
+		if bcCode != nil {
+			return i.runFunctionBodyBC(ctx, funcFrameName(fnObj, name), def.Body, bcCode, bodyEnv)
+		}
 		return i.runFunctionBody(ctx, funcFrameName(fnObj, name), def.Body, bodyEnv)
 	}
 
@@ -569,4 +582,20 @@ func (i *Interpreter) runFunctionBody(ctx context.Context, name string, body *as
 		return nil, err
 	}
 	return Undef, nil
+}
+
+// runFunctionBodyBC is runFunctionBody for a body compiled to bytecode: it does
+// the same frame/paramEnv bookkeeping and function-level hoisting, then runs the
+// compiled code on the stack VM. execCode returns the completion value directly
+// (a `return` yields its value; falling off the end yields undefined), so no
+// returnSignal translation is needed here.
+func (i *Interpreter) runFunctionBodyBC(ctx context.Context, name string, body *ast.BlockStmt, code *codeObject, env *Environment) (Value, error) {
+	defer i.enterFrame(name)()
+	savedParamEnv := i.paramDefaultEnv
+	i.paramDefaultEnv = nil
+	defer func() { i.paramDefaultEnv = savedParamEnv }()
+	if err := i.hoistDeclarations(ctx, body.Body, env, true); err != nil {
+		return nil, err
+	}
+	return i.execCode(ctx, code, env)
 }

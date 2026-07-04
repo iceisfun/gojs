@@ -49,6 +49,11 @@ type Interpreter struct {
 	os      OsProvider
 	net     NetProvider
 
+	// useBytecode enables the optional bytecode VM (bc_*.go): eligible function
+	// bodies are compiled and run on the stack VM instead of the tree-walker.
+	// Off by default; the tree-walker remains the reference engine.
+	useBytecode bool
+
 	// sourceMapper, when set, maps generated (transpiled) positions in error
 	// stacks back to their original source (e.g. TypeScript). curPos is the
 	// position of the top-level statement executing; callStack holds one frame
@@ -246,6 +251,16 @@ func WithPrintProvider(p PrintProvider) Option {
 // WithTimeProvider sets the wall-clock provider backing Date.now and Date.
 func WithTimeProvider(p TimeProvider) Option {
 	return func(i *Interpreter) { i.clock = p }
+}
+
+// WithBytecode enables the optional bytecode VM: eligible (non-generator,
+// non-async) function bodies are compiled to bytecode and executed on the stack
+// VM (bc_*.go) instead of the tree-walker. Any construct the compiler does not
+// yet handle falls back to the tree-walker automatically — per-subtree where
+// possible, or for the whole function otherwise — so behavior is unchanged. This
+// is an experimental performance path; the tree-walker remains the reference.
+func WithBytecode() Option {
+	return func(i *Interpreter) { i.useBytecode = true }
 }
 
 // WithTimerProvider enables setTimeout/setInterval/setImmediate backed by p.

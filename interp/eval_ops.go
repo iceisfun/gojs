@@ -27,7 +27,15 @@ func (i *Interpreter) evalUnary(ctx context.Context, e *ast.UnaryExpr, env *Envi
 	if err != nil {
 		return nil, err
 	}
-	switch e.Op {
+	return i.applyUnaryValue(ctx, e.Op, v)
+}
+
+// applyUnaryValue applies a prefix operator (other than typeof/delete, which need
+// the operand expression) to an already-evaluated value. Shared by the
+// tree-walker (evalUnary) and the bytecode VM (opUnop) so both agree on the
+// BigInt/ToNumeric edge cases.
+func (i *Interpreter) applyUnaryValue(ctx context.Context, op token.Type, v Value) (Value, error) {
+	switch op {
 	case token.NOT:
 		return Bool(!ToBoolean(v)), nil
 	case token.MINUS:
