@@ -1,0 +1,160 @@
+=== RUN   TestT262
+    test262_test.go:113: Test262 [built-ins/Iterator]: 858 pass, 156 fail, 7 skip  (84.6% of runnable)
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/from/iterable-primitives.js: Test262Error: Expected SameValue(«"object"», «"string"») to be true
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/from/iterable-primitives.js: Test262Error: Expected SameValue(«"object"», «"string"») to be true
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/basic-longest.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/basic-longest.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/basic-shortest.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/basic-shortest.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/basic-strict.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/basic-strict.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/is-function.js: Test262Error: The value of `typeof Iterator.zip` is 'function' Expected SameValue(«"undefined"», «"function"») to be true
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/is-function.js: Test262Error: The value of `typeof Iterator.zip` is 'function' Expected SameValue(«"undefined"», «"function"») to be true
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterables-containing-string-objects.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterables-containing-string-objects.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterables-iteration-after-reading-options.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterables-iteration-after-reading-options.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterables-iteration-get-iterator-flattenable-abrupt-completion.js: Test262Error: Actual [] and expected [call next, call next, call next, close second iterator, close first iterator, close iterables iterator] should have the same contents. 
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterables-iteration-get-iterator-flattenable-abrupt-completion.js: Test262Error: Actual [] and expected [call next, call next, call next, close second iterator, close first iterator, close iterables iterator] should have the same contents. 
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterables-iteration-iterator-step-value-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterables-iteration-iterator-step-value-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterables-iteration.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterables-iteration.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-iterator-close-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-iterator-close-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-iterator-step-value-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-iterator-step-value-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-longest-iterator-close-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-longest-iterator-close-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-shortest-iterator-close-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-shortest-iterator-close-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-strict-checks-remaining-done.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-strict-checks-remaining-done.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-close-i-is-not-zero-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-close-i-is-not-zero-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-step-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-step-abrupt-completion.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/iterator-zip-iteration.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/iterator-zip-iteration.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/length.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/length.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/name.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/name.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/options-mode.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/options-mode.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/options-padding.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/options-padding.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/options.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/options.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/padding-iteration-get-iterator-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/padding-iteration-get-iterator-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/padding-iteration-iterator-close-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/padding-iteration-iterator-close-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/padding-iteration-iterator-step-value-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/padding-iteration-iterator-step-value-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/padding-iteration.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/padding-iteration.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/prop-desc.js: Test262Error: zip should be an own property
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/prop-desc.js: Test262Error: zip should be an own property
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/proto.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/proto.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/result-arrays-are-fresh.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/result-arrays-are-fresh.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/result-is-iterator.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/result-is-iterator.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/suspended-start-iterator-close-calls-next.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/suspended-start-iterator-close-calls-next.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/suspended-start-iterator-close-calls-return.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/suspended-start-iterator-close-calls-return.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/suspended-yield-iterator-close-calls-next.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/suspended-yield-iterator-close-calls-next.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zip/suspended-yield-iterator-close-calls-return.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zip/suspended-yield-iterator-close-calls-return.js: TypeError: Iterator.zip is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/basic-longest.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/basic-longest.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/basic-shortest.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/basic-shortest.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/basic-strict.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/basic-strict.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/is-function.js: Test262Error: The value of `typeof Iterator.zipKeyed` is 'function' Expected SameValue(«"undefined"», «"function"») to be true
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/is-function.js: Test262Error: The value of `typeof Iterator.zipKeyed` is 'function' Expected SameValue(«"undefined"», «"function"») to be true
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-containing-string-objects.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-containing-string-objects.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-after-reading-options.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-after-reading-options.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-deleted.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-deleted.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-enumerable.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-enumerable.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-get-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-get-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-get-iterator-flattenable-abrupt-completion.js: Test262Error: Actual [] and expected [close second iterator, close first iterator] should have the same contents. 
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-get-iterator-flattenable-abrupt-completion.js: Test262Error: Actual [] and expected [close second iterator, close first iterator] should have the same contents. 
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-get-own-property-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-get-own-property-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-inherited.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-inherited.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-symbol-key.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-symbol-key.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration-undefined.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration-undefined.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterables-iteration.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterables-iteration.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-iterator-close-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-iterator-close-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-iterator-step-value-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-iterator-step-value-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-longest-iterator-close-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-longest-iterator-close-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-shortest-iterator-close-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-shortest-iterator-close-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-checks-remaining-done.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-checks-remaining-done.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-not-zero-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-not-zero-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-step-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-step-abrupt-completion.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/iterator-zip-iteration.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/iterator-zip-iteration.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/length.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/length.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/name.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/name.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/options-mode.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/options-mode.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/options-padding.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/options-padding.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/options.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/options.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/padding-iteration-get-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/padding-iteration-get-abrupt-completion.js: Test262Error: Expected a ExpectedError but got a TypeError
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/padding-iteration.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/padding-iteration.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/prop-desc.js: Test262Error: zipKeyed should be an own property
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/prop-desc.js: Test262Error: zipKeyed should be an own property
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/proto.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/proto.js: TypeError: Cannot convert undefined or null to object
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/result-is-iterator.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/result-is-iterator.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/result-objects-are-fresh.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/result-objects-are-fresh.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/results-object-from-array.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/results-object-from-array.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/results-object-has-default-attributes.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/results-object-has-default-attributes.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/results-object-has-no-undefined-iterables-properties.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/results-object-has-no-undefined-iterables-properties.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/suspended-start-iterator-close-calls-next.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/suspended-start-iterator-close-calls-next.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/suspended-start-iterator-close-calls-return.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/suspended-start-iterator-close-calls-return.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/suspended-yield-iterator-close-calls-next.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/suspended-yield-iterator-close-calls-next.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [sloppy] built-ins/Iterator/zipKeyed/suspended-yield-iterator-close-calls-return.js: TypeError: Iterator.zipKeyed is not a function
+    test262_test.go:118:   FAIL [strict] built-ins/Iterator/zipKeyed/suspended-yield-iterator-close-calls-return.js: TypeError: Iterator.zipKeyed is not a function
+--- PASS: TestT262 (3.13s)
+PASS

@@ -243,9 +243,16 @@ func (i *Interpreter) iteratorHelperReturn(ctx context.Context, this Value, _ []
 		return i.newIterResult(Undef, true), nil
 	}
 	st.done = true
-	// While closing, the generator is in the executing state, so a re-entrant
-	// next/return must observe running and throw.
-	st.running = true
+	// The generator state during IteratorCloseAll differs by suspension point:
+	//   - suspended-start (never resumed): return closes the underlying iterators
+	//     directly and the state is "completed", so a re-entrant next()/return()
+	//     from an underlying return() observes "completed" and yields done.
+	//   - suspended-yield (already produced a value): return RESUMES the generator
+	//     to run its close, so the state is "executing" — a re-entrant next()/
+	//     return() must throw the "already running" TypeError.
+	if st.started {
+		st.running = true
+	}
 	// IteratorCloseAll closes the underlying iterators in reverse List order.
 	var pending error
 	for k := len(st.live) - 1; k >= 0; k-- {
@@ -320,6 +327,8 @@ func (i *Interpreter) initIterator() {
 
 	// Iterator.from(obj). §27.1.4.1
 	i.defineMethod(ctor, "from", 1, i.iteratorFrom)
+	i.defineMethod(ctor, "zip", 1, i.iteratorZip)
+	i.defineMethod(ctor, "zipKeyed", 1, i.iteratorZipKeyed)
 
 	// Iterator.concat(...items). §27.1.4.2
 	i.defineMethod(ctor, "concat", 0, i.iteratorConcat)
