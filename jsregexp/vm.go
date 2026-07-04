@@ -74,6 +74,20 @@ func (m *machine) codePointAt(sp int) (rune, int) {
 	return c, 1
 }
 
+// codePointBefore returns the character ending immediately before code-unit
+// index sp and its width in code units (1, or 2 for a surrogate pair). It is the
+// leftward companion of codePointAt, used when a lookbehind body is matched
+// right-to-left. In non-Unicode mode every unit is a one-unit character.
+func (m *machine) codePointBefore(sp int) (rune, int) {
+	c := rune(m.input[sp-1])
+	if m.unicode && c >= 0xDC00 && c <= 0xDFFF && sp-2 >= 0 {
+		if hi := rune(m.input[sp-2]); hi >= 0xD800 && hi <= 0xDBFF {
+			return (hi-0xD800)<<10 + (c - 0xDC00) + 0x10000, 2
+		}
+	}
+	return c, 1
+}
+
 // step accounts one unit of work and enforces the budget and context. It returns
 // false (with m.err set) once the attempt must be abandoned; every matcher checks
 // m.err on entry so the failure unwinds the whole recursion promptly.

@@ -16,6 +16,7 @@ type compiler struct {
 	ml    bool // multiline
 	da    bool // dotAll
 	u     bool // unicode mode (u or v)
+	back  bool // compile for right-to-left matching (inside a lookbehind body)
 }
 
 // compile builds re.prog from the parsed pattern. It is idempotent.
@@ -119,11 +120,38 @@ func consumerMatcher(cons unitConsumer) matcher {
 	}
 }
 
+// readCP reads one code point in the compiler's match direction: forward returns
+// the character at sp and the position after it; backward (inside a lookbehind)
+// returns the character ending at sp and the position before it. ok is false at
+// the boundary in the direction of travel.
+func (c *compiler) readCP(m *machine, sp int) (r rune, next int, ok bool) {
+	if c.back {
+		if sp <= 0 {
+			return 0, 0, false
+		}
+		r, w := m.codePointBefore(sp)
+		return r, sp - w, true
+	}
+	if sp >= len(m.input) {
+		return 0, 0, false
+	}
+	r, w := m.codePointAt(sp)
+	return r, sp + w, true
+}
+
 func (c *compiler) charConsumer(r rune) unitConsumer {
 	// A non-Unicode astral literal is itself a surrogate pair — match both units.
 	if !c.u && r > 0xFFFF {
 		hi, lo := utf16.EncodeRune(r)
 		uh, ul := uint16(hi), uint16(lo)
+		if c.back {
+			return func(m *machine, sp int) (int, bool) {
+				if sp-2 >= 0 && m.input[sp-2] == uh && m.input[sp-1] == ul {
+					return sp - 2, true
+				}
+				return 0, false
+			}
+		}
 		return func(m *machine, sp int) (int, bool) {
 			if sp+1 < len(m.input) && m.input[sp] == uh && m.input[sp+1] == ul {
 				return sp + 2, true
@@ -134,12 +162,12 @@ func (c *compiler) charConsumer(r rune) unitConsumer {
 	ic, u := c.ic, c.u
 	cr := canonicalize(r, u)
 	return func(m *machine, sp int) (int, bool) {
-		if sp >= len(m.input) {
+		ch, next, ok := c.readCP(m, sp)
+		if !ok {
 			return 0, false
 		}
-		ch, w := m.codePointAt(sp)
 		if ch == r || (ic && canonicalize(ch, u) == cr) {
-			return sp + w, true
+			return next, true
 		}
 		return 0, false
 	}
@@ -148,12 +176,12 @@ func (c *compiler) charConsumer(r rune) unitConsumer {
 func (c *compiler) anyConsumer() unitConsumer {
 	da := c.da
 	return func(m *machine, sp int) (int, bool) {
-		if sp >= len(m.input) {
+		r, next, ok := c.readCP(m, sp)
+		if !ok {
 			return 0, false
 		}
-		r, w := m.codePointAt(sp)
 		if da || !isLineTerminator(r) {
-			return sp + w, true
+			return next, true
 		}
 		return 0, false
 	}
@@ -162,12 +190,12 @@ func (c *compiler) anyConsumer() unitConsumer {
 func (c *compiler) classConsumer(set *runeSet, negate bool) unitConsumer {
 	ic, u := c.ic, c.u
 	return func(m *machine, sp int) (int, bool) {
-		if sp >= len(m.input) {
+		r, next, ok := c.readCP(m, sp)
+		if !ok {
 			return 0, false
 		}
-		r, w := m.codePointAt(sp)
 		if classContainsFold(set, r, ic, u) != negate {
-			return sp + w, true
+			return next, true
 		}
 		return 0, false
 	}
@@ -372,6 +400,13 @@ func (c *compiler) concat(terms []Node) (matcher, error) {
 		}
 		ms[i] = m
 	}
+	// Right-to-left matching consumes the rightmost term first, so apply the
+	// (already backward-compiled) terms in reverse source order.
+	if c.back {
+		for i, j := 0, len(ms)-1; i < j; i, j = i+1, j-1 {
+			ms[i], ms[j] = ms[j], ms[i]
+		}
+	}
 	return func(m *machine, sp int, k cont) bool {
 		var run func(i, sp int) bool
 		run = func(i, sp int) bool {
@@ -419,11 +454,19 @@ func (c *compiler) capture(cap *Capture) (matcher, error) {
 		return nil, err
 	}
 	i2, i2p1 := 2*cap.Index, 2*cap.Index+1
+	back := c.back
 	return func(m *machine, sp int, k cont) bool {
 		oldS, oldE := m.caps[i2], m.caps[i2p1]
 		ok := body(m, sp, func(end int) bool {
 			ps, pe := m.caps[i2], m.caps[i2p1]
-			m.caps[i2], m.caps[i2p1] = sp, end
+			// Store the group as [start,end) with start<end. Forward matching
+			// enters at the start (sp) and exits at the end; backward matching
+			// enters at the end (sp) and exits at the start.
+			if back {
+				m.caps[i2], m.caps[i2p1] = end, sp
+			} else {
+				m.caps[i2], m.caps[i2p1] = sp, end
+			}
 			if k(end) {
 				return true
 			}
@@ -441,6 +484,7 @@ func (c *compiler) backref(index int) matcher {
 	i2, i2p1 := 2*index, 2*index+1
 	ic := c.ic
 	u := c.u
+	back := c.back
 	return func(m *machine, sp int, k cont) bool {
 		if m.err != nil || !m.step() {
 			return false
@@ -448,6 +492,36 @@ func (c *compiler) backref(index int) matcher {
 		s, e := m.caps[i2], m.caps[i2p1]
 		if s < 0 || e < 0 {
 			return k(sp) // an unmatched group backreference matches the empty string
+		}
+		if back {
+			// Match the referenced text [s,e) so that it ends at sp, consuming
+			// leftward. Case-folding compares whole code points from both ends.
+			if !ic {
+				n := e - s
+				if sp-n < 0 {
+					return false
+				}
+				for x := 0; x < n; x++ {
+					if m.input[sp-n+x] != m.input[s+x] {
+						return false
+					}
+				}
+				return k(sp - n)
+			}
+			i, j := sp, e
+			for j > s {
+				if i <= 0 {
+					return false
+				}
+				ri, wi := m.codePointBefore(i)
+				rj, wj := m.codePointBefore(j)
+				if canonicalize(ri, u) != canonicalize(rj, u) {
+					return false
+				}
+				i -= wi
+				j -= wj
+			}
+			return k(i)
 		}
 		if !ic {
 			n := e - s
@@ -604,51 +678,42 @@ func (c *compiler) simpleQuantifier(cons unitConsumer, min, max int, greedy bool
 }
 
 func (c *compiler) lookaround(l *Lookaround) (matcher, error) {
-	body, err := c.node(l.Body)
+	// A lookahead body always matches forward and a lookbehind body always
+	// matches backward (right-to-left), independent of the enclosing direction —
+	// so compile the body with its own direction rather than inheriting c.back.
+	sub := *c
+	sub.back = l.Behind
+	body, err := sub.node(l.Body)
 	if err != nil {
 		return nil, err
 	}
-	if !l.Behind {
-		if !l.Negate {
-			// Positive lookahead: zero-width, captures retained, backtrackable.
-			return func(m *machine, sp int, k cont) bool {
-				if m.err != nil {
-					return false
-				}
-				return body(m, sp, func(int) bool { return k(sp) })
-			}, nil
-		}
-		// Negative lookahead: succeeds iff body fails; captures discarded.
-		return func(m *machine, sp int, k cont) bool {
-			if m.err != nil {
-				return false
-			}
-			saved := cloneAll(m)
-			found := body(m, sp, func(int) bool { return true })
-			setAll(m, saved)
-			if found {
-				return false
-			}
-			return k(sp)
-		}, nil
-	}
 
-	// Lookbehind: match body ending exactly at sp. Emulated by scanning candidate
-	// start positions from nearest to farthest (full right-to-left matching is a
-	// unicode-phase refinement).
+	// Both directions are zero-width from the outside: the body is anchored at sp
+	// (a lookahead consumes rightward to some end, a lookbehind consumes leftward
+	// to some start) and the continuation resumes at sp regardless.
+	//
+	// A lookaround is atomic with respect to the surrounding match (§22.2.2.4/.5):
+	// the body is run with a continuation that always succeeds, so it stops at its
+	// first complete match and fixes its captures; the outer continuation k then
+	// runs SEPARATELY. If k fails there is no backtracking back into the body to
+	// try a different internal match — hence "do not backtrack into a lookbehind".
+	// (Internal backtracking WITHIN the body still happens while it searches for
+	// that first complete match.)
 	if !l.Negate {
 		return func(m *machine, sp int, k cont) bool {
 			if m.err != nil {
 				return false
 			}
-			for j := sp; j >= 0; j-- {
-				if body(m, j, func(end int) bool { return end == sp && k(sp) }) {
-					return true
-				}
-				if m.err != nil {
-					return false
-				}
+			saved := cloneAll(m)
+			if !body(m, sp, func(int) bool { return true }) {
+				setAll(m, saved)
+				return false
 			}
+			// Positive form: the body's captures are visible to k and the result.
+			if k(sp) {
+				return true
+			}
+			setAll(m, saved) // atomic: discard the body's captures on outer failure
 			return false
 		}, nil
 	}
@@ -657,16 +722,7 @@ func (c *compiler) lookaround(l *Lookaround) (matcher, error) {
 			return false
 		}
 		saved := cloneAll(m)
-		found := false
-		for j := sp; j >= 0; j-- {
-			if body(m, j, func(end int) bool { return end == sp }) {
-				found = true
-				break
-			}
-			if m.err != nil {
-				return false
-			}
-		}
+		found := body(m, sp, func(int) bool { return true })
 		setAll(m, saved)
 		if found {
 			return false
