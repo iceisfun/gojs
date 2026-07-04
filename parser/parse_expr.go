@@ -340,10 +340,13 @@ func (p *parser) parseNew() ast.Expr {
 	} else {
 		callee = p.parsePrimary()
 	}
-	// ImportCall is a CallExpression, not a MemberExpression, so it may not be the
-	// callee of a `new` expression: `new import(x)` and `new import(x).p` are both
-	// SyntaxErrors (ECMA-262 sec-import-calls; NewExpression takes a MemberExpression).
-	if ic, isImportCall := callee.(*ast.ImportCall); isImportCall {
+	// ImportCall is a CallExpression, not a MemberExpression, so a *direct*
+	// import() may not be the callee of a `new` expression: `new import(x)` and
+	// `new import(x).p` are both SyntaxErrors (ECMA-262 sec-import-calls;
+	// NewExpression takes a MemberExpression). A parenthesized import() is a
+	// PrimaryExpression, though, so `new (import(x))` is valid — the parentheses
+	// make the covered expression a MemberExpression.
+	if ic, isImportCall := callee.(*ast.ImportCall); isImportCall && !p.parenthesized[callee] {
 		p.errorAt(ic.Pos(), "import() is not a valid callee for a new expression")
 	}
 	callee = p.parseMemberTail(callee)

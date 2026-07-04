@@ -96,18 +96,25 @@ func (i *Interpreter) importModuleNamespace(ctx context.Context, specifier strin
 		env.vars["require"] = &binding{value: i.makeRequire(id), mutable: true, initialized: true}
 	}
 
+	// Build the Module Namespace exotic object and cache it BEFORE evaluating the
+	// body, so a module that imports itself (directly or through a cycle) observes
+	// the same in-progress namespace — its live readers surface a TDZ
+	// ReferenceError for any export not yet initialized — rather than re-loading
+	// and re-evaluating the module forever. On an evaluation error the entry is
+	// dropped so a later import re-runs the module.
+	ns := i.newModuleNamespace(exports, env)
+	i.moduleNamespaces[id] = ns
+
 	if err := i.hoistDeclarations(ctx, body, env, true); err != nil {
+		delete(i.moduleNamespaces, id)
 		return nil, err
 	}
 	if _, err := i.execStmts(ctx, body, env); err != nil {
 		if _, ok := err.(*returnSignal); !ok {
+			delete(i.moduleNamespaces, id)
 			return nil, err
 		}
 	}
-
-	// Build the Module Namespace exotic object over the export bindings.
-	ns := i.newModuleNamespace(exports, env)
-	i.moduleNamespaces[id] = ns
 	return ns, nil
 }
 

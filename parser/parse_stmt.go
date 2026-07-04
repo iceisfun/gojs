@@ -148,12 +148,12 @@ func (p *parser) parseExport() ast.Stmt {
 		es.Default = true
 		switch {
 		case p.at(token.FUNCTION):
-			es.Decl = p.parseFunctionDecl(false)
+			es.Decl = p.parseDefaultFunctionDecl(false)
 		case p.at(token.ASYNC) && p.peek(1).Type == token.FUNCTION && !p.peek(1).NewlineBefore:
 			p.next() // async
-			es.Decl = p.parseFunctionDecl(true)
+			es.Decl = p.parseDefaultFunctionDecl(true)
 		case p.at(token.CLASS):
-			es.Decl = p.parseClassDecl()
+			es.Decl = p.parseDefaultClassDecl()
 		default:
 			es.DefaultExpr = p.parseAssignExpr()
 			p.expectSemicolon()

@@ -650,6 +650,16 @@ func (p *parser) parseFunctionDecl(async bool) *ast.FuncDecl {
 	return &ast.FuncDecl{Keyword: kw.Pos, Def: def}
 }
 
+// parseDefaultFunctionDecl parses the function declaration of an `export
+// default` clause, where the BindingIdentifier is optional: an anonymous
+// `export default function () {}` binds under the synthetic *default* name.
+func (p *parser) parseDefaultFunctionDecl(async bool) *ast.FuncDecl {
+	kw := p.expect(token.FUNCTION)
+	def := p.parseFuncDef(false, async)
+	def.Async = async
+	return &ast.FuncDecl{Keyword: kw.Pos, Def: def}
+}
+
 // ---------------------------------------------------------------------------
 // Object literals
 // ---------------------------------------------------------------------------
@@ -997,6 +1007,15 @@ func (p *parser) parseClassDecl() *ast.ClassDecl {
 	if def.Name == nil {
 		p.errorAt(kw.Pos, "class declaration requires a name")
 	}
+	return &ast.ClassDecl{Keyword: kw.Pos, Def: def}
+}
+
+// parseDefaultClassDecl parses the class declaration of an `export default`
+// clause, where the class name is optional: an anonymous `export default class
+// {}` binds under the synthetic *default* name.
+func (p *parser) parseDefaultClassDecl() *ast.ClassDecl {
+	kw := p.expect(token.CLASS)
+	def := p.parseClassDef()
 	return &ast.ClassDecl{Keyword: kw.Pos, Def: def}
 }
 
