@@ -59,9 +59,9 @@ func (i *Interpreter) initRegExp() {
 	})
 
 	ctor := i.newNativeCtor("RegExp", 2, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return i.regexpFromArgs(ctx, args)
+		return i.regexpFromArgs(ctx, args, true) // called as a function: NewTarget undefined
 	}, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		return i.regexpFromArgs(ctx, args)
+		return i.regexpFromArgs(ctx, args, false) // constructed: NewTarget defined
 	})
 	linkCtor(ctor, proto)
 	i.regexpCtor = ctor
@@ -599,26 +599,72 @@ func (i *Interpreter) stringSplitString(ctx context.Context, s string, args []Va
 	return i.newArray(out), nil
 }
 
-// regexpFromArgs builds a RegExp from (pattern, flags) arguments.
-func (i *Interpreter) regexpFromArgs(ctx context.Context, args []Value) (Value, error) {
-	// §22.2.4.1 step 1: IsRegExp(pattern) reads pattern[@@match] once and
-	// propagates a throwing getter (observable via new RegExp / SpeciesConstructor).
-	if _, err := i.isRegExpValue(ctx, arg(args, 0)); err != nil {
+// regexpFromArgs implements the RegExp constructor (§22.2.4.1). isCall is true
+// when RegExp was called as a function (NewTarget undefined), which enables the
+// same-object short-circuit for a RegExp/regexp-like argument with no flags.
+func (i *Interpreter) regexpFromArgs(ctx context.Context, args []Value, isCall bool) (Value, error) {
+	pat := arg(args, 0)
+	flagsArg := arg(args, 1)
+
+	// Step 1: patternIsRegExp = IsRegExp(pattern) (reads pattern[@@match] once and
+	// propagates a throwing getter).
+	patternIsRegExp, err := i.isRegExpValue(ctx, pat)
+	if err != nil {
 		return nil, err
 	}
-	pattern := ""
-	flags := ""
-	if src, fl, ok := regexpSourceFlags(arg(args, 0)); ok {
-		pattern = src
-		flags = fl
-	} else if !IsUndefined(arg(args, 0)) {
-		p, err := i.argStr(ctx, args, 0)
+
+	// Step 2: when NewTarget is undefined and pattern is RegExp/regexp-like with
+	// no explicit flags, return pattern itself iff its .constructor is RegExp.
+	if isCall && patternIsRegExp && IsUndefined(flagsArg) {
+		po := pat.(*Object)
+		pc, err := po.GetStr(ctx, "constructor")
 		if err != nil {
 			return nil, err
 		}
-		pattern = p
+		if pco, ok := pc.(*Object); ok && pco == i.regexpCtor {
+			return pat, nil
+		}
 	}
-	if !IsUndefined(arg(args, 1)) {
+
+	pattern := ""
+	flags := ""
+	haveFlags := false
+	switch {
+	case func() bool { _, _, ok := regexpSourceFlags(pat); return ok }():
+		// Step 4: pattern has [[RegExpMatcher]] — use its OriginalSource/Flags.
+		src, fl, _ := regexpSourceFlags(pat)
+		pattern = src
+		if IsUndefined(flagsArg) {
+			flags, haveFlags = fl, true
+		}
+	case patternIsRegExp:
+		// Step 5: a regexp-like object — read source/flags through [[Get]].
+		po := pat.(*Object)
+		sv, err := po.GetStr(ctx, "source")
+		if err != nil {
+			return nil, err
+		}
+		if pattern, err = i.ToStringV(ctx, sv); err != nil {
+			return nil, err
+		}
+		if IsUndefined(flagsArg) {
+			fv, err := po.GetStr(ctx, "flags")
+			if err != nil {
+				return nil, err
+			}
+			if flags, err = i.ToStringV(ctx, fv); err != nil {
+				return nil, err
+			}
+			haveFlags = true
+		}
+	case !IsUndefined(pat):
+		// Step 6: an ordinary value coerced to the pattern source.
+		if pattern, err = i.argStr(ctx, args, 0); err != nil {
+			return nil, err
+		}
+	}
+
+	if !haveFlags && !IsUndefined(flagsArg) {
 		f, err := i.argStr(ctx, args, 1)
 		if err != nil {
 			return nil, err
