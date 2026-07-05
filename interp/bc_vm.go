@@ -278,7 +278,7 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 
 		case opGetProp:
 			base := fr.pop()
-			v, err := i.getRefValue(ctx, &reference{kind: refProp, strict: fr.env.isStrict(), base: base, key: StrKey(code.names[in.a]), keyDone: true})
+			v, err := i.getPropByName(ctx, base, code.names[in.a])
 			if err != nil {
 				return nil, err
 			}
@@ -294,7 +294,7 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 		case opSetProp:
 			value := fr.pop()
 			base := fr.pop()
-			if err := i.putRefValue(ctx, &reference{kind: refProp, strict: fr.env.isStrict(), base: base, key: StrKey(code.names[in.a]), keyDone: true}, value); err != nil {
+			if err := i.setPropByName(ctx, base, code.names[in.a], value, fr.env.isStrict()); err != nil {
 				return nil, err
 			}
 			fr.push(value)

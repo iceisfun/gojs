@@ -332,6 +332,52 @@ func (i *Interpreter) putRefValue(ctx context.Context, ref *reference, value Val
 	}
 }
 
+// getPropByName is getRefValue's refProp read path specialized for a static,
+// already-resolved property name (a member expression like `o.foo`, never a
+// computed `o[x]`). It reproduces the nullish-base check and [[Get]] exactly but
+// takes the base and name directly, so the hot bytecode opGetProp opcode avoids
+// heap-allocating a reference on every property read.
+func (i *Interpreter) getPropByName(ctx context.Context, base Value, name string) (Value, error) {
+	if IsNullish(base) {
+		return nil, i.throwError(ctx, "TypeError", "Cannot read properties of "+briefValue(base)+" (reading '"+name+"')")
+	}
+	return i.getProperty(ctx, base, StrKey(name))
+}
+
+// setPropByName is putRefValue's refProp write path specialized for a static
+// property name, avoiding the per-write reference allocation. It mirrors the
+// primitive-base wrapper, setStatus, and strict-mode read-only handling of the
+// reference path exactly.
+func (i *Interpreter) setPropByName(ctx context.Context, base Value, name string, value Value, strict bool) error {
+	if IsNullish(base) {
+		return i.throwError(ctx, "TypeError", "Cannot set properties of "+briefValue(base)+" (setting '"+name+"')")
+	}
+	key := StrKey(name)
+	obj, ok := base.(*Object)
+	if !ok {
+		wrapper, err := i.ToObject(ctx, base)
+		if err != nil {
+			return err
+		}
+		wrote, err := i.setV(ctx, wrapper, key, value, base)
+		if err != nil {
+			return err
+		}
+		if !wrote && strict {
+			return i.throwError(ctx, "TypeError", "Cannot create property "+keyName(key)+" on "+briefValue(base))
+		}
+		return nil
+	}
+	wrote, err := obj.setStatus(ctx, key, value)
+	if err != nil {
+		return err
+	}
+	if !wrote && strict {
+		return i.throwError(ctx, "TypeError", "Cannot assign to read-only property "+keyName(key)+" of "+briefValue(base))
+	}
+	return nil
+}
+
 // putSuperRef implements PutValue on a Super Reference (§6.2.5.6): ToObject(base)
 // rejects a null base, then [[Set]] runs with `this` as the receiver (so an
 // inherited setter fires, else the value becomes an own property of `this`); a

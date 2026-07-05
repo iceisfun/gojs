@@ -17,6 +17,8 @@ var perfPrograms = map[string]string{
 	"loop": `function run(){ var s = 0; for (var i = 0; i < 1000000; i++){ s += i * 2 - 1 } return s }`,
 	// escape-time inner loop: float arithmetic plus a small (interned) counter.
 	"mandel": `function run(){var sum=0;for(var y=0;y<200;y++){for(var x=0;x<200;x++){var cr=x/100-1.5,ci=y/100-1,zr=0,zi=0,n=0;while(n<100){var zr2=zr*zr,zi2=zi*zi;if(zr2+zi2>4)break;zi=2*zr*zi+ci;zr=zr2-zi2+cr;n++}sum+=n}}return sum}`,
+	// property read+write heavy: exercises opGetProp/opSetProp on a fixed shape.
+	"props": `function run(){var o={a:0,b:0,c:0};for(var i=0;i<500000;i++){o.a=o.b+o.c+i;o.b=o.a-o.c;o.c=o.a+o.b}return o.a+o.b+o.c}`,
 }
 
 func benchPerf(b *testing.B, name string) {
@@ -37,3 +39,5 @@ func benchPerf(b *testing.B, name string) {
 func BenchmarkPerfFib(b *testing.B)    { benchPerf(b, "fib") }
 func BenchmarkPerfLoop(b *testing.B)   { benchPerf(b, "loop") }
 func BenchmarkPerfMandel(b *testing.B) { benchPerf(b, "mandel") }
+
+func BenchmarkPerfProps(b *testing.B) { benchPerf(b, "props") }
