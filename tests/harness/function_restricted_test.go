@@ -6,7 +6,11 @@ import "testing"
 // "arguments" accessors inherited from %Function.prototype%
 // (AddRestrictedFunctionProperties, ECMA-262).
 func TestFunctionRestrictedProperties(t *testing.T) {
-	Expect(t, `
+	// A strict IIFE, not a leading program directive: Run prepends the assert
+	// prologue, so a "use strict" at the top of this snippet would no longer be in
+	// the directive prologue (and correctly would not make the program strict). A
+	// function-body directive is robust to that prepending.
+	Expect(t, `(function () {
 		"use strict";
 		// Strict functions do not have own caller/arguments; they inherit the
 		// poison-pill accessors from %Function.prototype%.
@@ -33,7 +37,7 @@ func TestFunctionRestrictedProperties(t *testing.T) {
 		var a = Object.getOwnPropertyDescriptor(Function.prototype, "arguments");
 		assert.sameValue(c.get, a.get, "shared ThrowTypeError getter");
 		assert.sameValue(c.get, c.set, "getter and setter are the same");
-	`)
+	})();`)
 	// Sloppy plain functions carry Annex B legacy caller/arguments returning null.
 	Expect(t, `
 		function sloppy() {}
