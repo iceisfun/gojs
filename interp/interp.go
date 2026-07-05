@@ -254,9 +254,16 @@ type intrinsics struct {
 	sharedArrayBufferCtor *Object // %SharedArrayBuffer%
 	dataViewCtor          *Object // %DataView%
 
-	// sabWaiters is the process-wide-per-interpreter waiter registry backing
-	// Atomics.wait/notify/waitAsync on shared buffers. Lazily initialised.
+	// sabWaiters is the waiter registry backing Atomics.wait/notify/waitAsync on
+	// shared buffers. Per-interpreter and lazily initialised for a single-agent
+	// VM; for an agent cluster it points at cluster.waiters (set by
+	// WithAgentCluster) so waits and notifies coordinate across agents.
 	sabWaiters *waiterList
+
+	// cluster is non-nil when this interpreter is one agent of a shared-memory
+	// agent cluster (§9.7). It carries the cross-agent waiter registry and the
+	// Atomics big lock; see AgentCluster.
+	cluster *AgentCluster
 
 	// nativeErrorProtos maps an error name (TypeError, RangeError, ...) to its
 	// prototype, so runtime code can raise the right error kind.

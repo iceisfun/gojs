@@ -41,6 +41,7 @@ func (i *Interpreter) initAtomics() {
 				if err != nil {
 					return nil, err
 				}
+				defer i.atomicsLock(td)()
 				if _, ok := td.validIndex(float64(idx)); !ok {
 					return nil, i.throwError(ctx, "TypeError", "Atomics."+name+" on an out-of-bounds TypedArray")
 				}
@@ -52,6 +53,7 @@ func (i *Interpreter) initAtomics() {
 			if err != nil {
 				return nil, err
 			}
+			defer i.atomicsLock(td)()
 			if _, ok := td.validIndex(float64(idx)); !ok {
 				return nil, i.throwError(ctx, "TypeError", "Atomics."+name+" on an out-of-bounds TypedArray")
 			}
@@ -77,6 +79,7 @@ func (i *Interpreter) initAtomics() {
 			if err != nil {
 				return nil, err
 			}
+			defer i.atomicsLock(td)()
 			if _, ok := td.validIndex(float64(idx)); !ok {
 				return nil, i.throwError(ctx, "TypeError", "Atomics.exchange on an out-of-bounds TypedArray")
 			}
@@ -88,6 +91,7 @@ func (i *Interpreter) initAtomics() {
 		if err != nil {
 			return nil, err
 		}
+		defer i.atomicsLock(td)()
 		if _, ok := td.validIndex(float64(idx)); !ok {
 			return nil, i.throwError(ctx, "TypeError", "Atomics.exchange on an out-of-bounds TypedArray")
 		}
@@ -113,6 +117,7 @@ func (i *Interpreter) initAtomics() {
 			if err != nil {
 				return nil, err
 			}
+			defer i.atomicsLock(td)()
 			if _, ok := td.validIndex(float64(idx)); !ok {
 				return nil, i.throwError(ctx, "TypeError", "Atomics.compareExchange on an out-of-bounds TypedArray")
 			}
@@ -131,6 +136,7 @@ func (i *Interpreter) initAtomics() {
 		if err != nil {
 			return nil, err
 		}
+		defer i.atomicsLock(td)()
 		if _, ok := td.validIndex(float64(idx)); !ok {
 			return nil, i.throwError(ctx, "TypeError", "Atomics.compareExchange on an out-of-bounds TypedArray")
 		}
@@ -147,6 +153,7 @@ func (i *Interpreter) initAtomics() {
 		if err != nil {
 			return nil, err
 		}
+		defer i.atomicsLock(td)()
 		return td.getElement(idx), nil
 	})
 
@@ -162,6 +169,7 @@ func (i *Interpreter) initAtomics() {
 			if err != nil {
 				return nil, err
 			}
+			defer i.atomicsLock(td)()
 			if _, ok := td.validIndex(float64(idx)); !ok {
 				return nil, i.throwError(ctx, "TypeError", "Atomics.store on an out-of-bounds TypedArray")
 			}
@@ -175,6 +183,7 @@ func (i *Interpreter) initAtomics() {
 			return nil, err
 		}
 		v := integerOrInfinity(f)
+		defer i.atomicsLock(td)()
 		if _, ok := td.validIndex(float64(idx)); !ok {
 			return nil, i.throwError(ctx, "TypeError", "Atomics.store on an out-of-bounds TypedArray")
 		}
@@ -400,6 +409,9 @@ type waiterList struct {
 }
 
 func (i *Interpreter) waiters() *waiterList {
+	if i.cluster != nil {
+		return i.cluster.waiters
+	}
 	if i.sabWaiters == nil {
 		i.sabWaiters = &waiterList{m: map[waiterKey][]*sabWaiter{}}
 	}
@@ -525,7 +537,15 @@ func (i *Interpreter) atomicsDoWait(ctx context.Context, args []Value, async boo
 		return nil, i.throwError(ctx, "RangeError", "Atomics wait index is out of bounds")
 	}
 
-	// Compare the current element to the expected value.
+	// Cross-agent atomicity (§25.4.3 WaitForNotification): the value compare and
+	// the waiter registration must be indivisible against a concurrent
+	// Atomics.store + Atomics.notify from another agent, or a notify that lands
+	// between the two is a lost wakeup. Hold the cluster Atomics lock across
+	// compare+register; the wait helpers release it (unlock) the instant the
+	// waiter is registered — BEFORE suspending — so a notify arriving after
+	// release still wakes us through the waiter channel. For a single-agent VM
+	// atomicsLock is a no-op.
+	unlock := i.atomicsLock(td)
 	matched := false
 	if bigKind {
 		cur := td.getElement(idx).(*BigInt)
@@ -536,35 +556,49 @@ func (i *Interpreter) atomicsDoWait(ctx context.Context, args []Value, async boo
 	}
 
 	if async {
-		return i.atomicsWaitAsyncResult(ab, idx, matched, timeoutMs), nil
+		return i.atomicsWaitAsyncResult(ab, idx, matched, timeoutMs, unlock), nil
 	}
-	return String(i.atomicsWaitSync(ab, idx, matched, timeoutMs)), nil
+	return String(i.atomicsWaitSync(ab, idx, matched, timeoutMs, unlock)), nil
 }
 
 // atomicsWaitSync performs the blocking wait for Atomics.wait, returning
 // "not-equal", "timed-out" or "ok".
-func (i *Interpreter) atomicsWaitSync(ab *arrayBufferData, idx int, matched bool, timeoutMs float64) string {
+func (i *Interpreter) atomicsWaitSync(ab *arrayBufferData, idx int, matched bool, timeoutMs float64, unlock func()) string {
 	if !matched {
+		unlock()
 		return "not-equal"
 	}
 	if timeoutMs == 0 {
+		unlock()
 		return "timed-out"
 	}
 	key := waiterKey{ab, idx}
 	w := &sabWaiter{ch: make(chan struct{})}
 	i.waiters().add(key, w)
+	unlock() // waiter registered: a notify from another agent now reliably targets w
 
 	if math.IsInf(timeoutMs, 1) {
-		// No notifier exists in a single-agent VM; this blocks until a Phase-2
-		// agent notifies (or forever). Program-authored; honoured literally.
-		<-w.ch
-		return "ok"
+		// Blocks until another agent in the cluster notifies this location. In a
+		// single-agent VM no notifier exists, so this is a program-authored
+		// deadlock, honoured literally — except we also unblock on context
+		// cancellation (the test/embedder deadline) so a torn-down agent's
+		// goroutine never leaks forever.
+		select {
+		case <-w.ch:
+			return "ok"
+		case <-i.ctx.Done():
+			i.waiters().remove(key, w)
+			return "timed-out"
+		}
 	}
 	t := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 	defer t.Stop()
 	select {
 	case <-w.ch:
 		return "ok"
+	case <-i.ctx.Done():
+		i.waiters().remove(key, w)
+		return "timed-out"
 	case <-t.C:
 		i.waiters().remove(key, w)
 		return "timed-out"
@@ -573,7 +607,11 @@ func (i *Interpreter) atomicsWaitSync(ab *arrayBufferData, idx int, matched bool
 
 // atomicsWaitAsyncResult builds the { async, value } result record for
 // Atomics.waitAsync without ever blocking the agent.
-func (i *Interpreter) atomicsWaitAsyncResult(ab *arrayBufferData, idx int, matched bool, timeoutMs float64) Value {
+func (i *Interpreter) atomicsWaitAsyncResult(ab *arrayBufferData, idx int, matched bool, timeoutMs float64, unlock func()) Value {
+	// The lock spans compare→register (as for the sync wait); for waitAsync the
+	// whole record is built without blocking, so release it on return once the
+	// waiter (and its timeout timer) are installed.
+	defer unlock()
 	res := NewObject(i.objectProto)
 	if !matched {
 		res.SetData("async", Boolean(false))
@@ -587,26 +625,35 @@ func (i *Interpreter) atomicsWaitAsyncResult(ab *arrayBufferData, idx int, match
 	}
 	// async:true — a genuine pending Promise settled by whichever comes first: a
 	// notify on this location (-> "ok") or, for a finite timeout, the timeout
-	// firing (-> "timed-out"). An infinite timeout with no notify stays pending.
+	// firing (-> "timed-out").
 	p, resolve, _ := i.newPromise()
 	key := waiterKey{ab, idx}
 	w := &sabWaiter{ch: make(chan struct{})}
-	hasTimer := !math.IsInf(timeoutMs, 1) && i.timer != nil
-	if hasTimer {
+	finite := !math.IsInf(timeoutMs, 1) && i.timer != nil
+	// Keep the event loop alive while this async wait is pending, but only when it
+	// can actually settle: a finite timeout will fire, or — in an agent cluster —
+	// another agent may notify. In a single-agent VM an infinite waitAsync can
+	// never settle, so we do NOT hold the loop open: the Promise simply stays
+	// pending and the program (RunString) returns, matching single-agent
+	// semantics. Without this keepalive a cluster child would drain its loop and
+	// exit before the parent's notify arrived, and settle would push a macro onto
+	// a dead loop (a lost resolution).
+	keepAlive := finite || i.cluster != nil
+	if keepAlive {
 		i.loop.addTimer()
 	}
 	var cancelTimer func()
 	var once sync.Once
 	// settle resolves the Promise exactly once, on the event loop, and tears down
-	// the waiter registration and any pending timeout timer.
+	// the waiter registration, the loop keepalive, and any pending timeout timer.
 	w.settle = func(outcome string) {
 		once.Do(func() {
 			i.loop.pushMacro(func() error {
 				i.waiters().remove(key, w)
-				if hasTimer {
-					if cancelTimer != nil {
-						cancelTimer()
-					}
+				if cancelTimer != nil {
+					cancelTimer()
+				}
+				if keepAlive {
 					i.loop.removeTimer()
 				}
 				resolve(String(outcome))
@@ -615,10 +662,20 @@ func (i *Interpreter) atomicsWaitAsyncResult(ab *arrayBufferData, idx int, match
 		})
 	}
 	i.waiters().add(key, w)
-	if hasTimer {
+	if finite {
 		cancelTimer = i.timer.AfterFunc(i.ctx, time.Duration(timeoutMs)*time.Millisecond, func() {
 			w.settle("timed-out")
 		})
+	}
+	// In a cluster, a torn-down agent (its context cancelled by the host at end of
+	// the test) must settle so its kept-alive event loop stops and the goroutine
+	// exits, rather than parking forever on a notify that will never come. settle
+	// is idempotent, so a normal notify still wins the race.
+	if i.cluster != nil {
+		go func() {
+			<-i.ctx.Done()
+			w.settle("timed-out")
+		}()
 	}
 	res.SetData("async", Boolean(true))
 	res.SetData("value", p)

@@ -188,8 +188,13 @@ func skipReason(m Meta) string {
 	if m.Flags["raw"] {
 		return "raw"
 	}
-	if m.Flags["CanBlockIsFalse"] || m.Flags["CanBlockIsTrue"] {
-		return "agent"
+	// CanBlockIsTrue asserts the running agent's [[CanBlock]] is true. A gojs
+	// agent runs on its own goroutine and CAN block (Atomics.wait parks the
+	// goroutine), so these tests run. CanBlockIsFalse asserts the opposite —
+	// Atomics.wait must throw a TypeError because blocking is forbidden — which
+	// needs a distinct non-blocking agent mode gojs does not model; skip those.
+	if m.Flags["CanBlockIsFalse"] {
+		return "agent:cannot-block"
 	}
 	for _, f := range m.Features {
 		if unsupportedFeatures[f] {
@@ -224,14 +229,10 @@ func hostFeatureSkip(src string, m Meta) string {
 	if !m.Flags["async"] && referencesPrintGlobal(src) {
 		return "host:print"
 	}
-	// The $262.agent API spawns a second agent (worker thread) sharing a
-	// SharedArrayBuffer. gojs implements SharedArrayBuffer/Atomics for a single
-	// agent only (Phase 1), so a test that drives another agent needs a host
-	// capability we don't provide; skip it rather than fail. The single-agent
-	// SharedArrayBuffer and Atomics tests (the large majority) still run.
-	if strings.Contains(src, "$262.agent") {
-		return "host:agent"
-	}
+	// The $262.agent multi-agent SharedArrayBuffer/Atomics tests ARE supported
+	// (Phase 2): runOne detects "$262.agent", joins the main VM to an
+	// interp.AgentCluster, and installs the $262.agent host (see agent.go), so
+	// these tests run rather than being skipped.
 	return ""
 }
 
@@ -378,9 +379,22 @@ func runMode(path, src string, m Meta, mode string) Result {
 	if hasFeature(m, "dynamic-import") || hasFeature(m, "ShadowRealm") {
 		opts = append(opts, interp.WithModuleProvider(interp.NewDirModuleProvider(filepath.Dir(path))))
 	}
+	// A $262.agent test drives multiple agents (goroutines) sharing a
+	// SharedArrayBuffer. Join the main VM to a fresh agent cluster so its
+	// Atomics.wait/notify coordinate with the children, and install the
+	// $262.agent host after $262 is set up (see agent.go).
+	var aHost *agentHost
+	if strings.Contains(src, "$262.agent") {
+		aHost = newAgentHost(ctx)
+		opts = append(opts, interp.WithAgentCluster(aHost.cluster))
+	}
 	vm := interp.New(opts...)
 	defer vm.Close()
-	installT262Host(vm)
+	hostObj := installT262Host(vm)
+	if aHost != nil {
+		installAgentHost(vm, aHost, nil, hostObj)
+		defer aHost.drain()
+	}
 
 	// An async test (flags: [async]) signals its outcome by calling $DONE — with
 	// no/undefined argument on success, or an error on failure. gojs's RunString
