@@ -19,7 +19,6 @@ package interp
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 
 	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/token"
@@ -148,10 +147,13 @@ type Interpreter struct {
 	// vmPolls counts bytecode instructions dispatched, so execCode can throttle
 	// the cost of polling ctx.Done() (a channel select) to once every
 	// ctxPollInterval instructions instead of paying it on the hot path of every
-	// instruction. It is atomic because generator/async bodies drive execCode on
-	// their own goroutines (serialized by channel handoff, but the race detector
-	// still requires synchronized access).
-	vmPolls atomic.Int64
+	// instruction. A plain int is safe despite generator/async bodies driving
+	// execCode on other goroutines: within one interpreter those goroutines never
+	// run concurrently — each hands control back through a channel (establishing
+	// happens-before) before the next runs — and a torn value would at worst skew
+	// one poll's timing, never correctness. (Distinct SAB agents use distinct
+	// Interpreter instances, so there is no cross-interpreter sharing.)
+	vmPolls int
 
 	// regexpEngine selects the RegExp backend (the ECMAScript-conformant
 	// jsregexp engine by default, or the faster RE2 engine as an opt-in).

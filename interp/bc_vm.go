@@ -130,7 +130,8 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 		// both long loops and deep recursion (short frames that never loop still
 		// contribute to the shared count). ctxPollInterval is a power of two so
 		// the test is a mask.
-		if i.vmPolls.Add(1)&(ctxPollInterval-1) == 0 {
+		i.vmPolls++
+		if i.vmPolls&(ctxPollInterval-1) == 0 {
 			if err := i.checkContext(); err != nil {
 				return nil, err
 			}
