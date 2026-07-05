@@ -315,7 +315,7 @@ func (i *Interpreter) evalTemplate(ctx context.Context, e *ast.TemplateLit, env 
 		}
 	}
 	// A substitution boundary may join a high and low surrogate; canonicalize.
-	return String(canonicalizeWTF8(string(b))), nil
+	return newComputedString(canonicalizeWTF8(string(b))), nil
 }
 
 // evalTaggedTemplate evaluates a tagged template, passing the strings array and

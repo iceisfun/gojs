@@ -858,7 +858,7 @@ func (i *Interpreter) taJoin(ctx context.Context, this Value, args []Value) (Val
 		}
 		b = append(b, s...)
 	}
-	return String(string(b)), nil
+	return newComputedString(string(b)), nil
 }
 
 func (i *Interpreter) taToLocaleString(ctx context.Context, this Value, args []Value) (Value, error) {

@@ -1175,7 +1175,7 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 		}
 		out = append(out, s...)
 	}
-	return String(canonicalizeWTF8(string(out))), nil
+	return newComputedString(canonicalizeWTF8(string(out))), nil
 }
 
 func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Value) (Value, error) {

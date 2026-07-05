@@ -384,7 +384,9 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 					b = append(b, s...)
 				}
 			}
-			fr.push(String(string(b)))
+			// Canonicalize a surrogate pair joined across a substitution boundary,
+			// matching the tree-walker's evalTemplate.
+			fr.push(newComputedString(canonicalizeWTF8(string(b))))
 
 		case opClosure:
 			node := code.nodes[in.a].(ast.Expr)

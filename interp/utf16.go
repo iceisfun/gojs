@@ -94,6 +94,36 @@ func codeUnitLen(s string) int {
 	return n
 }
 
+// codeUnitLenASCII returns the UTF-16 length of s and whether s is pure ASCII,
+// in a single pass. The combined scan lets a string cache both facts at once (an
+// ASCII string additionally has utf16Len == byteLen, and takes the no-alloc
+// indexing fast path).
+func codeUnitLenASCII(s string) (n int, ascii bool) {
+	ascii = true
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < 0x80 {
+			n++
+			i++
+			continue
+		}
+		ascii = false
+		if _, ok := wtf8Surrogate(s, i); ok {
+			n++
+			i += 3
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r >= 0x10000 {
+			n += 2
+		} else {
+			n++
+		}
+		i += size
+	}
+	return n, ascii
+}
+
 // appendCodeUnit writes one UTF-16 code unit to buf as WTF-8: a lone surrogate
 // becomes its 3-byte encoding, any other code unit its normal UTF-8.
 func appendCodeUnit(buf []byte, cu uint16) []byte {

@@ -58,29 +58,30 @@ func isShortCircuit(v Value) bool { _, ok := v.(shortCircuit); return ok }
 // getProperty reads key from any value, boxing primitives to their prototype so
 // e.g. "abc".length and (5).toString() work. A nullish base throws.
 func (i *Interpreter) getProperty(ctx context.Context, base Value, key PropertyKey) (Value, error) {
-	base = flattenRope(base)
 	switch b := base.(type) {
 	case *Object:
 		return b.Get(ctx, key)
+	case *vmString:
+		// Consult the cached UTF-16 length / ASCII flag BEFORE flattening, so a
+		// hot `for (i<s.length)` loop over a computed string is O(1) per read
+		// rather than an O(n) re-scan. Fall through to the String prototype for
+		// everything else (flattened once, memoized).
+		if !key.IsSymbol() {
+			if key.Str == "length" {
+				return Number(float64(b.codeUnitLen())), nil
+			}
+			if idx, ok := arrayIndex(key.Str); ok {
+				return stringCharAt(b.build(), b.isASCII(), idx), nil
+			}
+		}
+		return i.stringProto.getWithReceiver(ctx, key, String(b.build()))
 	case String:
 		if !key.IsSymbol() {
 			if key.Str == "length" {
 				return Number(float64(codeUnitLen(string(b)))), nil
 			}
 			if idx, ok := arrayIndex(key.Str); ok {
-				s := string(b)
-				// ASCII fast path: byte index == code-unit index.
-				if isASCIIStr(s) {
-					if idx < len(s) {
-						return String(s[idx : idx+1]), nil
-					}
-					return Undef, nil
-				}
-				units := codeUnits(s)
-				if idx < len(units) {
-					return String(unitsToString(units[idx : idx+1])), nil
-				}
-				return Undef, nil
+				return stringCharAt(string(b), isASCIIStr(string(b)), idx), nil
 			}
 		}
 		return i.stringProto.getWithReceiver(ctx, key, base)

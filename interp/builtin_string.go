@@ -130,8 +130,24 @@ func (i *Interpreter) initString() {
 		}
 		return String(s), nil
 	})
-	m("charAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		v := viewOf(s)
+	// mv is like m but also hands the method the string-primitive receiver (not
+	// just its flattened bytes), so a *vmString's cached code-unit view survives
+	// into per-index methods — turning a `for (i<s.length) s.charCodeAt(i)` walk
+	// from O(n) per step (rebuilding the view each call) into O(1).
+	mv := func(name string, n int, fn func(ctx context.Context, recv Value, args []Value) (Value, error)) {
+		i.defineMethod(proto, name, n, func(ctx context.Context, this Value, args []Value) (Value, error) {
+			if recv, ok := stringReceiver(this); ok {
+				return fn(ctx, recv, args)
+			}
+			s, err := strOf(ctx, this) // generic this: coerce (may throw on nullish)
+			if err != nil {
+				return nil, err
+			}
+			return fn(ctx, String(s), args)
+		})
+	}
+	mv("charAt", 1, func(ctx context.Context, recv Value, args []Value) (Value, error) {
+		v := viewOfValue(recv, stringValue(recv))
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -141,8 +157,8 @@ func (i *Interpreter) initString() {
 		}
 		return String(v.Slice(int(idx), int(idx)+1)), nil
 	})
-	m("charCodeAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		v := viewOf(s)
+	mv("charCodeAt", 1, func(ctx context.Context, recv Value, args []Value) (Value, error) {
+		v := viewOfValue(recv, stringValue(recv))
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -152,10 +168,10 @@ func (i *Interpreter) initString() {
 		}
 		return Number(float64(v.At(int(idx)))), nil
 	})
-	m("codePointAt", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
+	mv("codePointAt", 1, func(ctx context.Context, recv Value, args []Value) (Value, error) {
 		// §22.1.3.4: position is a code-unit index; the result is the code point
 		// beginning there (a high surrogate followed by a low surrogate combines).
-		v := viewOf(s)
+		v := viewOfValue(recv, stringValue(recv))
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
 			return nil, err
@@ -171,8 +187,8 @@ func (i *Interpreter) initString() {
 		}
 		return Number(float64(cu)), nil
 	})
-	m("at", 1, func(ctx context.Context, s string, args []Value) (Value, error) {
-		v := viewOf(s)
+	mv("at", 1, func(ctx context.Context, recv Value, args []Value) (Value, error) {
+		v := viewOfValue(recv, stringValue(recv))
 		n := v.Len()
 		idx, err := i.argInteger(ctx, args, 0, 0)
 		if err != nil {
@@ -481,7 +497,7 @@ func (i *Interpreter) initString() {
 			}
 			b.WriteString(as)
 		}
-		return String(canonicalizeWTF8(b.String())), nil
+		return newComputedString(canonicalizeWTF8(b.String())), nil
 	})
 	m("split", 2, func(ctx context.Context, s string, args []Value) (Value, error) {
 		return i.stringSplitString(ctx, s, args)
