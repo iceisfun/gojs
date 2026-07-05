@@ -16,6 +16,18 @@ import (
 // slot-based locals are a later layer that will not change these semantics.
 
 // bcFrame is one activation of a compiled function on the VM.
+// tdzHole marks a slot-mode lexical (let/const) binding that is in its Temporal
+// Dead Zone: opHoleLocal stores it at block entry and the binding's initializer
+// clears it. The checked slot opcodes (opGetLocalTDZ/opSetLocalTDZ/
+// opIncDecLocalTDZ) intercept it and throw ReferenceError, so it never reaches
+// user code. A distinct unexported type guarantees no ordinary Value can equal
+// it, and var/param slots — never holed — never pay the check.
+type tdzHoleType struct{}
+
+func (tdzHoleType) Typeof() string { return "undefined" }
+
+var tdzHole Value = tdzHoleType{}
+
 type bcFrame struct {
 	code   *codeObject
 	ip     int
@@ -125,6 +137,29 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 			fr.locals[in.a] = fr.pop()
 		case opIncDecLocal:
 			// in.b bit0 = prefix, bit1 = decrement.
+			result, stored, err := i.computeIncDec(ctx, fr.locals[in.a], in.b&2 == 0, in.b&1 == 1)
+			if err != nil {
+				return nil, err
+			}
+			fr.locals[in.a] = stored
+			fr.push(result)
+		case opHoleLocal:
+			fr.locals[in.a] = tdzHole
+		case opGetLocalTDZ:
+			v := fr.locals[in.a]
+			if v == tdzHole {
+				return nil, i.tdzError(ctx, code, in.a)
+			}
+			fr.push(v)
+		case opSetLocalTDZ:
+			if fr.locals[in.a] == tdzHole {
+				return nil, i.tdzError(ctx, code, in.a)
+			}
+			fr.locals[in.a] = fr.pop()
+		case opIncDecLocalTDZ:
+			if fr.locals[in.a] == tdzHole {
+				return nil, i.tdzError(ctx, code, in.a)
+			}
 			result, stored, err := i.computeIncDec(ctx, fr.locals[in.a], in.b&2 == 0, in.b&1 == 1)
 			if err != nil {
 				return nil, err
@@ -395,6 +430,17 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 		}
 	}
 	return Undef, nil
+}
+
+// tdzError builds the ReferenceError for accessing a lexical slot still in its
+// Temporal Dead Zone, naming the binding as the tree-walker does (see
+// getRefValue's refIdentBinding case) so both engines report identically.
+func (i *Interpreter) tdzError(ctx context.Context, code *codeObject, slot int32) error {
+	name := ""
+	if int(slot) < len(code.slotNames) {
+		name = code.slotNames[slot]
+	}
+	return i.throwError(ctx, "ReferenceError", "Cannot access '"+name+"' before initialization")
 }
 
 // bcLoopSignal handles an unlabeled break/continue that escaped a fallback

@@ -50,10 +50,19 @@ const (
 	opGetLocal    // a=slot → push frame local slot (slot-eligible functions only)
 	opSetLocal    // a=slot → locals[slot] = pop
 	opIncDecLocal // a=slot, b=prefix|dec<<1 → read/±1/write local slot; push old|new
-	opResolveName // a=name index → push a target Reference (assignment, resolved first)
-	opRefLoad     // GetValue of the top ref (kept) → push (compound assignment read)
-	opPutRef      // pop value + Reference → PutValue; push value back (assignment result)
-	opTypeofName  // a=name index → typeof, but undefined-safe for an unresolved name
+
+	// Lexical (let/const) frame slots. A lexical slot is hole-initialized at its
+	// block's entry (opHoleLocal) and cleared by the binding's initializer; the
+	// TDZ variants throw ReferenceError if the slot still holds the hole. var/param
+	// slots are never holed, so they keep the cheaper unchecked opcodes above.
+	opHoleLocal      // a=slot → locals[slot] = tdzHole (Temporal Dead Zone hoist)
+	opGetLocalTDZ    // a=slot → push locals[slot]; ReferenceError if it is the hole
+	opSetLocalTDZ    // a=slot → locals[slot] = pop; ReferenceError if currently the hole (write to a binding still in TDZ)
+	opIncDecLocalTDZ // a=slot, b=prefix|dec<<1 → like opIncDecLocal but ReferenceError if the slot is the hole
+	opResolveName    // a=name index → push a target Reference (assignment, resolved first)
+	opRefLoad        // GetValue of the top ref (kept) → push (compound assignment read)
+	opPutRef         // pop value + Reference → PutValue; push value back (assignment result)
+	opTypeofName     // a=name index → typeof, but undefined-safe for an unresolved name
 
 	// Operators.
 	opBinop     // a=token.Type → push applyBinary(op, a:=pop2, b:=pop1)
@@ -135,13 +144,14 @@ type codeObject struct {
 	nodes  []ast.Node  // opEvalNode/opEvalStmt/opClosure/opEnterScope/opUpdate/opDelete
 	poss   []token.Pos // opLine → the statement position recorded for stack frames
 
-	// numSlots > 0 marks a slot-eligible function: its params and function-scope
-	// vars live in the frame's locals array (indexed by opGetLocal/opSetLocal)
-	// instead of the environment. Set only when the whole body compiled with no
-	// fallback, no let/const, no nested function, and no `arguments` (see
-	// bc_resolver.go). Otherwise 0 and locals stay name-based.
+	// numSlots > 0 marks a slot-eligible function: its params, function-scope
+	// vars, and block-scoped let/const bindings live in the frame's locals array
+	// (indexed by opGetLocal/opSetLocal and their TDZ-checked variants) instead of
+	// the environment. Set only when the whole body compiled with no fallback, no
+	// nested function, and no `arguments` (see bc_resolver.go / bc_compiler.go).
+	// Otherwise 0 and locals stay name-based.
 	numSlots   int
-	slotNames  []string // slot index → local name (debug / var-hoist)
+	slotNames  []string // slot index → binding name (var-hoist + TDZ diagnostics)
 	paramSlots []int    // param position → slot index (last wins for a dup name)
 	numParams  int      // len(def.Params); positions ≥ this in paramSlots don't exist
 

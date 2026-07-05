@@ -9,7 +9,10 @@ func bcResult(bytecode bool, src string) string {
 	if bytecode {
 		i = New(WithBytecode())
 	} else {
-		i = New()
+		// The bytecode VM is on by default, so the oracle side must explicitly opt
+		// OUT to the tree-walker — otherwise both sides run the VM and the diff is
+		// vacuous.
+		i = New(WithTreeWalker())
 	}
 	v, err := i.RunString("diff", src)
 	if err != nil {
@@ -28,6 +31,27 @@ func bcResult(bytecode bool, src string) string {
 // assignment), especially where a fallback subtree is mixed with compiled control
 // flow. Each script's last expression statement is its completion value.
 var bcDiffCases = []string{
+	// --- lexical (let/const) slots, block scoping, TDZ, and native let-for loops.
+	// These exercise the slot-mode lexical path (bc_resolver/bc_compiler); each
+	// must agree with the tree-walker oracle.
+	`function f(){ let s=0; for(let i=0;i<5;i++){ s+=i } return s } f()`,                                 // native let-for
+	`function f(){ const a=2, b=3; return a*b } f()`,                                                     // const slots
+	`function f(){ let x=1; { let x=2; return x } } f()`,                                                 // block shadowing (inner)
+	`function f(){ let x=1; { let x=2 } return x } f()`,                                                  // block shadowing (outer survives)
+	`function f(x){ { let x=9; return x } } f(1)`,                                                        // block let shadows a param
+	`function f(){ let sum=0; for(let i=0;i<3;i++){ for(let j=0;j<3;j++){ sum+=i*j } } return sum } f()`, // nested let-for
+	`function f(){ try{ return y }catch(e){ return e.constructor.name } let y=1 }`,                       // TDZ read → ReferenceError
+	`function f(){ try{ x=1 }catch(e){ return e.constructor.name } let x }`,                              // TDZ write → ReferenceError
+	`function f(){ try{ return typeof z }catch(e){ return e.constructor.name } let z=1 }`,                // typeof in TDZ still throws
+	`function f(){ const c=1; try{ c=2 }catch(e){ return e.constructor.name } return c }`,                // const reassign → TypeError
+	`function f(){ const c=1; try{ c++ }catch(e){ return e.constructor.name } return c }`,                // const ++ → TypeError
+	`function f(){ let x; return x } f()`,                                                                // let with no init → undefined
+	`function f(){ let r=""; for(let i=0;i<3;i++){ let k=i*2; r+=k } return r } f()`,                     // per-iteration block let
+	`function f(){ let n=10; while(n>0){ let d=n%2; n=(n-d)/2 } return n } f()`,                          // let inside while block
+	`function f(){ let a=1; if(true){ let a=2; return a }else{ return a } } f()`,                         // let in if-block
+	`function f(){ let out=0; for(let i=5;i>0;i--) out+=i; return out } f()`,                             // for-let, bodiless (single stmt)
+	`function f(){ const arr=[1,2,3]; let t=0; for(let i=0;i<arr.length;i++) t+=arr[i]; return t } f()`,  // const array + let-for
+
 	// arithmetic / precedence / coercion
 	`function f(){ return 1 + 2 * 3 - 4 / 2 } f()`,
 	`function f(){ return 2 ** 10 % 7 } f()`,

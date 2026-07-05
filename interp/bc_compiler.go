@@ -24,13 +24,31 @@ type bcCompiler struct {
 	i    *Interpreter
 	code *codeObject
 	err  error
-	// slots is non-nil in slot mode: a local name → frame slot index. In slot mode
-	// the compiler emits slot opcodes for locals and ABORTS (c.fail) the moment it
-	// would otherwise emit a fallback, reference a captured/nested binding, use
-	// `arguments`, or hit let/const — the exact conditions under which a slot local
-	// would be unreachable. That makes "the slot compile succeeded" the single
-	// source of truth for slot-eligibility (no separate analysis to keep in sync).
+	// slots is non-nil in slot mode: a local name → frame slot index for the
+	// function-scope bindings (parameters and hoisted `var`s, assigned by
+	// planSlots). In slot mode the compiler emits slot opcodes for locals and
+	// ABORTS (c.fail) the moment it would otherwise emit a fallback, reference a
+	// captured/nested binding, or use `arguments` — the exact conditions under
+	// which a slot local would be unreachable. That makes "the slot compile
+	// succeeded" the single source of truth for slot-eligibility (no separate
+	// analysis to keep in sync).
 	slots map[string]int
+	// lexScopes is the block-scoped lexical (let/const) environment, innermost
+	// last. Because slot mode forbids nested closures (a FuncExpr/ArrowFunc aborts
+	// it), no lexical binding can ever be captured, so per-iteration environments
+	// are unobservable and every lexical is a plain frame slot. Each distinct
+	// binding gets its own slot (no reuse) so slotNames stays unambiguous for TDZ
+	// error messages; nextSlot is the next free index past the function-scope
+	// slots.
+	lexScopes []map[string]lexInfo
+	nextSlot  int32
+}
+
+// lexInfo records a lexical binding's frame slot and whether it is const (a
+// const reassignment aborts slot mode — see the assignment/update compilers).
+type lexInfo struct {
+	slot  int32
+	konst bool
 }
 
 // compileFunctionBody compiles def's body to a codeObject, or returns (nil, false)
@@ -42,10 +60,13 @@ func (i *Interpreter) compileFunctionBody(def *ast.FuncDef, strict bool) (*codeO
 		return nil, false
 	}
 	if sp := planSlots(def); sp != nil {
-		c := &bcCompiler{i: i, slots: sp.byName,
+		c := &bcCompiler{i: i, slots: sp.byName, nextSlot: int32(len(sp.slotName)),
 			code: &codeObject{name: funcName(def), strict: strict, numSlots: len(sp.slotName),
 				slotNames: sp.slotName, paramSlots: sp.paramSlot, numParams: sp.numParams}}
 		if c.compileBody(def) {
+			// Lexical bindings allocated slots past the function-scope ones; grow the
+			// frame to cover them.
+			c.code.numSlots = int(c.nextSlot)
 			return c.code, true
 		}
 	}
@@ -59,11 +80,20 @@ func (i *Interpreter) compileFunctionBody(def *ast.FuncDef, strict bool) (*codeO
 // compileBody compiles the statement list and the implicit trailing `return
 // undefined`, reporting success (no fallback aborted the compile).
 func (c *bcCompiler) compileBody(def *ast.FuncDef) bool {
+	// The function body is itself a lexical scope: hoist its top-level let/const to
+	// slots (in slot mode) before compiling, so a use-before-init hits the TDZ.
+	if c.slots != nil {
+		c.pushLexScope()
+		c.hoistLexicals(def.Body.Body)
+	}
 	for _, s := range def.Body.Body {
 		c.stmt(s)
 		if c.err != nil {
 			return false
 		}
+	}
+	if c.slots != nil {
+		c.popLexScope()
 	}
 	c.emit(opPushUndef, 0, 0)
 	c.emit(opReturn, 0, 0)
@@ -89,13 +119,76 @@ func (c *bcCompiler) treeWalkStmt(s ast.Stmt) {
 	c.emit(opEvalStmt, c.code.nodeIndex(s), 0)
 }
 
-// localSlot returns (slot, true) if name is a frame-slot local in slot mode.
+// localSlot returns (slot, true) if name is a function-scope (param/var) frame
+// slot in slot mode. It does NOT see lexical bindings; callers that must handle
+// let/const use resolveLocal.
 func (c *bcCompiler) localSlot(name string) (int32, bool) {
 	if c.slots == nil {
 		return 0, false
 	}
 	s, ok := c.slots[name]
 	return int32(s), ok
+}
+
+// resolveLocal resolves name to a frame slot in slot mode, searching the lexical
+// scopes from innermost out (so an inner let shadows an outer binding or a
+// parameter) before the function-scope param/var slots. lexical is true for a
+// let/const binding (its reads/writes are TDZ-checked); konst marks a const.
+func (c *bcCompiler) resolveLocal(name string) (slot int32, lexical, konst, ok bool) {
+	if c.slots == nil {
+		return 0, false, false, false
+	}
+	for j := len(c.lexScopes) - 1; j >= 0; j-- {
+		if li, found := c.lexScopes[j][name]; found {
+			return li.slot, true, li.konst, true
+		}
+	}
+	if s, found := c.slots[name]; found {
+		return int32(s), false, false, true
+	}
+	return 0, false, false, false
+}
+
+// pushLexScope / popLexScope bracket a block, for-head, or function body's
+// lexical environment. No runtime opcode is needed on exit — the slots simply
+// fall out of the compiler's name resolution (they are not reused).
+func (c *bcCompiler) pushLexScope() { c.lexScopes = append(c.lexScopes, map[string]lexInfo{}) }
+func (c *bcCompiler) popLexScope()  { c.lexScopes = c.lexScopes[:len(c.lexScopes)-1] }
+
+// allocLexical assigns a fresh frame slot to a lexical binding in the innermost
+// scope and records its name for TDZ diagnostics. The caller emits opHoleLocal
+// to put the slot in its Temporal Dead Zone.
+func (c *bcCompiler) allocLexical(name string, konst bool) int32 {
+	slot := c.nextSlot
+	c.nextSlot++
+	c.code.slotNames = append(c.code.slotNames, name)
+	c.lexScopes[len(c.lexScopes)-1][name] = lexInfo{slot: slot, konst: konst}
+	return slot
+}
+
+// hoistLexicals block-hoists the let/const declarations that appear directly in
+// stmts (not in nested blocks): it allocates each a slot in the current lexical
+// scope and hole-initializes it, so a use before the initializer runs resolves
+// to the (TDZ) binding and throws — matching the tree-walker. A destructuring or
+// non-identifier lexical target is not modeled by slots, so it aborts to name
+// mode.
+func (c *bcCompiler) hoistLexicals(stmts []ast.Stmt) {
+	for _, s := range stmts {
+		vd, ok := s.(*ast.VarDecl)
+		if !ok || vd.Kind == token.VAR {
+			continue
+		}
+		konst := vd.Kind == token.CONST
+		for _, decl := range vd.Decls {
+			id, ok := decl.Target.(*ast.Ident)
+			if !ok {
+				c.fail() // destructuring lexical target ⇒ whole-function fallback
+				return
+			}
+			slot := c.allocLexical(id.Name, konst)
+			c.emit(opHoleLocal, slot, 0)
+		}
+	}
 }
 
 func funcName(def *ast.FuncDef) string {
@@ -140,14 +233,17 @@ func (c *bcCompiler) stmt(s ast.Stmt) {
 	case *ast.VarDecl:
 		c.varDecl(st)
 	case *ast.BlockStmt:
-		// In slot mode a block needs no environment scope: there are no let/const
-		// (they abort slot mode) and no nested function declarations, so every
-		// binding is a function-scope slot. Skipping opEnterScope also avoids the
-		// per-block env allocation.
+		// In slot mode a block needs no environment: its let/const bindings are
+		// frame slots (hoisted to the TDZ here) and there are no nested function
+		// declarations, so there is nothing to put in a child env — skipping
+		// opEnterScope also avoids the per-block env allocation.
 		if c.slots != nil {
+			c.pushLexScope()
+			c.hoistLexicals(st.Body)
 			for _, sub := range st.Body {
 				c.stmt(sub)
 			}
+			c.popLexScope()
 			return
 		}
 		c.emit(opEnterScope, c.code.nodeIndex(st), 0)
@@ -220,11 +316,23 @@ func (c *bcCompiler) varDecl(d *ast.VarDecl) {
 				c.emit(opDeclareVar, c.code.nameIndex(name), 0)
 			}
 		default: // let / const
-			// A lexical binding would need per-block scoping and (if captured) an
-			// env cell; slot mode does not model either, so abort to name mode.
 			if c.slots != nil {
-				c.fail()
-				return
+				// Slot mode: the name was block-hoisted to a hole-initialized slot by
+				// hoistLexicals. Evaluate the initializer (or undefined) and store it
+				// with a plain opSetLocal — the declaration is what CLEARS the TDZ hole,
+				// so it must not be a TDZ-checked write.
+				slot, lexical, _, ok := c.resolveLocal(name)
+				if !ok || !lexical {
+					c.fail() // should not happen: hoistLexicals ran first
+					return
+				}
+				if decl.Init != nil {
+					c.exprNamed(decl.Init, name)
+				} else {
+					c.emit(opPushUndef, 0, 0)
+				}
+				c.emit(opSetLocal, slot, 0)
+				continue
 			}
 			if decl.Init != nil {
 				c.exprNamed(decl.Init, name)
@@ -291,11 +399,22 @@ func (c *bcCompiler) doWhileStmt(s *ast.DoWhileStmt) {
 }
 
 func (c *bcCompiler) forStmt(s *ast.ForStmt) {
-	// A lexical (let/const) for-head needs per-iteration environment semantics
-	// (CreatePerIterationEnvironment); defer that to the tree-walker for now.
+	lexHead := false
 	if vd, ok := s.Init.(*ast.VarDecl); ok && vd.Kind != token.VAR {
-		c.treeWalkStmt(s)
-		return
+		if c.slots == nil {
+			// Name mode: a lexical for-head needs per-iteration environment semantics
+			// (CreatePerIterationEnvironment). The tree-walker implements the copy
+			// faithfully, so defer the whole statement to it.
+			c.treeWalkStmt(s)
+			return
+		}
+		// Slot mode forbids nested closures, so nothing can capture the loop
+		// variable — the per-iteration copy is unobservable and one set of slots is
+		// correct. Scope the head's let/const to the loop (visible in test, update,
+		// and body; gone afterward) and hole-init them before the init runs.
+		lexHead = true
+		c.pushLexScope()
+		c.hoistLexicals([]ast.Stmt{vd})
 	}
 	// init
 	switch init := s.Init.(type) {
@@ -331,6 +450,9 @@ func (c *bcCompiler) forStmt(s *ast.ForStmt) {
 	}
 	c.code.instrs[enter].a = int32(brk)
 	c.code.instrs[enter].b = int32(cont)
+	if lexHead {
+		c.popLexScope()
+	}
 }
 
 // --- expressions ------------------------------------------------------------
@@ -362,8 +484,12 @@ func (c *bcCompiler) exprNamed(e ast.Expr, name string) {
 			c.emit(opPushNewTarget, 0, 0)
 			return
 		}
-		if slot, ok := c.localSlot(ex.Name); ok {
-			c.emit(opGetLocal, slot, 0)
+		if slot, lexical, _, ok := c.resolveLocal(ex.Name); ok {
+			if lexical {
+				c.emit(opGetLocalTDZ, slot, 0) // ReferenceError if read before init
+			} else {
+				c.emit(opGetLocal, slot, 0)
+			}
 			return
 		}
 		// `arguments` in slot mode would need the (skipped) arguments object; abort.
@@ -393,8 +519,16 @@ func (c *bcCompiler) exprNamed(e ast.Expr, name string) {
 			if ex.Op == token.DEC {
 				dec = 1
 			}
-			if slot, ok := c.localSlot(id.Name); ok {
-				c.emit(opIncDecLocal, slot, prefix|dec<<1)
+			if slot, lexical, konst, ok := c.resolveLocal(id.Name); ok {
+				if konst {
+					c.fail() // ++/-- on a const ⇒ TypeError; let name mode handle it
+					return
+				}
+				if lexical {
+					c.emit(opIncDecLocalTDZ, slot, prefix|dec<<1) // ReferenceError if in TDZ
+				} else {
+					c.emit(opIncDecLocal, slot, prefix|dec<<1)
+				}
 				return
 			}
 			c.emit(opResolveName, c.code.nameIndex(id.Name), 0)
@@ -490,11 +624,16 @@ func (c *bcCompiler) unary(ex *ast.UnaryExpr) {
 	switch ex.Op {
 	case token.TYPEOF:
 		if id, ok := ex.Operand.(*ast.Ident); ok && id.Name != "new.target" {
-			// A slot local is always declared (initialized to undefined), so
-			// typeof reads its value like any other; only a non-local uses the
-			// unresolved-safe opTypeofName.
-			if slot, ok := c.localSlot(id.Name); ok {
-				c.emit(opGetLocal, slot, 0)
+			// typeof reads a slot local's value like any other; only a non-local
+			// uses the unresolved-safe opTypeofName. A lexical read still honors the
+			// TDZ (typeof of a let/const before init is a ReferenceError, not
+			// "undefined"), so it uses the checked opcode.
+			if slot, lexical, _, ok := c.resolveLocal(id.Name); ok {
+				if lexical {
+					c.emit(opGetLocalTDZ, slot, 0)
+				} else {
+					c.emit(opGetLocal, slot, 0)
+				}
 				c.emit(opTypeofVal, 0, 0)
 				return
 			}
@@ -643,8 +782,18 @@ func (c *bcCompiler) assign(ex *ast.AssignExpr, _ string) {
 	if ex.Op != token.ASSIGN {
 		if id, ok := ex.Target.(*ast.Ident); ok && !isLogicalAssign(ex.Op) {
 			// Slot local: read slot, op, write slot, leave result.
-			if slot, ok := c.localSlot(id.Name); ok {
-				c.emit(opGetLocal, slot, 0)
+			if slot, lexical, konst, ok := c.resolveLocal(id.Name); ok {
+				if konst {
+					c.fail() // compound-assign to a const ⇒ TypeError; let name mode handle it
+					return
+				}
+				// A lexical read honors the TDZ; the subsequent write is unchecked
+				// because a successful read proves the binding is initialized.
+				if lexical {
+					c.emit(opGetLocalTDZ, slot, 0)
+				} else {
+					c.emit(opGetLocal, slot, 0)
+				}
 				c.expr(ex.Value)
 				c.emit(opBinop, int32(compoundBaseOp(ex.Op)), 0)
 				c.emit(opDup, 0, 0)
@@ -674,11 +823,21 @@ func (c *bcCompiler) assign(ex *ast.AssignExpr, _ string) {
 			inferName = ""
 		}
 		// Slot local: no reference needed — evaluate RHS, dup the result (the
-		// assignment's value), store into the slot.
-		if slot, ok := c.localSlot(tgt.Name); ok {
+		// assignment's value), store into the slot. A const target aborts to name
+		// mode (the RHS still runs there before the TypeError); a let target uses a
+		// TDZ-checked write so `x = 1; let x;` throws ReferenceError.
+		if slot, lexical, konst, ok := c.resolveLocal(tgt.Name); ok {
+			if konst {
+				c.fail()
+				return
+			}
 			c.exprNamed(ex.Value, inferName)
 			c.emit(opDup, 0, 0)
-			c.emit(opSetLocal, slot, 0)
+			if lexical {
+				c.emit(opSetLocalTDZ, slot, 0)
+			} else {
+				c.emit(opSetLocal, slot, 0)
+			}
 			return
 		}
 		c.emit(opResolveName, c.code.nameIndex(tgt.Name), 0)

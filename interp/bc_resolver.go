@@ -10,10 +10,12 @@ import "github.com/iceisfun/gojs/ast"
 //
 // It is applied conservatively so the escape hatch stays correct: a slot local is
 // invisible to an opEvalNode/opEvalStmt subtree (those resolve by name via env),
-// so slots are used ONLY when the whole body compiles with no fallback, no
-// let/const, no nested function, and no `arguments`. The compiler enforces exactly
-// that by aborting slot-mode compilation the moment it would emit a fallback (see
-// bc_compiler.go); this file only assigns the slot indices.
+// so slots are used ONLY when the whole body compiles with no fallback, no nested
+// function, and no `arguments`. The compiler enforces exactly that by aborting
+// slot-mode compilation the moment it would emit a fallback (see bc_compiler.go).
+// This file assigns the function-scope slots (params + hoisted vars); the
+// compiler layers block-scoped let/const bindings on top with their own slots,
+// TDZ hole-initialization, and const-write checks.
 
 // slotPlan maps a slot-eligible function's parameter and function-scope var names
 // to frame slot indices. Parameters occupy the first slots (by first appearance);
