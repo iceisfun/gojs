@@ -129,6 +129,17 @@ func (td *typedArrayData) length() int {
 // validIndex implements IsValidIntegerIndex (§10.4.5): it returns the integer
 // index and true when index is an in-bounds, non-negative integral Number
 // (excluding -0) on a non-detached, in-bounds view.
+// normalizeIndex maps a Number used as a computed property key to the value its
+// canonical index string denotes: ToString(-0) is "0", so a Number -0 indexes
+// element 0 (unlike the string key "-0", which validIndex rejects). Every other
+// value passes through unchanged.
+func normalizeIndex(f float64) float64 {
+	if f == 0 { // true for both +0 and -0; the literal 0 is +0
+		return 0
+	}
+	return f
+}
+
 func (td *typedArrayData) validIndex(index float64) (int, bool) {
 	if math.IsNaN(index) || math.IsInf(index, 0) || index != math.Trunc(index) {
 		return 0, false

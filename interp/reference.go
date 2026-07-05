@@ -205,6 +205,21 @@ func (i *Interpreter) getRefValue(ctx context.Context, ref *reference) (Value, e
 		if IsNullish(ref.base) {
 			return nil, i.throwError(ctx, "TypeError", "Cannot read properties of "+briefValue(ref.base)+i.refKeyHint(ref, "reading"))
 		}
+		// Fast path: TypedArray element read with a numeric index. A Number key is
+		// always a canonical numeric index (ToString(n) round-trips), so [[Get]]
+		// never consults the prototype — it returns the element or undefined. This
+		// avoids ToString on the index and CanonicalNumericIndexString's string↔
+		// float round-trip, the dominant cost of tight typed-array loops.
+		if !ref.keyDone {
+			if n, ok := ref.keyVal.(Number); ok {
+				if o, ok := ref.base.(*Object); ok && o.typedArray != nil {
+					if idx, valid := o.typedArray.validIndex(normalizeIndex(float64(n))); valid {
+						return o.typedArray.getElement(idx), nil
+					}
+					return Undef, nil
+				}
+			}
+		}
 		key, err := i.resolveKey(ctx, ref)
 		if err != nil {
 			return nil, err
@@ -266,6 +281,18 @@ func (i *Interpreter) putRefValue(ctx context.Context, ref *reference, value Val
 	case refProp:
 		if IsNullish(ref.base) {
 			return i.throwError(ctx, "TypeError", "Cannot set properties of "+briefValue(ref.base)+i.refKeyHint(ref, "setting"))
+		}
+		// Fast path mirroring the read side: a TypedArray [[Set]] with a numeric
+		// index writes through TypedArraySetElement (which still coerces the value,
+		// possibly running user code) and always "succeeds", never touching the
+		// prototype. Skips index ToString + CanonicalNumericIndexString.
+		if !ref.keyDone {
+			if n, ok := ref.keyVal.(Number); ok {
+				if o, ok := ref.base.(*Object); ok && o.typedArray != nil {
+					_, err := i.typedArraySetElement(ctx, o.typedArray, normalizeIndex(float64(n)), value)
+					return err
+				}
+			}
 		}
 		key, err := i.resolveKey(ctx, ref)
 		if err != nil {
