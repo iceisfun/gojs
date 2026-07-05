@@ -360,10 +360,13 @@ func runMode(path, src string, m Meta, mode string) Result {
 		interp.WithTimeProvider(interp.NewDefaultTimeProvider()),
 		interp.WithTimerProvider(interp.NewDefaultTimerProvider()),
 	}
-	// GOJS_T262_BYTECODE=1 forces the optional bytecode VM on for every test, so a
-	// conformance run doubles as a differential check of the VM against the
-	// tree-walker at scale (any construct the compiler declines falls back).
-	if os.Getenv("GOJS_T262_BYTECODE") != "" {
+	// The bytecode VM is the default engine (interp.New). GOJS_T262_TREEWALK=1
+	// forces the tree-walker instead, so a conformance run doubles as a differential
+	// check of the two engines at scale. GOJS_T262_BYTECODE is kept (now redundant)
+	// for older invocations.
+	if os.Getenv("GOJS_T262_TREEWALK") != "" {
+		opts = append(opts, interp.WithTreeWalker())
+	} else if os.Getenv("GOJS_T262_BYTECODE") != "" {
 		opts = append(opts, interp.WithBytecode())
 	}
 	// Dynamic import() tests reference sibling fixture modules by relative

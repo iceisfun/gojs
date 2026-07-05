@@ -49,9 +49,11 @@ type Interpreter struct {
 	os      OsProvider
 	net     NetProvider
 
-	// useBytecode enables the optional bytecode VM (bc_*.go): eligible function
-	// bodies are compiled and run on the stack VM instead of the tree-walker.
-	// Off by default; the tree-walker remains the reference engine.
+	// useBytecode selects the bytecode VM (bc_*.go): eligible function bodies are
+	// compiled and run on the stack VM instead of the tree-walker. On by default
+	// (set in New); WithTreeWalker turns it off. Constructs the compiler declines
+	// fall back to the tree-walker automatically, so the two engines are
+	// behaviorally identical — the VM is simply faster.
 	useBytecode bool
 
 	// sourceMapper, when set, maps generated (transpiled) positions in error
@@ -283,14 +285,18 @@ func WithTimeProvider(p TimeProvider) Option {
 	return func(i *Interpreter) { i.clock = p }
 }
 
-// WithBytecode enables the optional bytecode VM: eligible (non-generator,
-// non-async) function bodies are compiled to bytecode and executed on the stack
-// VM (bc_*.go) instead of the tree-walker. Any construct the compiler does not
-// yet handle falls back to the tree-walker automatically — per-subtree where
-// possible, or for the whole function otherwise — so behavior is unchanged. This
-// is an experimental performance path; the tree-walker remains the reference.
+// WithBytecode enables the bytecode VM. The VM is on by default, so this option
+// is now a no-op kept for backward compatibility; see WithTreeWalker to opt out.
 func WithBytecode() Option {
 	return func(i *Interpreter) { i.useBytecode = true }
+}
+
+// WithTreeWalker forces the tree-walking interpreter, disabling the bytecode VM
+// that New enables by default. The two engines are behaviorally identical (the
+// compiler falls back to the tree-walker for any construct it declines); use it
+// as a differential reference or to sidestep a suspected VM regression.
+func WithTreeWalker() Option {
+	return func(i *Interpreter) { i.useBytecode = false }
 }
 
 // WithTimerProvider enables setTimeout/setInterval/setImmediate backed by p.
@@ -383,7 +389,7 @@ func WithRegExpEngine(e RegExpEngine) Option {
 
 // New creates an Interpreter with the standard global environment installed.
 func New(opts ...Option) *Interpreter {
-	i := &Interpreter{limits: defaultLimits(), errorColor: true}
+	i := &Interpreter{limits: defaultLimits(), errorColor: true, useBytecode: true}
 	for _, opt := range opts {
 		opt(i)
 	}
