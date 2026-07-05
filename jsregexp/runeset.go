@@ -214,8 +214,11 @@ func canonicalize(r rune, unicodeMode bool) rune {
 }
 
 // simpleFold returns the canonical representative of r's case-fold orbit: the
-// smallest code point reachable via unicode.SimpleFold. This approximates the
-// CaseFolding.txt C+S mappings used by Unicode-mode Canonicalize.
+// smallest code point reachable via unicode.SimpleFold, corrected by the
+// CaseFolding.txt "S" (simple) mappings that Go's orbit-based SimpleFold does not
+// model (see foldExtra). Unicode-mode Canonicalize (§22.2.2.7.1) uses exactly the
+// simple/common CaseFolding.txt mappings, so two code points sharing a simple
+// fold must canonicalize identically.
 func simpleFold(r rune) rune {
 	min := r
 	for c := unicode.SimpleFold(r); c != r; c = unicode.SimpleFold(c) {
@@ -223,7 +226,70 @@ func simpleFold(r rune) rune {
 			min = c
 		}
 	}
+	for _, c := range foldExtra[r] {
+		if c < min {
+			min = c
+		}
+	}
 	return min
+}
+
+// scfSimplePairs are the CaseFolding.txt entries with status "S" (a simple case
+// fold that differs from the character's full fold). Go's unicode.SimpleFold is
+// orbit-based and omits the ones whose full fold expands to a multi-code-point
+// sequence (e.g. U+1FD3 → U+0390, U+FB05 → U+FB06), so Unicode-mode Canonicalize
+// would fail to relate the two. Each pair {src, dst} is an equivalence that must
+// hold in both directions; foldExtra records it symmetrically. Pairs Go already
+// covers (e.g. U+1E9E ↔ U+00DF) are harmless duplicates.
+var scfSimplePairs = [][2]rune{
+	{0x1E9E, 0x00DF}, {0x1F88, 0x1F80}, {0x1F89, 0x1F81}, {0x1F8A, 0x1F82},
+	{0x1F8B, 0x1F83}, {0x1F8C, 0x1F84}, {0x1F8D, 0x1F85}, {0x1F8E, 0x1F86},
+	{0x1F8F, 0x1F87}, {0x1F98, 0x1F90}, {0x1F99, 0x1F91}, {0x1F9A, 0x1F92},
+	{0x1F9B, 0x1F93}, {0x1F9C, 0x1F94}, {0x1F9D, 0x1F95}, {0x1F9E, 0x1F96},
+	{0x1F9F, 0x1F97}, {0x1FA8, 0x1FA0}, {0x1FA9, 0x1FA1}, {0x1FAA, 0x1FA2},
+	{0x1FAB, 0x1FA3}, {0x1FAC, 0x1FA4}, {0x1FAD, 0x1FA5}, {0x1FAE, 0x1FA6},
+	{0x1FAF, 0x1FA7}, {0x1FBC, 0x1FB3}, {0x1FCC, 0x1FC3}, {0x1FD3, 0x0390},
+	{0x1FE3, 0x03B0}, {0x1FFC, 0x1FF3}, {0xFB05, 0xFB06},
+}
+
+// foldExtra maps each code point involved in an scfSimplePairs entry to the other
+// code points in its (Go-orbit-augmented) simple-fold class, so simpleFold and
+// classContainsFold see the full equivalence Go's SimpleFold misses.
+var foldExtra = buildFoldExtra()
+
+func buildFoldExtra() map[rune][]rune {
+	m := map[rune]map[rune]bool{}
+	link := func(a, b rune) {
+		if m[a] == nil {
+			m[a] = map[rune]bool{}
+		}
+		if a != b {
+			m[a][b] = true
+		}
+	}
+	// orbit collects every code point reachable from r through Go's SimpleFold.
+	orbit := func(r rune) []rune {
+		out := []rune{r}
+		for c := unicode.SimpleFold(r); c != r; c = unicode.SimpleFold(c) {
+			out = append(out, c)
+		}
+		return out
+	}
+	for _, p := range scfSimplePairs {
+		class := append(orbit(p[0]), orbit(p[1])...)
+		for _, a := range class {
+			for _, b := range class {
+				link(a, b)
+			}
+		}
+	}
+	out := map[rune][]rune{}
+	for r, set := range m {
+		for c := range set {
+			out[r] = append(out[r], c)
+		}
+	}
+	return out
 }
 
 // classContainsFold reports whether the class set contains r, applying case
@@ -238,6 +304,12 @@ func classContainsFold(set *runeSet, r rune, ic, unicodeMode bool) bool {
 	}
 	if unicodeMode {
 		for c := unicode.SimpleFold(r); c != r; c = unicode.SimpleFold(c) {
+			if set.contains(c) {
+				return true
+			}
+		}
+		// CaseFolding.txt "S" mappings that Go's orbit walk omits (foldExtra).
+		for _, c := range foldExtra[r] {
 			if set.contains(c) {
 				return true
 			}
