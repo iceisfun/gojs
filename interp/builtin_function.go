@@ -120,8 +120,8 @@ func (i *Interpreter) initFunction() {
 			return nil, err
 		}
 		targetName := ""
-		if s, ok := targetNameV.(String); ok {
-			targetName = string(s)
+		if s, ok := asString(targetNameV); ok {
+			targetName = s
 		}
 		name := "bound " + targetName
 

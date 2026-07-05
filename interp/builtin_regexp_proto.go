@@ -634,8 +634,8 @@ func (i *Interpreter) getSubstitution(ctx context.Context, matched, str []uint16
 				idx = int(c - '0')
 			}
 			if idx >= 1 && idx <= len(captures) {
-				if cv, ok := captures[idx-1].(String); ok {
-					out = append(out, jsregexp.ToUnits(string(cv))...)
+				if cv, ok := asString(captures[idx-1]); ok {
+					out = append(out, jsregexp.ToUnits(cv)...)
 				}
 				j += 1 + digitCount
 			} else {

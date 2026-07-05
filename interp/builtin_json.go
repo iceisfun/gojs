@@ -281,7 +281,7 @@ func (st *jsonState) serializeProperty(ctx context.Context, b *strings.Builder, 
 			if err != nil {
 				return false, err
 			}
-			b.WriteString(string(rj.(String)))
+			b.WriteString(stringValue(rj))
 			return true, nil
 		}
 	}

@@ -140,7 +140,7 @@ func (i *Interpreter) getIteratorFlattenable(ctx context.Context, obj Value, str
 		if !stringPrimitives {
 			return nil, i.throwError(ctx, "TypeError", briefValue(obj)+" is not an object")
 		}
-		if _, isStr := obj.(String); !isStr {
+		if !isStringish(obj) {
 			return nil, i.throwError(ctx, "TypeError", briefValue(obj)+" is not an object")
 		}
 		// The string primitive is NOT boxed: its @@iterator is looked up (and

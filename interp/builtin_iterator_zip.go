@@ -73,7 +73,7 @@ func (i *Interpreter) iteratorZipImpl(ctx context.Context, iterablesV, optionsV 
 	}
 	mode := "shortest"
 	if !IsUndefined(modeV) {
-		ms, ok := modeV.(String)
+		ms, ok := asString(modeV)
 		if !ok || (ms != "shortest" && ms != "longest" && ms != "strict") {
 			return nil, i.throwError(ctx, "TypeError", "Iterator.zip mode must be 'shortest', 'longest', or 'strict'")
 		}

@@ -263,12 +263,12 @@ func (i *Interpreter) getEnumOption(ctx context.Context, opts *Object, name stri
 	if IsUndefined(v) {
 		return def, nil
 	}
-	s, ok := v.(String)
+	s, ok := asString(v)
 	if !ok {
 		return "", i.throwError(ctx, "TypeError", name+" must be a string")
 	}
 	for _, a := range allowed {
-		if string(s) == a {
+		if s == a {
 			return a, nil
 		}
 	}
@@ -316,7 +316,7 @@ func (i *Interpreter) setFromResult(read, written int) *Object {
 // --- the six methods --------------------------------------------------------
 
 func (i *Interpreter) uint8FromBase64(ctx context.Context, _ Value, args []Value) (Value, error) {
-	str, ok := arg(args, 0).(String)
+	str, ok := asString(arg(args, 0))
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "Uint8Array.fromBase64 argument must be a string")
 	}
@@ -340,7 +340,7 @@ func (i *Interpreter) uint8FromBase64(ctx context.Context, _ Value, args []Value
 }
 
 func (i *Interpreter) uint8FromHex(ctx context.Context, _ Value, args []Value) (Value, error) {
-	str, ok := arg(args, 0).(String)
+	str, ok := asString(arg(args, 0))
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "Uint8Array.fromHex argument must be a string")
 	}
@@ -391,7 +391,7 @@ func (i *Interpreter) uint8SetFromBase64(ctx context.Context, this Value, args [
 	if err != nil {
 		return nil, err
 	}
-	str, ok := arg(args, 0).(String)
+	str, ok := asString(arg(args, 0))
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "setFromBase64 argument must be a string")
 	}
@@ -426,7 +426,7 @@ func (i *Interpreter) uint8SetFromHex(ctx context.Context, this Value, args []Va
 	if err != nil {
 		return nil, err
 	}
-	str, ok := arg(args, 0).(String)
+	str, ok := asString(arg(args, 0))
 	if !ok {
 		return nil, i.throwError(ctx, "TypeError", "setFromHex argument must be a string")
 	}

@@ -43,7 +43,7 @@ func (i *Interpreter) ToPrimitive(ctx context.Context, v Value, hint string) (Va
 			return nil, err
 		}
 		if isPrimitive(res) {
-			return res, nil
+			return flattenRope(res), nil // uphold the invariant: never return a *vmString
 		}
 		return nil, i.throwError(ctx, "TypeError", "Cannot convert object to primitive value")
 	}
@@ -63,7 +63,7 @@ func (i *Interpreter) ToPrimitive(ctx context.Context, v Value, hint string) (Va
 				return nil, err
 			}
 			if isPrimitive(res) {
-				return res, nil
+				return flattenRope(res), nil // uphold the invariant: never return a *vmString
 			}
 		}
 	}

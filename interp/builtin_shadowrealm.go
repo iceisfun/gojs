@@ -82,10 +82,10 @@ func (i *Interpreter) shadowRealmEvaluate(ctx context.Context, this Value, args 
 		return nil, i.throwError(ctx, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm object")
 	}
 	srcV := arg(args, 0)
-	src, ok := srcV.(String)
-	if !ok {
+	if !isStringish(srcV) { // spec: Type(sourceText) must be String (a *vmString qualifies)
 		return nil, i.throwError(ctx, "TypeError", "ShadowRealm.prototype.evaluate expects a string")
 	}
+	src := stringValue(srcV)
 	// A parse failure of the source is a SyntaxError in the caller realm
 	// (PerformShadowRealmEval), distinct from a runtime error which becomes a
 	// caller-realm TypeError.
@@ -229,8 +229,8 @@ func (dest *Interpreter) copyWrappedNameAndLength(w *Object, home *Interpreter, 
 		return err
 	}
 	name := ""
-	if s, ok := nv.(String); ok {
-		name = string(s)
+	if isStringish(nv) {
+		name = stringValue(nv)
 	}
 	w.defineOwn(StrKey("length"), &Property{Value: length, Writable: false, Enumerable: false, Configurable: true})
 	w.defineOwn(StrKey("name"), &Property{Value: String(name), Writable: false, Enumerable: false, Configurable: true})
@@ -253,10 +253,10 @@ func (i *Interpreter) shadowRealmImportValue(ctx context.Context, this Value, ar
 		return nil, err
 	}
 	exportNameV := arg(args, 1)
-	exportName, ok := exportNameV.(String)
-	if !ok {
+	if !isStringish(exportNameV) { // spec: Type(exportName) must be String (a *vmString qualifies)
 		return nil, i.throwError(ctx, "TypeError", "ShadowRealm.prototype.importValue expects a string export name")
 	}
+	exportName := stringValue(exportNameV)
 
 	pObj, resolve, reject := i.newPromise()
 	nsV, ierr := inner.importModuleNamespace(inner.ctx, specifier)

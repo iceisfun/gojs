@@ -56,8 +56,8 @@ func (i *Interpreter) objectProtoToString(ctx context.Context, this Value) (Valu
 		return nil, err
 	}
 	tag := builtinTag
-	if s, ok := tagVal.(String); ok {
-		tag = string(s)
+	if s, ok := asString(tagVal); ok {
+		tag = s
 	}
 	return String("[object " + tag + "]"), nil
 }

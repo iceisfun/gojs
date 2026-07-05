@@ -153,6 +153,39 @@ func TestVMStringThroughEngine(t *testing.T) {
 	}
 }
 
+// --- computed (*vmString) values must pass spec String type-guards ----------
+
+// Regression for the ShadowRealm/base64/toStringTag/error/Date/Iterator guards:
+// each did a bare `.(String)` that rejected a lazily-built string. A computed
+// string ("a"+"b", boxed join, template) must be accepted everywhere a String is.
+func TestVMStringComputedThroughGuards(t *testing.T) {
+	checks := []struct{ name, src, want string }{
+		// Symbol.toStringTag set to a computed string.
+		{"toStringTag", `let o={}; o[Symbol.toStringTag]="Ta"+"g"; Object.prototype.toString.call(o)`, "[object Tag]"},
+		// Error message built by concatenation, read back via toString.
+		{"error-message", `(new Error("bo"+"om")).toString()`, "Error: boom"},
+		// Uint8Array.fromBase64 with a computed source string.
+		{"fromBase64", `String(Uint8Array.fromBase64("aGVsb"+"G8=").length)`, "5"},
+		// Date parsing an object whose toString returns a computed string.
+		{"date-toString", `String(new Date({toString(){return "2020-01-0"+"1T00:00:00Z"}}).getUTCFullYear())`, "2020"},
+		// Iterator.from over a computed string primitive.
+		{"iterator-from", `[...Iterator.from("x"+"yz")].join("|")`, "x|y|z"},
+		// ShadowRealm.evaluate with a computed source string.
+		{"shadowrealm", `String(new ShadowRealm().evaluate("1"+"+2"))`, "3"},
+	}
+	i := New()
+	for _, c := range checks {
+		v, err := i.RunString("main", c.src)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if got := stringValue(v); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // --- the .length / charCodeAt loops that were O(n^2) now scale ---------------
 
 func TestVMStringHotLoopsCorrect(t *testing.T) {

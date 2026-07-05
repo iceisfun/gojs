@@ -114,15 +114,15 @@ func briefValue(v Value) string {
 		if name, ok := ownDataOnChain(x, "name"); ok {
 			msg := ""
 			if m, ok := ownDataOnChain(x, "message"); ok {
-				if s, ok := m.(String); ok {
-					msg = string(s)
+				if s, ok := asString(m); ok {
+					msg = s
 				}
 			}
-			if ns, ok := name.(String); ok {
+			if ns, ok := asString(name); ok {
 				if msg != "" {
-					return string(ns) + ": " + msg
+					return ns + ": " + msg
 				}
-				return string(ns)
+				return ns
 			}
 		}
 		return "[object " + x.class + "]"

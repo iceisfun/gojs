@@ -92,7 +92,7 @@ func isStringish(v Value) bool {
 }
 
 // stringValue returns the Go string value of a string primitive, flattening a
-// *vmString. It panics if v is not stringish; callers must have checked.
+// *vmString. It returns "" if v is not stringish; callers must have checked.
 func stringValue(v Value) string {
 	switch x := v.(type) {
 	case String:
@@ -101,6 +101,20 @@ func stringValue(v Value) string {
 		return x.build()
 	}
 	return ""
+}
+
+// asString returns the Go string value and true if v is a string primitive (a
+// String or a *vmString). Use it in place of a bare `v.(String)` for a spec
+// type-guard that accepts a String without coercion but must also accept a
+// lazily-built one — every producer may hand back a *vmString.
+func asString(v Value) (string, bool) {
+	switch x := v.(type) {
+	case String:
+		return string(x), true
+	case *vmString:
+		return x.build(), true
+	}
+	return "", false
 }
 
 // metaStrThreshold is the byte length at or above which a freshly-materialized

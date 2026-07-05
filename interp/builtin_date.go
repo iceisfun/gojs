@@ -869,9 +869,9 @@ func (i *Interpreter) initDate() {
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Date.prototype[Symbol.toPrimitive] called on non-object")
 		}
-		hint, _ := arg(args, 0).(String)
+		hint, _ := asString(arg(args, 0))
 		var tryFirst string
-		switch string(hint) {
+		switch hint {
 		case "string", "default":
 			tryFirst = "string"
 		case "number":
