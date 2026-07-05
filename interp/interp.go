@@ -19,6 +19,7 @@ package interp
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/token"
@@ -143,6 +144,14 @@ type Interpreter struct {
 	// running evaluation-step count checked against Limits.MaxSteps.
 	limits Limits
 	steps  int64
+
+	// vmPolls counts bytecode instructions dispatched, so execCode can throttle
+	// the cost of polling ctx.Done() (a channel select) to once every
+	// ctxPollInterval instructions instead of paying it on the hot path of every
+	// instruction. It is atomic because generator/async bodies drive execCode on
+	// their own goroutines (serialized by channel handoff, but the race detector
+	// still requires synchronized access).
+	vmPolls atomic.Int64
 
 	// regexpEngine selects the RegExp backend (the ECMAScript-conformant
 	// jsregexp engine by default, or the faster RE2 engine as an opt-in).

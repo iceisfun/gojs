@@ -29,6 +29,12 @@ func (tdzHoleType) Typeof() string { return "undefined" }
 
 var tdzHole Value = tdzHoleType{}
 
+// ctxPollInterval is how often (in dispatched instructions) execCode polls
+// ctx.Done() for cancellation. A power of two so the check is a bitmask. 1024
+// keeps worst-case cancellation latency far below a millisecond while removing
+// the per-instruction channel-select cost that dominated the dispatch loop.
+const ctxPollInterval = 1024
+
 type bcFrame struct {
 	code   *codeObject
 	ip     int
@@ -118,8 +124,16 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 	defer putFrame(fr)
 	instrs := code.instrs
 	for fr.ip < len(instrs) {
-		if err := i.checkContext(); err != nil {
-			return nil, err
+		// Poll for cancellation periodically rather than on every instruction:
+		// ctx.Done() is a channel select that dominated the dispatch loop. The
+		// counter is global and monotonic, so cancellation stays responsive in
+		// both long loops and deep recursion (short frames that never loop still
+		// contribute to the shared count). ctxPollInterval is a power of two so
+		// the test is a mask.
+		if i.vmPolls.Add(1)&(ctxPollInterval-1) == 0 {
+			if err := i.checkContext(); err != nil {
+				return nil, err
+			}
 		}
 		if err := i.step(); err != nil {
 			return nil, err
