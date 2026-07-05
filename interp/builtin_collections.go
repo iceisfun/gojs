@@ -1,6 +1,9 @@
 package interp
 
-import "context"
+import (
+	"context"
+	"math"
+)
 
 // This file installs the four keyed-collection built-ins mandated by ECMA-262
 // §24 (Map, Set) and §24 (WeakMap, WeakSet): constructors, prototype methods,
@@ -39,16 +42,108 @@ type mapEntry struct {
 // preserved because there may be existing iterators suspended midway"). The
 // tombstones are cleared only by clear(), which resets the whole list.
 //
-// Lookup is O(n) by linear scan, which is acceptable for the first-pass
-// implementation and matches what V8 / SpiderMonkey use for small maps.
+// Lookup is O(n) by linear scan while the map is small (matching what V8 /
+// SpiderMonkey do for small maps, and avoiding a hash-map allocation for the
+// many short-lived collections real code creates). Once a map grows past
+// mapIndexThreshold live entries it builds a hash index (see hkey/buildIndex),
+// after which get/set/has/delete are O(1) — so a loop of N inserts is O(N)
+// instead of O(N²).
 type orderedMap struct {
 	entries []mapEntry
-	count   int // number of live (non-tombstone) entries
+	count   int          // number of live (non-tombstone) entries
+	index   map[hkey]int // live key -> entries index; nil below the threshold
+}
+
+// mapIndexThreshold is the live-entry count above which an orderedMap switches
+// from linear scan to a hash index. Small maps stay allocation-free.
+const mapIndexThreshold = 16
+
+// hkey is a comparable encoding of a Value's SameValueZero (§7.2.11) equivalence
+// class, usable as a Go map key. The encoding is faithful: two Values are
+// SameValueZero-equal iff their hkeys are ==, so the index resolves a key with a
+// single map lookup and no secondary equality check. The kind tag keeps the
+// primitive domains disjoint (so Number 1, BigInt 1n, String "1", and Boolean
+// true never collide), all NaNs collapse to one class, and -0 folds to +0.
+type hkey struct {
+	kind uint8
+	f    float64 // Number value, or 0/1 for Boolean
+	s    string  // String content, or a BigInt's canonical decimal
+	ptr  any     // *Object / *Symbol identity (nil for value kinds)
+}
+
+const (
+	hkUndefined uint8 = iota
+	hkNull
+	hkBool
+	hkNumber
+	hkNaN
+	hkString
+	hkBigInt
+	hkSymbol
+	hkObject
+)
+
+// hashKey maps a Value to its hkey. It canonicalizes NaN (to a single class) and
+// -0 (to +0), mirroring canonicalizeKey/sameValueZero, so a lookup key need not
+// be pre-canonicalized.
+func hashKey(v Value) hkey {
+	switch x := v.(type) {
+	case Undefined:
+		return hkey{kind: hkUndefined}
+	case Null:
+		return hkey{kind: hkNull}
+	case Boolean:
+		if bool(x) {
+			return hkey{kind: hkBool, f: 1}
+		}
+		return hkey{kind: hkBool}
+	case Number:
+		f := float64(x)
+		if math.IsNaN(f) {
+			return hkey{kind: hkNaN}
+		}
+		if f == 0 { // fold -0 to +0
+			f = 0
+		}
+		return hkey{kind: hkNumber, f: f}
+	case String:
+		return hkey{kind: hkString, s: string(x)}
+	case *vmString:
+		return hkey{kind: hkString, s: x.build()}
+	case *BigInt:
+		return hkey{kind: hkBigInt, s: x.Int.String()}
+	case *Symbol:
+		return hkey{kind: hkSymbol, ptr: x}
+	case *Object:
+		return hkey{kind: hkObject, ptr: x}
+	default:
+		// Unreachable for spec Values; kind 255 keeps any stray type isolated.
+		return hkey{kind: 255}
+	}
+}
+
+// buildIndex populates the hash index from the live entries. Called once when a
+// growing map first crosses mapIndexThreshold; thereafter set/delete keep it in
+// step incrementally.
+func (m *orderedMap) buildIndex() {
+	m.index = make(map[hkey]int, m.count*2)
+	for idx := range m.entries {
+		if !m.entries[idx].deleted {
+			m.index[hashKey(m.entries[idx].key)] = idx
+		}
+	}
 }
 
 // find returns the index of the first live entry whose key is SameValueZero-
-// equal to k, or -1 when absent.
+// equal to k, or -1 when absent. It uses the hash index once one exists,
+// otherwise scans linearly.
 func (m *orderedMap) find(k Value) int {
+	if m.index != nil {
+		if idx, ok := m.index[hashKey(k)]; ok {
+			return idx
+		}
+		return -1
+	}
 	for idx := range m.entries {
 		if !m.entries[idx].deleted && sameValueZero(m.entries[idx].key, k) {
 			return idx
@@ -74,8 +169,14 @@ func (m *orderedMap) set(k, v Value) {
 		m.entries[idx].val = v
 		return
 	}
+	idx := len(m.entries)
 	m.entries = append(m.entries, mapEntry{key: k, val: v})
 	m.count++
+	if m.index != nil {
+		m.index[hashKey(k)] = idx
+	} else if m.count > mapIndexThreshold {
+		m.buildIndex()
+	}
 }
 
 // get returns the value for k and whether it was found.
@@ -95,6 +196,9 @@ func (m *orderedMap) delete(k Value) bool {
 	if idx < 0 {
 		return false
 	}
+	if m.index != nil {
+		delete(m.index, hashKey(m.entries[idx].key))
+	}
 	m.entries[idx] = mapEntry{deleted: true}
 	m.count--
 	return true
@@ -108,6 +212,7 @@ func (m *orderedMap) size() int { return m.count }
 func (m *orderedMap) clear() {
 	m.entries = nil
 	m.count = 0
+	m.index = nil
 }
 
 // nextLive returns the first live entry at or after idx (skipping tombstones)
@@ -139,11 +244,9 @@ type orderedSet struct {
 var setSentinel Value = True // any non-nil constant works
 
 func (s *orderedSet) add(v Value) {
-	v = canonicalizeKey(v)
-	if s.m.find(v) < 0 {
-		s.m.entries = append(s.m.entries, mapEntry{key: v, val: setSentinel})
-		s.m.count++
-	}
+	// Route through orderedMap.set so the hash index (once built) is maintained;
+	// re-setting an existing key's sentinel value is a harmless no-op.
+	s.m.set(v, setSentinel)
 }
 
 // values returns a snapshot slice of the set's live values in insertion order.
