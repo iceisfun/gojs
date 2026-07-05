@@ -14,10 +14,14 @@ import "sync"
 // goroutines (owned by a TimerProvider) only enqueue work; they never touch
 // interpreter state directly.
 type eventLoop struct {
-	mu    sync.Mutex
-	cond  *sync.Cond
-	micro []func() error
-	macro []func() error
+	mu   sync.Mutex
+	cond *sync.Cond
+	// nextTick is a higher-priority job queue drained BEFORE micro on every turn
+	// (and re-checked after each microtask), modeling Node's process.nextTick
+	// ordering: a nextTick callback runs before any pending Promise reaction.
+	nextTick []func() error
+	micro    []func() error
+	macro    []func() error
 
 	// activeTimers counts scheduled one-shot/interval callbacks that have not
 	// completed, so run knows whether to keep waiting for more work.
@@ -36,6 +40,15 @@ func newEventLoop() *eventLoop {
 func (l *eventLoop) pushMicro(fn func() error) {
 	l.mu.Lock()
 	l.micro = append(l.micro, fn)
+	l.cond.Signal()
+	l.mu.Unlock()
+}
+
+// pushNextTick enqueues a process.nextTick job, which is drained ahead of the
+// microtask (promise) queue.
+func (l *eventLoop) pushNextTick(fn func() error) {
+	l.mu.Lock()
+	l.nextTick = append(l.nextTick, fn)
 	l.cond.Signal()
 	l.mu.Unlock()
 }
@@ -73,16 +86,24 @@ func (l *eventLoop) stop() {
 	l.mu.Unlock()
 }
 
-// drainMicro runs all queued microtasks, returning the first error.
+// drainMicro runs all queued jobs, returning the first error. The process.nextTick
+// queue has priority over the Promise microtask queue and is re-checked after
+// every job, so a nextTick scheduled from within a microtask still runs before the
+// next microtask (Node's ordering).
 func (l *eventLoop) drainMicro() error {
 	for {
 		l.mu.Lock()
-		if len(l.micro) == 0 {
+		var fn func() error
+		if len(l.nextTick) > 0 {
+			fn = l.nextTick[0]
+			l.nextTick = l.nextTick[1:]
+		} else if len(l.micro) > 0 {
+			fn = l.micro[0]
+			l.micro = l.micro[1:]
+		} else {
 			l.mu.Unlock()
 			return nil
 		}
-		fn := l.micro[0]
-		l.micro = l.micro[1:]
 		l.mu.Unlock()
 		if err := fn(); err != nil {
 			return err
@@ -102,7 +123,7 @@ func (l *eventLoop) run() error {
 		for len(l.macro) == 0 && !l.stopped {
 			// Nothing runnable right now. If no timers are pending either, the
 			// loop is genuinely idle and we are done.
-			if l.activeTimers == 0 && len(l.micro) == 0 {
+			if l.activeTimers == 0 && len(l.micro) == 0 && len(l.nextTick) == 0 {
 				l.mu.Unlock()
 				return nil
 			}

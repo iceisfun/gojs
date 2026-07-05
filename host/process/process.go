@@ -28,14 +28,42 @@ type config struct {
 	argv []string
 }
 
+// Process is a handle to an installed process global. It lets the embedder flush
+// buffered stdout/stderr when the program finishes so a trailing write() with no
+// newline is not lost.
+type Process struct {
+	stdout, stderr *lineWriter
+}
+
+// Flush emits any buffered trailing partial line on process.stdout/stderr. A
+// standalone runner calls this once the program (and its event loop) has
+// completed; process.exit flushes on its own path.
+func (p *Process) Flush() {
+	if p == nil {
+		return
+	}
+	p.stdout.flush()
+	p.stderr.flush()
+}
+
+// args0 returns args[0] or undefined.
+func args0(args []gojs.Value) gojs.Value {
+	if len(args) > 0 {
+		return args[0]
+	}
+	return gojs.Undefined
+}
+
 // Option configures the installed process object.
 type Option func(*config)
 
 // WithArgs sets process.argv (the full vector, including argv[0]).
 func WithArgs(argv ...string) Option { return func(c *config) { c.argv = argv } }
 
-// Install adds the process global to vm, backed by vm's providers.
-func Install(vm *gojs.VM, opts ...Option) error {
+// Install adds the process global to vm, backed by vm's providers, and returns a
+// handle whose Flush emits any buffered trailing stdout/stderr output when the
+// program finishes.
+func Install(vm *gojs.VM, opts ...Option) (*Process, error) {
 	cfg := &config{}
 	for _, o := range opts {
 		o(cfg)
@@ -71,14 +99,19 @@ func Install(vm *gojs.VM, opts ...Option) error {
 	proc.SetData("stdout", writable(vm, stdout))
 	proc.SetData("stderr", writable(vm, stderr))
 
-	// nextTick(fn, ...args) → microtask queue (a core VM capability).
+	// nextTick(fn, ...args) → the VM's higher-priority "next tick" queue, drained
+	// ahead of Promise microtasks (Node's ordering). The callback is validated
+	// SYNCHRONOUSLY: a missing/non-callable first argument throws a TypeError from
+	// the nextTick call itself (catchable by the caller), as in Node, rather than
+	// failing later as an uncaught async error.
 	proc.SetData("nextTick", vm.NewFunction("nextTick", func(args []gojs.Value) (gojs.Value, error) {
-		if len(args) == 0 {
-			return gojs.Undefined, nil
+		fn, ok := args0(args).(*gojs.Object)
+		if !ok || !fn.IsCallable() {
+			return gojs.Undefined, gojs.NewThrow(vm.NewError("TypeError",
+				`The "callback" argument must be of type function.`))
 		}
-		fn := args[0]
 		extra := append([]gojs.Value(nil), args[1:]...)
-		vm.QueueMicrotask(func() error {
+		vm.QueueNextTick(func() error {
 			_, err := vm.Call(fn, gojs.Undefined, extra...)
 			return err
 		})
@@ -134,7 +167,7 @@ func Install(vm *gojs.VM, opts ...Option) error {
 	}
 
 	vm.SetGlobal("process", proc)
-	return nil
+	return &Process{stdout: stdout, stderr: stderr}, nil
 }
 
 // lineWriter adapts a byte-stream write() to the line-oriented PrintProvider: it

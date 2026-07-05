@@ -177,6 +177,17 @@ func (o *Object) setStatus(ctx context.Context, key PropertyKey, v Value) (bool,
 	if !o.extensible {
 		return false, nil
 	}
+	// Creating a NEW array index at or beyond a non-writable "length" is refused
+	// (Array [[DefineOwnProperty]] index case, §10.4.2.1 step 3.b): OrdinarySet
+	// creates the missing element via [[DefineOwnProperty]], which rejects because
+	// storing the index would have to grow a length that cannot change. A sloppy
+	// assignment is then dropped; a Set-with-Throw (Array.prototype.push, etc.)
+	// turns the false into a TypeError — before any element is written.
+	if o.isArray && o.lengthNonWritable && !key.IsSymbol() {
+		if idx, ok := arrayIndex(key.Str); ok && idx >= o.ArrayLen() {
+			return false, nil
+		}
+	}
 	o.writeData(key, v)
 	return true, nil
 }

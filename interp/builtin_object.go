@@ -907,8 +907,10 @@ func (i *Interpreter) defineOwnFromDescriptor(ctx context.Context, o *Object, ke
 			return i.arraySetLength(ctx, o, desc)
 		}
 		// Adding an index at or beyond the current length is refused when length
-		// is non-writable (Array [[DefineOwnProperty]] index case, §10.4.2.1).
-		if idx, ok := arrayIndex(key.Str); ok && o.lengthNonWritable && idx >= len(o.elems) {
+		// is non-writable (Array [[DefineOwnProperty]] index case, §10.4.2.1 step
+		// 3.b). The bound is the logical length (ArrayLen), so an index within a
+		// sparse tail below length is still allowed.
+		if idx, ok := arrayIndex(key.Str); ok && o.lengthNonWritable && idx >= o.ArrayLen() {
 			return false, nil
 		}
 	}
@@ -980,11 +982,6 @@ func (i *Interpreter) ordinaryDefineOwn(ctx context.Context, o *Object, key Prop
 	hasGet := desc.Has(StrKey("get"))
 	hasSet := desc.Has(StrKey("set"))
 
-	if (hasGet || hasSet) && (hasValue || hasWritable) {
-		return false, i.throwError(ctx, "TypeError",
-			"Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, "+keyName(key))
-	}
-
 	var enumerable, configurable, writable bool
 	var value Value = Undef
 	var getter, setter *Object
@@ -1037,6 +1034,15 @@ func (i *Interpreter) ordinaryDefineOwn(ctx context.Context, o *Object, key Prop
 		} else if !IsUndefined(v) {
 			return false, i.throwError(ctx, "TypeError", "Setter must be a function: "+keyName(key))
 		}
+	}
+	// ToPropertyDescriptor step 9: the "cannot specify both accessors and a
+	// value/writable attribute" TypeError is raised only AFTER every present field
+	// has been Get in order (enumerable, configurable, value, writable, get, set) —
+	// so a descriptor whose "value" and "get" are themselves getters runs both of
+	// them before this rejection.
+	if (hasGet || hasSet) && (hasValue || hasWritable) {
+		return false, i.throwError(ctx, "TypeError",
+			"Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, "+keyName(key))
 	}
 	isAccessorDesc := hasGet || hasSet
 	isDataDesc := hasValue || hasWritable

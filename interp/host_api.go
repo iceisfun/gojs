@@ -67,6 +67,34 @@ func (i *Interpreter) QueueMicrotask(fn func() error) {
 	i.loop.pushMicro(fn)
 }
 
+// QueueNextTick schedules fn on the higher-priority "next tick" queue, which is
+// drained ahead of the microtask (Promise) queue — the ordering Node's
+// process.nextTick provides. Safe to call from any goroutine; fn runs on the VM
+// goroutine.
+func (i *Interpreter) QueueNextTick(fn func() error) {
+	i.loop.pushNextTick(fn)
+}
+
+// TakeUnhandledRejections returns the reasons of every promise that rejected
+// without ever having a handler attached, and clears the internal log. Call it
+// after RunString/RunProgram (i.e. after the event loop has drained), when a
+// promise that is still unhandled is genuinely unhandled. A standalone runner
+// uses this to report unhandled rejections and exit non-zero, mirroring Node.
+func (i *Interpreter) TakeUnhandledRejections() []Value {
+	if len(i.unhandledRejections) == 0 {
+		i.unhandledRejections = nil
+		return nil
+	}
+	var out []Value
+	for _, r := range i.unhandledRejections {
+		if !r.state.handled {
+			out = append(out, r.reason)
+		}
+	}
+	i.unhandledRejections = nil
+	return out
+}
+
 // PromiseCapability is a promise together with Go functions to settle it. Host
 // providers create one, hand the promise to the script, and later — from any
 // goroutine — call Resolve or Reject (which internally marshal the settlement

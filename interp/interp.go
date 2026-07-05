@@ -265,6 +265,12 @@ type intrinsics struct {
 	// Atomics big lock; see AgentCluster.
 	cluster *AgentCluster
 
+	// unhandledRejections accumulates promises that rejected with no handler
+	// attached (HostPromiseRejectionTracker). A handler attached later clears the
+	// entry via promiseState.handled; TakeUnhandledRejections returns the
+	// survivors. Read it after the event loop drains.
+	unhandledRejections []rejectionRecord
+
 	// nativeErrorProtos maps an error name (TypeError, RangeError, ...) to its
 	// prototype, so runtime code can raise the right error kind.
 	nativeErrorProtos map[string]*Object

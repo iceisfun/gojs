@@ -255,6 +255,16 @@ func (i *Interpreter) ordinarySet(ctx context.Context, o *Object, key PropertyKe
 	if !recv.extensible {
 		return false, nil
 	}
+	// Creating a NEW array index at or beyond a non-writable "length" is refused
+	// (Array [[DefineOwnProperty]] index case, §10.4.2.1 step 3.b): the
+	// CreateDataProperty that OrdinarySetWithOwnDescriptor performs fails, so a
+	// Set-with-Throw (e.g. Array.prototype.push on a frozen/non-writable-length
+	// array) raises TypeError before any element is stored.
+	if recv.isArray && recv.lengthNonWritable && !key.IsSymbol() {
+		if idx, ok := arrayIndex(key.Str); ok && idx >= recv.ArrayLen() {
+			return false, nil
+		}
+	}
 	recv.writeData(key, v)
 	return true, nil
 }

@@ -63,6 +63,19 @@ type promiseState struct {
 	// object from outside the Promise implementation (see host_api.go).
 	hostResolve func(Value)
 	hostReject  func(Value)
+
+	// handled records whether a reaction was ever attached to this promise
+	// (PerformPromiseThen). It drives unhandled-rejection tracking: a promise that
+	// rejects while unhandled is reported unless a handler is attached later.
+	handled bool
+}
+
+// rejectionRecord notes a promise that rejected while it had no handler, for
+// HostPromiseRejectionTracker-style unhandled-rejection reporting. The state
+// pointer lets a later handler (which sets state.handled) retroactively clear it.
+type rejectionRecord struct {
+	state  *promiseState
+	reason Value
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +414,13 @@ func (i *Interpreter) newPromise() (pObj *Object, resolve func(Value), reject fu
 		}
 		state.status = promiseRejected
 		state.result = reason
+		// HostPromiseRejectionTracker "reject" (§27.2.1.9): a promise that rejects
+		// with no handler yet attached is a candidate unhandled rejection. If a
+		// handler is attached later, performPromiseThen sets state.handled and the
+		// candidate is filtered out when the host collects the survivors.
+		if !state.handled {
+			i.unhandledRejections = append(i.unhandledRejections, rejectionRecord{state, reason})
+		}
 		reactions := state.rejectReactions
 		state.fulfillReactions = nil
 		state.rejectReactions = nil
@@ -549,6 +569,12 @@ func (i *Interpreter) promiseThen(p *Object, onFulfilled, onRejected Value) *Obj
 // result capability.
 func (i *Interpreter) performPromiseThen(p *Object, onFulfilled, onRejected Value, resolve, reject func(Value)) {
 	state := i.getPromiseState(p)
+
+	// HostPromiseRejectionTracker "handle": attaching a reaction marks the promise
+	// handled, so a rejection that was recorded as a candidate unhandled rejection
+	// is no longer reported. The rejection propagates instead to the derived
+	// promise, which is tracked on its own if it too rejects unhandled.
+	state.handled = true
 
 	// Fulfill reaction: if handler is callable, call it and adopt the result;
 	// otherwise pass the value through to resolve.

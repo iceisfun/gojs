@@ -22,13 +22,16 @@ type fakeOs struct {
 	exitCode *int
 }
 
-func (f *fakeOs) Getenv(_ context.Context, name string) (string, bool) { v, ok := f.env[name]; return v, ok }
-func (f *fakeOs) Environ(context.Context) map[string]string           { return f.env }
-func (f *fakeOs) Cwd(context.Context) (string, error)                 { return "/app", nil }
-func (f *fakeOs) Exit(_ context.Context, code int)                    { *f.exitCode = code }
-func (f *fakeOs) Platform() string                                    { return "testos" }
-func (f *fakeOs) Arch() string                                        { return "testarch" }
-func (f *fakeOs) Pid() int                                            { return 4242 }
+func (f *fakeOs) Getenv(_ context.Context, name string) (string, bool) {
+	v, ok := f.env[name]
+	return v, ok
+}
+func (f *fakeOs) Environ(context.Context) map[string]string { return f.env }
+func (f *fakeOs) Cwd(context.Context) (string, error)       { return "/app", nil }
+func (f *fakeOs) Exit(_ context.Context, code int)          { *f.exitCode = code }
+func (f *fakeOs) Platform() string                          { return "testos" }
+func (f *fakeOs) Arch() string                              { return "testarch" }
+func (f *fakeOs) Pid() int                                  { return 4242 }
 
 func TestProcess(t *testing.T) {
 	var out strings.Builder
@@ -40,7 +43,7 @@ func TestProcess(t *testing.T) {
 		gojs.WithOsProvider(fos),
 	)
 	defer vm.Close()
-	if err := Install(vm, WithArgs("gojs", "app.js", "--flag")); err != nil {
+	if _, err := Install(vm, WithArgs("gojs", "app.js", "--flag")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,7 +84,7 @@ func TestProcess(t *testing.T) {
 func TestProcessSandbox(t *testing.T) {
 	vm := gojs.New() // no providers at all
 	defer vm.Close()
-	if err := Install(vm); err != nil {
+	if _, err := Install(vm); err != nil {
 		t.Fatal(err)
 	}
 	v, err := vm.RunString("t.js", `[
