@@ -1,11 +1,14 @@
 package interp
 
-import "github.com/iceisfun/gojs/ast"
+import (
+	"github.com/iceisfun/gojs/ast"
+	"github.com/iceisfun/gojs/token"
+)
 
 // This file defines the bytecode instruction set and the compiled code object
-// consumed by the stack VM (bc_vm.go). The VM is an OPTIONAL execution engine,
-// gated by WithBytecode; when it is off, nothing here runs and the tree-walker is
-// used exactly as before.
+// consumed by the stack VM (bc_vm.go). The VM is the DEFAULT execution engine
+// (interp.New); WithTreeWalker opts back out to the tree-walker, which remains the
+// behavioral reference the VM is validated against.
 //
 // Design: the compiler (bc_compiler.go) lowers the *hot structural* AST — control
 // flow, operators, calls, common expressions — to real opcodes, and emits the
@@ -26,6 +29,8 @@ type bcOp uint8
 
 const (
 	opNop bcOp = iota
+
+	opLine // a=position index → record poss[a] as the running statement position (stack traces)
 
 	// Stack shuffling.
 	opPop // discard top of stack
@@ -125,9 +130,10 @@ type codeObject struct {
 	instrs []bcInstr
 
 	// Pools referenced by instruction operands.
-	consts []Value    // opPushConst
-	names  []string   // opLoadName/opResolveName/opGetProp/... and declarations
-	nodes  []ast.Node // opEvalNode/opEvalStmt/opClosure/opEnterScope/opUpdate/opDelete
+	consts []Value     // opPushConst
+	names  []string    // opLoadName/opResolveName/opGetProp/... and declarations
+	nodes  []ast.Node  // opEvalNode/opEvalStmt/opClosure/opEnterScope/opUpdate/opDelete
+	poss   []token.Pos // opLine → the statement position recorded for stack frames
 
 	// numSlots > 0 marks a slot-eligible function: its params and function-scope
 	// vars live in the frame's locals array (indexed by opGetLocal/opSetLocal)
@@ -166,6 +172,16 @@ func (c *codeObject) nameIndex(name string) int32 {
 func (c *codeObject) nodeIndex(n ast.Node) int32 {
 	c.nodes = append(c.nodes, n)
 	return int32(len(c.nodes) - 1)
+}
+
+// posIndex interns a source position for an opLine, deduplicating a run of
+// instructions that share the last-emitted position (the common case).
+func (c *codeObject) posIndex(p token.Pos) int32 {
+	if n := len(c.poss); n > 0 && c.poss[n-1] == p {
+		return int32(n - 1)
+	}
+	c.poss = append(c.poss, p)
+	return int32(len(c.poss) - 1)
 }
 
 // emit appends an instruction and returns its index (for later jump patching).

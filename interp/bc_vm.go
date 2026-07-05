@@ -7,8 +7,8 @@ import (
 	"github.com/iceisfun/gojs/token"
 )
 
-// This file is the stack VM that executes a codeObject (bc_compiler.go). It is an
-// optional engine gated by WithBytecode; disabling it changes nothing. Every
+// This file is the stack VM that executes a codeObject (bc_compiler.go). It is the
+// default engine; WithTreeWalker opts back out. Every
 // scope-, property-, and call-touching opcode delegates to the same interp helper
 // the tree-walker uses (resolveIdent/assignIdent, getRefValue/putRefValue,
 // applyBinary, i.call, ToBoolean, strictEquals via applyBinary), so the VM's
@@ -79,6 +79,16 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 		fr.ip++
 		switch in.op {
 		case opNop:
+		case opLine:
+			// Update the innermost active call frame's position so an error
+			// constructed while this statement runs reports the right source
+			// location (mirrors eval_stmt.go's per-statement update).
+			p := code.poss[in.a]
+			if n := len(i.callStack); n > 0 {
+				i.callStack[n-1].pos = p
+			} else {
+				i.curPos = p
+			}
 		case opPop:
 			fr.pop()
 		case opDup:

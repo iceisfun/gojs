@@ -110,13 +110,19 @@ func funcName(def *ast.FuncDef) string {
 func (c *bcCompiler) emit(op bcOp, a, b int32) int { return c.code.emit(op, a, b) }
 func (c *bcCompiler) here() int                    { return len(c.code.instrs) }
 func (c *bcCompiler) patchTarget(idx, target int)  { c.code.instrs[idx].a = int32(target) }
-func (c *bcCompiler) fail()                         { c.err = errBCUnsupported }
+func (c *bcCompiler) fail()                        { c.err = errBCUnsupported }
 
 // --- statements -------------------------------------------------------------
 
 func (c *bcCompiler) stmt(s ast.Stmt) {
 	if c.err != nil {
 		return
+	}
+	// Record the statement's source position so a throw inside it reports an
+	// accurate call frame, matching the tree-walker (see eval_stmt.go). One opLine
+	// per statement mirrors the tree-walker's per-statement granularity.
+	if p := s.Pos(); p.Line > 0 {
+		c.emit(opLine, c.code.posIndex(p), 0)
 	}
 	switch st := s.(type) {
 	case *ast.ExprStmt:
