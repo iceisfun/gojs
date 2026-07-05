@@ -19,12 +19,12 @@ func TestRGIEmojiProperty(t *testing.T) {
 		return loc != nil
 	}
 	shouldMatch := []string{
-		"⌚",                                     // Basic_Emoji single code point (watch)
-		"#️⃣",                         // keycap #
-		"\U0001F1E7\U0001F1EA",                       // flag (BE)
-		"\U0001F385\U0001F3FB",                       // modifier sequence (Santa + skin tone)
+		"⌚",                                // Basic_Emoji single code point (watch)
+		"#️⃣",                              // keycap #
+		"\U0001F1E7\U0001F1EA",             // flag (BE)
+		"\U0001F385\U0001F3FB",             // modifier sequence (Santa + skin tone)
 		"\U0001F469‍\U0001F469‍\U0001F467", // ZWJ family sequence
-		"⌚\U0001F1E7\U0001F1EA",                 // several in a row (the + quantifier)
+		"⌚\U0001F1E7\U0001F1EA",            // several in a row (the + quantifier)
 	}
 	for _, s := range shouldMatch {
 		if !match(s) {
@@ -32,9 +32,9 @@ func TestRGIEmojiProperty(t *testing.T) {
 		}
 	}
 	shouldNotMatch := []string{
-		"a",                    // not emoji
-		"\U0001F1E7",           // a lone regional indicator is not an RGI flag
-		"#",              // '#' without the keycap sequence
+		"a",          // not emoji
+		"\U0001F1E7", // a lone regional indicator is not an RGI flag
+		"#",          // '#' without the keycap sequence
 	}
 	for _, s := range shouldNotMatch {
 		if match(s) {

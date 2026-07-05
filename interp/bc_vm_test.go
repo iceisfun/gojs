@@ -87,8 +87,8 @@ var bcDiffCases = []string{
 	`function f(){ let s=0; for(var i=0;i<5;i++){ try { if(i==3) break; s+=i } finally { s+=100 } } return s } f()`,
 	`function f(){ let s=0; for(var i=0;i<5;i++){ try { if(i==2) continue; s+=i } finally { s+=1 } } return s } f()`,
 	`function f(){ let x=10; x+=5; x*=2; x-=3; return x } f()`, // compound assign (fallback)
-	`function f(){ let a=0; a ||= 5; a &&= 9; return a } f()`,   // logical assign (fallback)
-	`function f(){ let {p, q=2} = {p:1}; return p+q } f()`,      // destructuring (fallback)
+	`function f(){ let a=0; a ||= 5; a &&= 9; return a } f()`,  // logical assign (fallback)
+	`function f(){ let {p, q=2} = {p:1}; return p+q } f()`,     // destructuring (fallback)
 	`function f(){ let [a,,c] = [1,2,3]; return a+c } f()`,
 	`function f(){ let o={x:1}; let {x, y="d"} = o; return x+y } f()`,
 	`function f(){ return [...[1,2],...[3,4]].length } f()`, // spread (fallback)
@@ -131,27 +131,27 @@ var bcDiffCases = []string{
 	`function f(){ var hit=0; var k={toString(){hit=1;return "p"}}; try { (null)[k] } catch(e){} return hit + ":" + (typeof null) } f()`,
 
 	// --- slot-mode edge cases (fully-native functions get frame slots) ---
-	`function f(a,a){ return a } f(1,2)`,                                  // dup param: last wins
-	`function f(x){ var x = x + 1; return x } f(5)`,                       // var shadows param (same binding)
-	`function f(){ return typeof x; var x = 1 } f()`,                      // var hoisting: undefined slot
-	`function f(){ { var y = 3 } return y } f()`,                          // var is function-scoped across a block
+	`function f(a,a){ return a } f(1,2)`,             // dup param: last wins
+	`function f(x){ var x = x + 1; return x } f(5)`,  // var shadows param (same binding)
+	`function f(){ return typeof x; var x = 1 } f()`, // var hoisting: undefined slot
+	`function f(){ { var y = 3 } return y } f()`,     // var is function-scoped across a block
 	`function f(n){ var s = 0; for (var i=0;i<n;i++){ s += i } return s } f(100)`,
-	`function f(n){ if (n<=1) return 1; return n*f(n-1) } f(6)`,           // recursion via global slot-eligible fn
-	`function f(a,b,c){ var t=a; t+=b; t+=c; t*=2; return t } f(1,2,3)`,   // params + compound + var
+	`function f(n){ if (n<=1) return 1; return n*f(n-1) } f(6)`,         // recursion via global slot-eligible fn
+	`function f(a,b,c){ var t=a; t+=b; t+=c; t*=2; return t } f(1,2,3)`, // params + compound + var
 	`function f(){ var i=10; var j=0; while(i>0){ i--; j++ } return i+":"+j } f()`,
 	`function f(x){ var r = 0; do { r += x; x-- } while(x>0); return r } f(4)`,
-	`function f(){ var a=1,b=2,c=3; return a+b*c-a } f()`,                 // multi-declarator var
-	`function f(p){ var q = p * 3n; return q + 1n } f(4n)`,                // bigint slot + incdec path
+	`function f(){ var a=1,b=2,c=3; return a+b*c-a } f()`,  // multi-declarator var
+	`function f(p){ var q = p * 3n; return q + 1n } f(4n)`, // bigint slot + incdec path
 	`function f(n){ var s=0; for(var i=0;i<n;i++){ if(i%3==0) continue; if(i>10) break; s+=i } return s } f(20)`,
 	// regression: `var arguments` is the arguments object, not an undefined slot
 	`function f(){ return typeof arguments; var arguments = 5 } f(1,2,3)`,
 	`function f(){ return arguments.length; var arguments } f(1,2,3)`,
-	`function f(arguments){ return arguments } f(7)`,                      // param named arguments shadows object
-	`function f(){ return arguments.length } f(1,2,3,4)`,                  // bare arguments ⇒ name mode
+	`function f(arguments){ return arguments } f(7)`,     // param named arguments shadows object
+	`function f(){ return arguments.length } f(1,2,3,4)`, // bare arguments ⇒ name mode
 	// regression: duplicate param, last occurrence wins even with no argument
-	`function f(x,a,b,x){ return x } f(1,2)`,                              // → undefined (last x unset)
-	`function f(x,a,b,x){ return x } f(1,2,3,4)`,                          // → 4 (last x set)
-	`function f(y,y){ return y } f(1,2)`,                                  // → 2
+	`function f(x,a,b,x){ return x } f(1,2)`,     // → undefined (last x unset)
+	`function f(x,a,b,x){ return x } f(1,2,3,4)`, // → 4 (last x set)
+	`function f(y,y){ return y } f(1,2)`,         // → 2
 }
 
 func TestBytecodeDiff(t *testing.T) {

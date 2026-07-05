@@ -33,8 +33,8 @@ type nsExotic struct {
 // namespace binding (`export * as ns`) reads the source module's namespace,
 // yielding a nested namespace object.
 func (i *Interpreter) newModuleNamespace(ctx context.Context, id string) *Object {
-	ns := NewObject(nil) // [[Prototype]] is null (§10.4.6.2)
-	ns.extensible = false // [[IsExtensible]] is always false (§10.4.6.4)
+	ns := NewObject(nil)     // [[Prototype]] is null (§10.4.6.2)
+	ns.extensible = false    // [[IsExtensible]] is always false (§10.4.6.4)
 	ns.immutableProto = true // [[SetPrototypeOf]] succeeds only for null (§10.4.6.3)
 
 	nx := &nsExotic{read: make(map[string]func(context.Context) (Value, error))}

@@ -38,12 +38,12 @@ const maxDepth = 1000
 
 // parser holds the state for a single parse.
 type parser struct {
-	source  string // source NAME (filename or "<eval>"), used for positions/Program.Source
-	srcText string // the actual source TEXT, used to slice function [[SourceText]]
+	source  string        // source NAME (filename or "<eval>"), used for positions/Program.Source
+	srcText string        // the actual source TEXT, used to slice function [[SourceText]]
 	toks    []token.Token // fully buffered token stream (always ends with EOF)
-	idx    int           // cursor into toks
-	err    *token.SyntaxError
-	depth  int // current recursion depth
+	idx     int           // cursor into toks
+	err     *token.SyntaxError
+	depth   int // current recursion depth
 
 	// noIn disables the `in` operator while parsing the header of a for
 	// statement, so `for (x in y)` is not mis-parsed as a relational expr.

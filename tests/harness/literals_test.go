@@ -162,18 +162,18 @@ func TestFunctionBodyStrictPrologue(t *testing.T) {
 
 func TestRegexpNamedGroupErrors(t *testing.T) {
 	bad := []string{
-		`/(?<>a)/`,           // empty group name
-		`/(?<42a>a)/`,        // group name starting with a digit
-		`/(?<:a>a)/`,         // punctuator starting group name
-		`/(?<a:>a)/`,         // punctuator within group name
-		`/(?<aa)/`,           // unterminated group specifier
-		"/(?<❤>a)/",     // non-identifier group name
-		`/(?<a>a)(?<a>a)/`,   // duplicate group name in a sequence
+		`/(?<>a)/`,         // empty group name
+		`/(?<42a>a)/`,      // group name starting with a digit
+		`/(?<:a>a)/`,       // punctuator starting group name
+		`/(?<a:>a)/`,       // punctuator within group name
+		`/(?<aa)/`,         // unterminated group specifier
+		"/(?<❤>a)/",        // non-identifier group name
+		`/(?<a>a)(?<a>a)/`, // duplicate group name in a sequence
 		`/(?<a>a)(?<b>b)(?<a>a)/`,
-		`/(?<a>(?<a>x))/`, // duplicate name nested on the same path
-		`/(?<a>.)\k<b>/`, // dangling backreference
-		`/(?<a>.)\k/`,    // incomplete backreference
-		`/(?<a>.)\k<>/`,  // empty backreference name
+		`/(?<a>(?<a>x))/`,    // duplicate name nested on the same path
+		`/(?<a>.)\k<b>/`,     // dangling backreference
+		`/(?<a>.)\k/`,        // incomplete backreference
+		`/(?<a>.)\k<>/`,      // empty backreference name
 		`/(?<a>.)\k<a/`,      // unterminated backreference
 		`/\k<a(?<a>a)/`,      // backreference name must not swallow a group
 		`/\k<a>/u`,           // unicode mode: \k with no matching group is an error
@@ -194,10 +194,10 @@ func TestRegexpNamedGroupValid(t *testing.T) {
 		`/(?<a>x)/`,
 		`/(?<year>\d{4})-(?<month>\d{2})/`,
 		`/(?<$_0>x)/`,
-		`/(?<a>.)\k<a>/`,   // valid named backreference (well-formed)
-		`/(?<=x)y/`,        // lookbehind, not a named group
-		`/(?<!x)y/`,        // negative lookbehind
-		`/\k<a>/`,          // \k with no named groups is a legacy identity escape
+		`/(?<a>.)\k<a>/`,           // valid named backreference (well-formed)
+		`/(?<=x)y/`,                // lookbehind, not a named group
+		`/(?<!x)y/`,                // negative lookbehind
+		`/\k<a>/`,                  // \k with no named groups is a legacy identity escape
 		`/[(?<a>)]/`,               // '(' and named-group syntax are literal in a class
 		`/(?<name1>x)(?<name2>y)/`, // multiple valid identifier names
 		`/(?<a>x)|(?<a>y)/`,        // duplicate name across alternatives is allowed

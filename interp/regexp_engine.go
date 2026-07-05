@@ -92,8 +92,8 @@ func re2Reason(err error) string {
 	return msg
 }
 
-func (e *re2Engine) Source() string             { return e.source }
-func (e *re2Engine) Flags() jsregexp.Flags      { return e.flags }
+func (e *re2Engine) Source() string               { return e.source }
+func (e *re2Engine) Flags() jsregexp.Flags        { return e.flags }
 func (e *re2Engine) GroupNames() map[string][]int { return e.names }
 
 // FindSubmatchIndex runs RE2 and maps its byte offsets back to code-unit

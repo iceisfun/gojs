@@ -818,4 +818,3 @@ var caseIgnorableRanges = [][2]rune{
 	{0xE0020, 0xE007F},
 	{0xE0100, 0xE01EF},
 }
-

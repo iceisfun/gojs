@@ -12,9 +12,9 @@ type parser struct {
 	pos   int
 	flags Flags
 
-	numGroups int            // total capturing groups (from the pre-scan)
+	numGroups int              // total capturing groups (from the pre-scan)
 	names     map[string][]int // group name -> capture indices (from the pre-scan)
-	capIndex  int            // capture counter during the main parse
+	capIndex  int              // capture counter during the main parse
 }
 
 // Parse parses pattern under the given flags into an immutable *Pattern, or

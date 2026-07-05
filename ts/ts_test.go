@@ -41,8 +41,8 @@ func TestEnum(t *testing.T) {
 // CommonJS and executed.
 func TestRequireTypeScript(t *testing.T) {
 	src := map[string]string{
-		"math.ts":  "export function add(a: number, b: number): number { return a + b; }\n",
-		"main.ts":  "import { add } from './math';\nconst r: number = add(40, 2);\nmodule.exports = r;\n",
+		"math.ts": "export function add(a: number, b: number): number { return a + b; }\n",
+		"main.ts": "import { add } from './math';\nconst r: number = add(40, 2);\nmodule.exports = r;\n",
 	}
 	base := interp.NewMapModuleProvider(src)
 	vm := interp.New(interp.WithModuleProvider(Provider(base)))

@@ -59,32 +59,32 @@ func TestLookbehindCaptures(t *testing.T) {
 		want                  []string // nil => expect no match
 	}{
 		// built-ins/RegExp/lookBehind/captures.js
-		{`(?<=(c))def`, "", "abcdef", []string{"def", "c"}},              // #1
-		{`(?<=(\w{2}))def`, "", "abcdef", []string{"def", "bc"}},         // #2
-		{`(?<=(\w(\w)))def`, "", "abcdef", []string{"def", "bc", "c"}},   // #3
-		{`(?<=(\w){3})def`, "", "abcdef", []string{"def", "a"}},          // #4 (reverse iteration)
-		{`(?<=(bc)|(cd)).`, "", "abcdef", []string{"d", "bc", undef}},    // #5
+		{`(?<=(c))def`, "", "abcdef", []string{"def", "c"}},                     // #1
+		{`(?<=(\w{2}))def`, "", "abcdef", []string{"def", "bc"}},                // #2
+		{`(?<=(\w(\w)))def`, "", "abcdef", []string{"def", "bc", "c"}},          // #3
+		{`(?<=(\w){3})def`, "", "abcdef", []string{"def", "a"}},                 // #4 (reverse iteration)
+		{`(?<=(bc)|(cd)).`, "", "abcdef", []string{"d", "bc", undef}},           // #5
 		{`(?<=([ab]{1,2})\D|(abc))\w`, "", "abcdef", []string{"c", "a", undef}}, // #6
-		{`\D(?<=([ab]+))(\w)`, "", "abcdef", []string{"ab", "a", "b"}},   // #7
+		{`\D(?<=([ab]+))(\w)`, "", "abcdef", []string{"ab", "a", "b"}},          // #7
 
 		// built-ins/RegExp/lookBehind/back-references-to-captures.js
-		{`(?<=\1(\w))d`, "i", "abcCd", []string{"d", "C"}},   // #1
-		{`(?<=\1([abx]))d`, "", "abxxd", []string{"d", "x"}}, // #2
-		{`(?<=\1(\w+))c`, "", "ababc", []string{"c", "ab"}},  // #3
-		{`(?<=\1(\w+))c`, "", "ababbc", []string{"c", "b"}},  // #4
-		{`(?<=\1(\w+))c`, "", "ababdc", nil},                 // #5
+		{`(?<=\1(\w))d`, "i", "abcCd", []string{"d", "C"}},    // #1
+		{`(?<=\1([abx]))d`, "", "abxxd", []string{"d", "x"}},  // #2
+		{`(?<=\1(\w+))c`, "", "ababc", []string{"c", "ab"}},   // #3
+		{`(?<=\1(\w+))c`, "", "ababbc", []string{"c", "b"}},   // #4
+		{`(?<=\1(\w+))c`, "", "ababdc", nil},                  // #5
 		{`(?<=(\w+)\1)c`, "", "ababc", []string{"c", "abab"}}, // #6
 
 		// built-ins/RegExp/lookBehind/do-not-backtrack.js
 		{`(?<=([abc]+)).\1`, "", "abcdbc", nil},
 
 		// built-ins/RegExp/lookBehind/misc.js — must not regress
-		{`^foo(?<=foo)$`, "", "foo", []string{"foo"}},        // #5
-		{`^f.o(?<=foo)$`, "", "foo", []string{"foo"}},        // #6
-		{`^f.o(?<!foo)$`, "", "fno", []string{"fno"}},        // #7
-		{`^foooo(?<=fo+)$`, "", "foooo", []string{"foooo"}},  // #8
-		{`^foooo(?<=fo*)$`, "", "foooo", []string{"foooo"}},  // #9
-		{`^foo(?<!foo)$`, "", "foo", nil},                    // #3
+		{`^foo(?<=foo)$`, "", "foo", []string{"foo"}},       // #5
+		{`^f.o(?<=foo)$`, "", "foo", []string{"foo"}},       // #6
+		{`^f.o(?<!foo)$`, "", "fno", []string{"fno"}},       // #7
+		{`^foooo(?<=fo+)$`, "", "foooo", []string{"foooo"}}, // #8
+		{`^foooo(?<=fo*)$`, "", "foooo", []string{"foooo"}}, // #9
+		{`^foo(?<!foo)$`, "", "foo", nil},                   // #3
 	}
 	for _, c := range cases {
 		got, ok := matchStrs(t, c.pattern, c.flags, c.input)
