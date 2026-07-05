@@ -65,7 +65,7 @@ func (i *Interpreter) evalClass(ctx context.Context, def *ast.ClassDef, env *Env
 	// and a heritage closure captures this inner binding independently of any
 	// same-named outer binding.
 	if def.Name != nil {
-		classEnv.vars[def.Name.Name] = &binding{mutable: false, initialized: false, lexical: true}
+		classEnv.bind(def.Name.Name, &binding{mutable: false, initialized: false, lexical: true})
 	}
 
 	var superCtor *Object
@@ -243,7 +243,7 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		// A class constructor (like any ordinary function) has an `arguments`
 		// object. Class code is strict, so it is unmapped; a formal named
 		// "arguments" is a SyntaxError, so there is never a shadowing conflict.
-		env.vars["arguments"] = &binding{value: i.makeArguments(args, nil, true), mutable: true, initialized: true}
+		env.bind("arguments", &binding{value: i.makeArguments(args, nil, true), mutable: true, initialized: true})
 
 		// -------------------------------------------------------------------
 		// Base class (no ClassHeritage): `this` is created here from
@@ -295,9 +295,9 @@ func (i *Interpreter) makeClassConstructor(def *ast.ClassDef, cd *classData, cto
 		// -------------------------------------------------------------------
 		env.superInit = &superInitState{}
 		env.setThis(Undef) // marks the this-scope; superInit.called governs uninitialized
-		env.vars["%activefunc%"] = &binding{value: fnObj, mutable: false, initialized: true}
-		env.vars["%superctor%"] = &binding{value: cd.superCtor, mutable: false, initialized: true}
-		env.vars["%fieldinit%"] = &binding{value: i.fieldInitThunk(cd, env), mutable: false, initialized: true}
+		env.bind("%activefunc%", &binding{value: fnObj, mutable: false, initialized: true})
+		env.bind("%superctor%", &binding{value: cd.superCtor, mutable: false, initialized: true})
+		env.bind("%fieldinit%", &binding{value: i.fieldInitThunk(cd, env), mutable: false, initialized: true})
 
 		if ctorDef != nil {
 			if err := i.bindParams(ctx, ctorDef.Params, args, env); err != nil {

@@ -42,7 +42,7 @@ func (i *Interpreter) evalCatch(ctx context.Context, handler *ast.CatchClause, c
 	catchEnv := NewEnvironment(env, false)
 	if handler.Param != nil {
 		bind := func(name string, v Value) {
-			catchEnv.vars[name] = &binding{value: v, mutable: true, initialized: true}
+			catchEnv.bind(name, &binding{value: v, mutable: true, initialized: true})
 		}
 		if err := i.bindPattern(ctx, handler.Param, caught, catchEnv, bind); err != nil {
 			return nil, err

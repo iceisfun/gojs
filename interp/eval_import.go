@@ -107,7 +107,7 @@ func (i *Interpreter) importByID(ctx context.Context, id string) (Value, error) 
 	env := NewEnvironment(i.globalEnv, true)
 	env.strict = true
 	if i.moduleProvider != nil {
-		env.vars["require"] = &binding{value: i.makeRequire(id), mutable: true, initialized: true}
+		env.bind("require", &binding{value: i.makeRequire(id), mutable: true, initialized: true})
 	}
 	if i.moduleEnvs == nil {
 		i.moduleEnvs = map[string]*Environment{}

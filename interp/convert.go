@@ -145,6 +145,14 @@ func (i *Interpreter) ToNumberV(ctx context.Context, v Value) (float64, error) {
 // produces a BigInt (or a boxed BigInt) is handled as a BigInt rather than
 // erroring in ToNumber.
 func (i *Interpreter) toNumeric(ctx context.Context, v Value) (Value, error) {
+	// A Number or BigInt is already numeric: return it unchanged rather than
+	// unwrapping to a float and re-boxing a fresh Number interface. This is the
+	// common operand in every arithmetic/bitwise/inc-dec site, so skipping the
+	// re-box here removes the single largest source of allocation in hot loops.
+	switch v.(type) {
+	case Number, *BigInt:
+		return v, nil
+	}
 	prim, err := i.ToPrimitive(ctx, v, "number")
 	if err != nil {
 		return nil, err

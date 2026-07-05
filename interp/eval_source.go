@@ -304,7 +304,7 @@ func (i *Interpreter) evalDeclarationInstantiation(ctx context.Context, stmts []
 			b.value = fn
 			b.initialized = true
 		} else {
-			varEnv.vars[fe.name] = &binding{value: fn, mutable: true, initialized: true, deletable: true}
+			varEnv.bind(fe.name, &binding{value: fn, mutable: true, initialized: true, deletable: true})
 		}
 	}
 
@@ -316,7 +316,7 @@ func (i *Interpreter) evalDeclarationInstantiation(ctx context.Context, stmts []
 			continue
 		}
 		if _, ok := varEnv.vars[name]; !ok {
-			varEnv.vars[name] = &binding{value: Undef, mutable: true, initialized: true, deletable: true}
+			varEnv.bind(name, &binding{value: Undef, mutable: true, initialized: true, deletable: true})
 		}
 	}
 	return nil

@@ -72,7 +72,7 @@ func (i *Interpreter) evalExprNamed(ctx context.Context, expr ast.Expr, env *Env
 			// while recursion still resolves the function through the scope chain.
 			funcEnv := NewEnvironment(env, false)
 			b := &binding{mutable: false, weakImmutable: true, initialized: false}
-			funcEnv.vars[e.Def.Name.Name] = b
+			funcEnv.bind(e.Def.Name.Name, b)
 			fn := i.makeFunction(e.Def, funcEnv, kindNormal, nil, false)
 			b.value = fn
 			b.initialized = true

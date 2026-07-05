@@ -614,7 +614,7 @@ func (i *Interpreter) assignBinding(env *Environment, name string, value Value) 
 		b.initialized = true
 		return
 	}
-	env.vars[name] = &binding{value: value, mutable: true, initialized: true}
+	env.bind(name, &binding{value: value, mutable: true, initialized: true})
 }
 
 // destructureAssign performs assignment-context destructuring (no new bindings;

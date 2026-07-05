@@ -48,14 +48,14 @@ func (i *Interpreter) applyUnaryValue(ctx context.Context, op token.Type, v Valu
 		if b, ok := num.(*BigInt); ok {
 			return &BigInt{Int: new(big.Int).Neg(b.Int)}, nil
 		}
-		return Number(-float64(num.(Number))), nil
+		return numberValue(-float64(num.(Number))), nil
 	case token.PLUS:
 		// Unary + is ToNumber, which rejects BigInt operands.
 		n, err := i.ToNumberV(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		return Number(n), nil
+		return numberValue(n), nil
 	case token.BIT_NOT:
 		// ~x is ToNumeric(x) then bitwise-NOT; BigInt operands negate-and-subtract-one.
 		num, err := i.toNumeric(ctx, v)
@@ -65,7 +65,7 @@ func (i *Interpreter) applyUnaryValue(ctx context.Context, op token.Type, v Valu
 		if b, ok := num.(*BigInt); ok {
 			return &BigInt{Int: new(big.Int).Not(b.Int)}, nil
 		}
-		return Number(float64(^ToInt32(float64(num.(Number))))), nil
+		return numberValue(float64(^ToInt32(float64(num.(Number))))), nil
 	case token.VOID:
 		return Undef, nil
 	default:
@@ -252,9 +252,10 @@ func (i *Interpreter) computeIncDec(ctx context.Context, old Value, inc, prefix 
 		updated = n - 1
 	}
 	if prefix {
-		return Number(updated), Number(updated), nil
+		u := numberValue(updated)
+		return u, u, nil
 	}
-	return Number(n), Number(updated), nil
+	return oldNum, numberValue(updated), nil
 }
 
 // evalBinary evaluates a binary operator expression.
@@ -370,7 +371,7 @@ func (i *Interpreter) evalAdd(ctx context.Context, left, right Value) (Value, er
 	if err != nil {
 		return nil, err
 	}
-	return Number(ln + rn), nil
+	return numberValue(ln + rn), nil
 }
 
 // evalArithmetic implements -, *, /, %, ** for numbers and BigInts, following
@@ -398,15 +399,15 @@ func (i *Interpreter) evalArithmetic(ctx context.Context, op token.Type, left, r
 	rn := float64(rnum.(Number))
 	switch op {
 	case token.MINUS:
-		return Number(ln - rn), nil
+		return numberValue(ln - rn), nil
 	case token.STAR:
-		return Number(ln * rn), nil
+		return numberValue(ln * rn), nil
 	case token.SLASH:
-		return Number(ln / rn), nil
+		return numberValue(ln / rn), nil
 	case token.PERCENT:
-		return Number(math.Mod(ln, rn)), nil
+		return numberValue(math.Mod(ln, rn)), nil
 	case token.EXP:
-		return Number(numberExponentiate(ln, rn)), nil
+		return numberValue(numberExponentiate(ln, rn)), nil
 	default:
 		return nil, i.throwError(ctx, "SyntaxError", "unsupported arithmetic operator")
 	}
@@ -622,17 +623,17 @@ func (i *Interpreter) evalBitwise(ctx context.Context, op token.Type, left, righ
 	rn := float64(rnum.(Number))
 	switch op {
 	case token.BIT_AND:
-		return Number(float64(ToInt32(ln) & ToInt32(rn))), nil
+		return numberValue(float64(ToInt32(ln) & ToInt32(rn))), nil
 	case token.BIT_OR:
-		return Number(float64(ToInt32(ln) | ToInt32(rn))), nil
+		return numberValue(float64(ToInt32(ln) | ToInt32(rn))), nil
 	case token.BIT_XOR:
-		return Number(float64(ToInt32(ln) ^ ToInt32(rn))), nil
+		return numberValue(float64(ToInt32(ln) ^ ToInt32(rn))), nil
 	case token.SHL:
-		return Number(float64(ToInt32(ln) << (ToUint32(rn) & 31))), nil
+		return numberValue(float64(ToInt32(ln) << (ToUint32(rn) & 31))), nil
 	case token.SHR:
-		return Number(float64(ToInt32(ln) >> (ToUint32(rn) & 31))), nil
+		return numberValue(float64(ToInt32(ln) >> (ToUint32(rn) & 31))), nil
 	case token.USHR:
-		return Number(float64(ToUint32(ln) >> (ToUint32(rn) & 31))), nil
+		return numberValue(float64(ToUint32(ln) >> (ToUint32(rn) & 31))), nil
 	default:
 		return nil, i.throwError(ctx, "SyntaxError", "unsupported bitwise operator")
 	}

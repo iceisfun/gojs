@@ -2,6 +2,7 @@ package interp
 
 import (
 	"context"
+	"sync"
 
 	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/token"
@@ -52,6 +53,41 @@ type bcLoopRT struct {
 	stackLen int
 }
 
+// framePool recycles bcFrame activations (and their operand-stack backing
+// arrays). execCode is strictly stack-disciplined — a frame is acquired on entry
+// and released on the deferred exit — so a pool sees the same nesting as the Go
+// call stack. sync.Pool (not a plain freelist) is required because generator and
+// async bodies run execCode on their own goroutines.
+var framePool = sync.Pool{New: func() any { return &bcFrame{stack: make([]Value, 0, 8)} }}
+
+func getFrame(code *codeObject, env *Environment, locals []Value) *bcFrame {
+	fr := framePool.Get().(*bcFrame)
+	fr.code = code
+	fr.env = env
+	fr.locals = locals
+	fr.ip = 0
+	return fr
+}
+
+// putFrame clears every reference the frame held so a pooled-but-idle frame pins
+// no Values, then returns it for reuse. The stack/loops/refs backing arrays are
+// kept (length reset to 0) so their capacity is recycled.
+func putFrame(fr *bcFrame) {
+	for k := range fr.stack {
+		fr.stack[k] = nil
+	}
+	fr.stack = fr.stack[:0]
+	fr.code = nil
+	fr.env = nil
+	fr.locals = nil
+	fr.loops = fr.loops[:0]
+	for k := range fr.refs {
+		fr.refs[k] = nil
+	}
+	fr.refs = fr.refs[:0]
+	framePool.Put(fr)
+}
+
 func (f *bcFrame) push(v Value) { f.stack = append(f.stack, v) }
 
 func (f *bcFrame) pop() Value {
@@ -78,7 +114,8 @@ func (f *bcFrame) popN(n int) []Value {
 // Control flow (return/throw) surfaces exactly as in the tree-walker: a *Throw or
 // context error propagates; the value of a `return` is returned directly.
 func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Environment, locals []Value) (Value, error) {
-	fr := &bcFrame{code: code, env: env, locals: locals, stack: make([]Value, 0, 8)}
+	fr := getFrame(code, env, locals)
+	defer putFrame(fr)
 	instrs := code.instrs
 	for fr.ip < len(instrs) {
 		if err := i.checkContext(); err != nil {
@@ -342,7 +379,7 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 				b.value = v
 				b.initialized = true
 			} else {
-				fr.env.vars[name] = &binding{value: v, mutable: in.b == 1, initialized: true}
+				fr.env.bind(name, &binding{value: v, mutable: in.b == 1, initialized: true})
 			}
 
 		case opEnterScope:

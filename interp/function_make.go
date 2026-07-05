@@ -151,7 +151,7 @@ func (i *Interpreter) makeFunction(def *ast.FuncDef, closure *Environment, kind 
 		var argsObj *Object
 		if kind == kindNormal {
 			argsObj = i.makeArguments(args, fnObj, !mapped)
-			env.vars["arguments"] = &binding{value: argsObj, mutable: true, initialized: true}
+			env.bind("arguments", &binding{value: argsObj, mutable: true, initialized: true})
 		}
 		if err := i.bindParams(ctx, def.Params, args, env); err != nil {
 			return nil, err
@@ -321,11 +321,11 @@ func (i *Interpreter) bindParams(ctx context.Context, params []ast.Expr, args []
 	// function's own name) are left untouched.
 	for _, name := range collectParamNames(params) {
 		if _, exists := env.vars[name]; !exists {
-			env.vars[name] = &binding{mutable: true, initialized: false}
+			env.bind(name, &binding{mutable: true, initialized: false})
 		}
 	}
 	declare := func(name string, v Value) {
-		env.vars[name] = &binding{value: v, mutable: true, initialized: true}
+		env.bind(name, &binding{value: v, mutable: true, initialized: true})
 	}
 	// While binding parameters, a direct eval in a default value runs with this
 	// parameter environment as its lexical scope but the enclosing scope as its
@@ -561,7 +561,7 @@ func bodyVarEnv(params []ast.Expr, body *ast.BlockStmt, paramEnv *Environment) *
 	for n := range varNames {
 		if paramNames[n] {
 			if pb := paramEnv.vars[n]; pb != nil {
-				varEnv.vars[n] = &binding{value: pb.value, mutable: true, initialized: true}
+				varEnv.bind(n, &binding{value: pb.value, mutable: true, initialized: true})
 			}
 		}
 	}

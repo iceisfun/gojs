@@ -74,7 +74,7 @@ func (i *Interpreter) hoistDeclarations(ctx context.Context, stmts []ast.Stmt, e
 			if env == i.globalEnv {
 				i.defineGlobalFunction(name, fn, false)
 			} else {
-				env.vars[name] = &binding{value: fn, mutable: true, initialized: true}
+				env.bind(name, &binding{value: fn, mutable: true, initialized: true})
 			}
 		case *ast.VarDecl:
 			if st.Kind == token.LET || st.Kind == token.CONST {
@@ -519,7 +519,7 @@ func (i *Interpreter) evalVarDecl(ctx context.Context, decl *ast.VarDecl, env *E
 					b.value = v
 					b.initialized = true
 				} else {
-					env.vars[name] = &binding{value: v, mutable: decl.Kind == token.LET, initialized: true}
+					env.bind(name, &binding{value: v, mutable: decl.Kind == token.LET, initialized: true})
 				}
 			}
 		}

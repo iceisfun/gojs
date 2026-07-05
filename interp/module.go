@@ -134,7 +134,7 @@ func (i *Interpreter) requireModule(ctx context.Context, specifier, referrer str
 	env := NewEnvironment(i.globalEnv, true)
 	env.setThis(exportsObj)
 	define := func(name string, v Value) {
-		env.vars[name] = &binding{value: v, mutable: true, initialized: true}
+		env.bind(name, &binding{value: v, mutable: true, initialized: true})
 	}
 	define("module", moduleObj)
 	define("exports", exportsObj)

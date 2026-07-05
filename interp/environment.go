@@ -128,7 +128,6 @@ type binding struct {
 func NewEnvironment(parent *Environment, fnScope bool) *Environment {
 	e := &Environment{
 		parent:  parent,
-		vars:    make(map[string]*binding),
 		fnScope: fnScope,
 	}
 	// Strict-mode is a property of the containing function/module/global code and
@@ -140,6 +139,19 @@ func NewEnvironment(parent *Environment, fnScope bool) *Environment {
 	return e
 }
 
+// bind installs a binding under name, allocating the vars map on first write.
+// The map is created lazily so that a slot-eligible function activation — whose
+// params and locals live in frame slots, never in the map — pays nothing for a
+// scope it never populates. Reads (index, range, delete) are nil-safe in Go, so
+// only writes route through here.
+func (e *Environment) bind(name string, b *binding) *binding {
+	if e.vars == nil {
+		e.vars = make(map[string]*binding, 4)
+	}
+	e.vars[name] = b
+	return b
+}
+
 // isStrict reports whether this scope is strict-mode code.
 func (e *Environment) isStrict() bool { return e != nil && e.strict }
 
@@ -148,7 +160,7 @@ func (e *Environment) isStrict() bool { return e != nil && e.strict }
 // this scope.
 func (e *Environment) declareLexical(name string, mutable bool) *binding {
 	b := &binding{mutable: mutable, initialized: false, lexical: true}
-	e.vars[name] = b
+	e.bind(name, b)
 	return b
 }
 
@@ -167,7 +179,7 @@ func (e *Environment) declareVar(name string, v Value) {
 	if v != nil {
 		init = v
 	}
-	target.vars[name] = &binding{value: init, mutable: true, initialized: true}
+	target.bind(name, &binding{value: init, mutable: true, initialized: true})
 }
 
 // functionScope returns the nearest enclosing function or global environment.

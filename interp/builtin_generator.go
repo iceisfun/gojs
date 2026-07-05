@@ -116,7 +116,7 @@ func (i *Interpreter) startCoroutine(fnObj *Object, def *ast.FuncDef, closure *E
 	var argsObj *Object
 	if !arrow {
 		argsObj = i.makeArguments(args, fnObj, !mapped)
-		env.vars["arguments"] = &binding{value: argsObj, mutable: true, initialized: true}
+		env.bind("arguments", &binding{value: argsObj, mutable: true, initialized: true})
 	}
 	if err := i.bindParams(i.ctx, def.Params, args, env); err != nil {
 		return nil, nil, err

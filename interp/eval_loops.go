@@ -187,7 +187,7 @@ func (i *Interpreter) createPerIterationEnvironment(last, outer *Environment, na
 	iter := NewEnvironment(outer, false)
 	for _, name := range names {
 		if b, ok := last.vars[name]; ok {
-			iter.vars[name] = &binding{value: b.value, mutable: b.mutable, initialized: b.initialized}
+			iter.bind(name, &binding{value: b.value, mutable: b.mutable, initialized: b.initialized})
 		}
 	}
 	return iter
@@ -210,7 +210,7 @@ func (i *Interpreter) runForIn(ctx context.Context, s *ast.ForInStmt, env *Envir
 		mutable := vd.Kind == token.LET
 		for _, d := range vd.Decls {
 			forEachPatternName(d.Target, func(n string) {
-				tdz.vars[n] = &binding{mutable: mutable, initialized: false}
+				tdz.bind(n, &binding{mutable: mutable, initialized: false})
 			})
 		}
 		rhsEnv = tdz
@@ -452,7 +452,7 @@ func (i *Interpreter) bindForTarget(ctx context.Context, left ast.Node, v Value,
 		// bindings remain mutable.
 		mutable := l.Kind != token.CONST
 		bind := func(name string, val Value) {
-			iterEnv.vars[name] = &binding{value: val, mutable: mutable, initialized: true}
+			iterEnv.bind(name, &binding{value: val, mutable: mutable, initialized: true})
 		}
 		return i.bindPattern(ctx, target, v, iterEnv, bind)
 	case ast.Expr:
