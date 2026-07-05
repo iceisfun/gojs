@@ -43,4 +43,6 @@ Key points:
 
 > `enum`, `const enum`, and `namespace` lower and run. Runtime error stack traces
 > are source-mapped back to the original `.ts` line/column, not the transpiled
-> JavaScript positions.
+> JavaScript positions. **JSX** and **decorators** are not supported — they need a
+> code transform gojs deliberately does not do, so they are rejected with a clear
+> error rather than mis-compiled.

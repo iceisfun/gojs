@@ -18,6 +18,7 @@ import (
 
 	"github.com/iceisfun/gojs/ast"
 	"github.com/iceisfun/gojs/interp"
+	tsast "github.com/iceisfun/typescript/ast"
 	"github.com/iceisfun/typescript/core"
 	"github.com/iceisfun/typescript/sourcemap"
 	"github.com/iceisfun/typescript/transpiler"
@@ -53,6 +54,54 @@ func Permissive() Option { return func(c *config) { c.permissive = true } }
 // the text path everywhere (for debugging, or to compare the two paths).
 func DisableAST() Option { return func(c *config) { c.astDisabled = true } }
 
+// UnsupportedSyntaxError reports TypeScript syntax that gojs deliberately does
+// not run. gojs is an embedded, syscall-firewalled scripting engine — not a build
+// tool — so frontend-only features that would need a code transform (lowering JSX
+// elements to factory calls, desugaring decorators) are out of scope. The
+// isolatedModules transpiler PRESERVES such syntax verbatim into JavaScript,
+// which the gojs parser then rejects with a confusing low-level message;
+// detecting it up front turns that into a clear, actionable error.
+type UnsupportedSyntaxError struct {
+	Feature  string // human-readable name, e.g. "JSX" or "decorators"
+	FileName string
+}
+
+func (e *UnsupportedSyntaxError) Error() string {
+	return fmt.Sprintf("gojs/ts: %s: %s is not supported and cannot be run "+
+		"(gojs runs TypeScript as a scripting language, not a build tool)", e.FileName, e.Feature)
+}
+
+// unsupportedSyntax scans a parsed TypeScript source for constructs gojs cannot
+// run because the transpiler preserves them verbatim (JSX, decorators), returning
+// the first one found. Everything else (types, enums, namespaces, parameter
+// properties, module syntax) is erased or lowered to runnable JavaScript.
+func unsupportedSyntax(sf *tsast.SourceFile, fileName string) *UnsupportedSyntaxError {
+	var found *UnsupportedSyntaxError
+	var visit tsast.Visitor
+	visit = func(n *tsast.Node) bool {
+		if n == nil || found != nil {
+			return found != nil
+		}
+		switch n.Kind {
+		case tsast.KindJsxElement, tsast.KindJsxSelfClosingElement, tsast.KindJsxFragment:
+			found = &UnsupportedSyntaxError{Feature: "JSX", FileName: fileName}
+			return true
+		case tsast.KindDecorator:
+			found = &UnsupportedSyntaxError{Feature: "decorators (@…)", FileName: fileName}
+			return true
+		}
+		return n.ForEachChild(visit)
+	}
+	if sf.Statements != nil {
+		for _, stmt := range sf.Statements.Nodes {
+			if visit(stmt) {
+				break
+			}
+		}
+	}
+	return found
+}
+
 // transpileWith converts TypeScript to CommonJS JavaScript, optionally producing
 // a source map and/or tolerating syntax errors. It recovers a transform panic
 // (unimplemented type-checker corners) into an error rather than crashing.
@@ -67,6 +116,18 @@ func transpileWith(fileName, src string, permissive, withMap bool) (js string, r
 		Module:             core.ModuleKindCommonJS,
 		JSX:                strings.HasSuffix(fileName, ".tsx"),
 		IgnoreSyntaxErrors: permissive,
+	}
+	// Reject JSX/decorators with a clear error before the transpiler preserves
+	// them into JavaScript the gojs parser would choke on. Only pay for the extra
+	// detection parse when the syntax is even possible: JSX requires a .tsx file,
+	// and a decorator requires an "@" somewhere in the source. A parse failure here
+	// is ignored — the emit below reports it (or, when permissive, recovers).
+	if o.JSX || strings.ContainsRune(src, '@') {
+		if sf, perr := transpiler.ModuleAST(src, o); perr == nil {
+			if ue := unsupportedSyntax(sf, fileName); ue != nil {
+				return "", nil, ue
+			}
+		}
 	}
 	if withMap {
 		return transpiler.ModuleWithSourceMap(src, o)
@@ -201,6 +262,12 @@ func (p *provider) LoadProgram(ctx context.Context, id string) (*ast.Program, st
 	if err != nil {
 		// Let the text path re-run and surface the transpile/syntax error uniformly.
 		return nil, "", false, nil
+	}
+	// JSX/decorators are preserved verbatim by the transpiler and cannot run;
+	// surface a clear error here as a HARD failure rather than falling back to the
+	// text path (which would only reproduce the confusing low-level parse error).
+	if ue := unsupportedSyntax(sf, id); ue != nil {
+		return nil, "", false, ue
 	}
 	prog, err := Lower(sf, id, src)
 	if err != nil {

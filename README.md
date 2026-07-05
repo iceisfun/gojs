@@ -327,7 +327,10 @@ Transpilation is **checker-free** (the `isolatedModules` model): type
 annotations, `interface`s, generics, and class visibility are erased/lowered, and
 `enum`/`const enum`/`namespace` are lowered to runnable JavaScript — but the
 program is **not type-checked** (the goal is to *run* TypeScript). Runtime error
-stacks are **source-mapped back to the original `.ts` line/column**. See the
+stacks are **source-mapped back to the original `.ts` line/column**. Frontend-only
+features that need a code transform — **JSX** and **decorators** — are out of
+scope (gojs runs TypeScript as a scripting language, not a build tool) and are
+rejected up front with a clear error rather than mis-compiled. See the
 [`typescript`](examples/typescript) example.
 
 ## Examples
