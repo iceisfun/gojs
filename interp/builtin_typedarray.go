@@ -68,10 +68,28 @@ var allTAKinds = []taKind{
 type typedArrayData struct {
 	i           *Interpreter // owner, for value coercions on write
 	buffer      *Object      // [[ViewedArrayBuffer]] (an ArrayBuffer object)
-	byteOffset  int          // [[ByteOffset]]
-	arrayLength int          // [[ArrayLength]] (valid when !autoLength)
+	abCache     *arrayBufferData
+	byteOffset  int // [[ByteOffset]]
+	arrayLength int // [[ArrayLength]] (valid when !autoLength)
 	kind        taKind
 	autoLength  bool // [[ArrayLength]]/[[ByteLength]] is ~auto~ (length-tracking)
+}
+
+// ab returns the backing ArrayBuffer record, caching the pointer on first use.
+// A view's [[ViewedArrayBuffer]] never changes after construction, and detach/
+// resize mutate that same arrayBufferData in place, so the pointer is stable for
+// the view's whole life — this replaces a string-keyed map lookup on
+// buffer.internal["ArrayBuffer"] on every element access, the dominant cost of
+// tight typed-array loops.
+func (td *typedArrayData) ab() (*arrayBufferData, bool) {
+	if td.abCache != nil {
+		return td.abCache, true
+	}
+	ab, ok := arrayBufferOf(td.buffer)
+	if ok {
+		td.abCache = ab
+	}
+	return ab, ok
 }
 
 // elemSize returns the element size in bytes.
@@ -89,7 +107,7 @@ func typedArrayOf(v Value) (*typedArrayData, bool) {
 // outOfBounds reports whether the view exceeds its buffer (modelling
 // IsTypedArrayOutOfBounds), and, when in bounds, the current element length.
 func (td *typedArrayData) outOfBounds() (bool, int) {
-	ab, ok := arrayBufferOf(td.buffer)
+	ab, ok := td.ab()
 	if !ok || ab.detached {
 		return true, 0
 	}
@@ -113,7 +131,7 @@ func (td *typedArrayData) isFixedLength() bool {
 	if td.autoLength {
 		return false
 	}
-	ab, ok := arrayBufferOf(td.buffer)
+	ab, ok := td.ab()
 	if !ok || ab.resizable {
 		return false
 	}
@@ -163,7 +181,7 @@ func (td *typedArrayData) validIndex(index float64) (int, bool) {
 
 // getElement reads the element at a valid integer index (TypedArrayGetElement).
 func (td *typedArrayData) getElement(idx int) Value {
-	ab, _ := arrayBufferOf(td.buffer)
+	ab, _ := td.ab()
 	size := taKinds[td.kind].size
 	off := td.byteOffset + idx*size
 	return taReadElement(td.kind, ab.data[off:off+size])
@@ -171,7 +189,7 @@ func (td *typedArrayData) getElement(idx int) Value {
 
 // setElementNum stores a numeric value at a valid integer index.
 func (td *typedArrayData) setElementNum(idx int, num float64) {
-	ab, _ := arrayBufferOf(td.buffer)
+	ab, _ := td.ab()
 	size := taKinds[td.kind].size
 	off := td.byteOffset + idx*size
 	taWriteNum(td.kind, ab.data[off:off+size], num)
@@ -179,7 +197,7 @@ func (td *typedArrayData) setElementNum(idx int, num float64) {
 
 // setElementBig stores a BigInt value at a valid integer index.
 func (td *typedArrayData) setElementBig(idx int, v *big.Int) {
-	ab, _ := arrayBufferOf(td.buffer)
+	ab, _ := td.ab()
 	off := td.byteOffset + idx*8
 	binary.LittleEndian.PutUint64(ab.data[off:off+8], bigIntToUint64(v))
 }
