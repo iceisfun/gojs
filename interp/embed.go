@@ -193,7 +193,7 @@ func (i *Interpreter) toGo(v Value, seen map[*Object]bool) any {
 		return float64(x)
 	case String:
 		return string(x)
-	case *strRope:
+	case *vmString:
 		// A rope is a string primitive (the `+` operator produces one); flatten
 		// it at the host boundary so a concatenated string reaching Go interop
 		// converts to its string value rather than falling through to nil.

@@ -9,7 +9,7 @@ import "testing"
 
 func TestRopeIsStringPrimitive(t *testing.T) {
 	r := concatStrings(String("foo"), String("bar"))
-	if _, ok := r.(*strRope); !ok {
+	if _, ok := r.(*vmString); !ok {
 		t.Fatalf("concatStrings of two non-empty strings should build a rope, got %T", r)
 	}
 	if r.Typeof() != "string" {

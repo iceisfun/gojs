@@ -113,7 +113,7 @@ func ToBoolean(v Value) bool {
 		return f != 0 && !math.IsNaN(f)
 	case String:
 		return len(x) > 0
-	case *strRope:
+	case *vmString:
 		return x.length > 0
 	case *Symbol:
 		return true
@@ -144,7 +144,7 @@ func ToNumber(v Value) float64 {
 		return float64(x)
 	case String:
 		return stringToNumber(string(x))
-	case *strRope:
+	case *vmString:
 		return stringToNumber(x.build())
 	default:
 		return math.NaN()

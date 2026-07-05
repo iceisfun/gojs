@@ -90,7 +90,7 @@ func (i *Interpreter) ToStringV(ctx context.Context, v Value) (string, error) {
 	switch x := v.(type) {
 	case String:
 		return string(x), nil
-	case *strRope:
+	case *vmString:
 		return x.build(), nil
 	case Undefined:
 		return "undefined", nil
@@ -167,7 +167,7 @@ func (i *Interpreter) ToObject(ctx context.Context, v Value) (*Object, error) {
 		return x, nil
 	case String:
 		return i.newStringObject(x), nil
-	case *strRope:
+	case *vmString:
 		return i.newStringObject(String(x.build())), nil
 	case Number:
 		o := NewObject(i.numberProto)
