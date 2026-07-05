@@ -628,6 +628,8 @@ func (c *bcCompiler) exprNamed(e ast.Expr, name string) {
 		c.newExpr(ex)
 	case *ast.ArrayLit:
 		c.arrayLit(ex)
+	case *ast.ObjectLit:
+		c.objectLit(ex)
 	case *ast.TemplateLit:
 		c.template(ex)
 	case *ast.FuncExpr, *ast.ArrowFunc, *ast.ClassExpr:
@@ -822,6 +824,50 @@ func (c *bcCompiler) arrayLit(ex *ast.ArrayLit) {
 		c.expr(el)
 	}
 	c.emit(opNewArray, int32(len(ex.Elements)), 0)
+}
+
+// objectLit compiles an object literal built only from plain data properties
+// with static string keys (`{a: e, b, 0: e}`) — the common case, and the
+// CommonJS `module.exports = {…}` idiom. Spread, getters/setters, concise
+// methods, computed keys, and a colon-form `__proto__` (which sets the
+// prototype, not a property) all fall back to the tree-walker, and thus abort
+// slot mode — those either need machinery not lowered here or capture the env.
+func (c *bcCompiler) objectLit(ex *ast.ObjectLit) {
+	for _, p := range ex.Properties {
+		if p.Kind != ast.PropInit || p.Computed || p.Method {
+			c.treeWalkExpr(ex)
+			return
+		}
+		name, ok := staticKeyName(p.Key)
+		if !ok || name == "__proto__" {
+			c.treeWalkExpr(ex)
+			return
+		}
+	}
+	c.emit(opNewObject, 0, 0)
+	for _, p := range ex.Properties {
+		name, _ := staticKeyName(p.Key)
+		// NamedEvaluation names an anonymous function/class initializer after its
+		// key (harmless for other values; such closures abort slot mode anyway).
+		c.exprNamed(p.Value, name)
+		c.emit(opDefField, c.code.nameIndex(name), 0)
+	}
+}
+
+// staticKeyName returns the property-key string for a non-computed literal key
+// (identifier, string, or numeric), matching evalPropKey's coercion. It reports
+// false for a key that is not a compile-time-known string (e.g. a BigInt key).
+func staticKeyName(key ast.Expr) (string, bool) {
+	switch k := key.(type) {
+	case *ast.Ident:
+		return k.Name, true
+	case *ast.StringLit:
+		return k.Value, true
+	case *ast.NumberLit:
+		return NumberToString(k.Value), true
+	default:
+		return "", false
+	}
 }
 
 func (c *bcCompiler) template(ex *ast.TemplateLit) {

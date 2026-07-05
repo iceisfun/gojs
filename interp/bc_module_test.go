@@ -84,6 +84,10 @@ var moduleDiffCases = []map[string]string{
 	{"entry.js": `let n=27, steps=0; while(n!==1){ if(n%2) n=3*n+1; else n=n/2; steps++ } module.exports = steps`},
 	// a strict, closure-free module still takes the slot path (compiled) and agrees.
 	{"entry.js": `"use strict"; let r=0; for(let i=0;i<4;i++) r+=i*i; module.exports = r`},
+	// the CommonJS idiom: closure-free body exporting an object literal (compiled
+	// via opNewObject/opDefField) — the prime-sieve-module shape.
+	{"entry.js": `const limit=100; let count=0,last=0; for(let i=2;i<=limit;i++){ let p=1; for(let d=2;d*d<=i;d++) if(i%d===0){p=0;break} if(p){count++;last=i} } module.exports = {limit, count, last}`},
+	{"entry.js": `let a=1, b=2; module.exports = {a, b, sum:a+b, nested:{x:a*b}}`},
 }
 
 func TestModuleBytecodeDiff(t *testing.T) {

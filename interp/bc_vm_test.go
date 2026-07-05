@@ -52,6 +52,23 @@ var bcDiffCases = []string{
 	`function f(){ let out=0; for(let i=5;i>0;i--) out+=i; return out } f()`,                             // for-let, bodiless (single stmt)
 	`function f(){ const arr=[1,2,3]; let t=0; for(let i=0;i<arr.length;i++) t+=arr[i]; return t } f()`,  // const array + let-for
 
+	// --- object literals (opNewObject/opDefField) natively + fallbacks.
+	`function f(){ let o = {a:1, b:2, c:3}; return o.a+o.b+o.c } f()`,
+	`function f(){ let a=1,b=2; let o={a,b}; return o.a*10+o.b } f()`,                          // shorthand
+	`function f(){ let o={0:"x", 1:"y", 10:"z"}; return o[0]+o[1]+o[10] } f()`,                 // numeric keys
+	`function f(){ let o={"a b":1, "c-d":2}; return o["a b"]+o["c-d"] } f()`,                   // string keys w/ punctuation
+	`function f(){ let o={x:1, x:2, x:3}; return o.x } f()`,                                    // duplicate key: last wins
+	`function f(){ let o={a:1}; return JSON.stringify({...o, b:2}) } f()`,                      // spread → fallback
+	`function f(){ let k="dyn"; let o={[k]:5}; return o.dyn } f()`,                             // computed → fallback
+	`function f(){ let o={get v(){return 42}}; return o.v } f()`,                               // getter → fallback
+	`function f(){ let o={hi(){return "yo"}}; return o.hi() } f()`,                             // method → fallback
+	`function f(){ let o={__proto__:null, a:1}; return Object.getPrototypeOf(o)+"|"+o.a } f()`, // __proto__ colon → fallback
+	`function f(){ let o={a:{b:{c:7}}}; return o.a.b.c } f()`,                                  // nested object literals
+	`function f(){ let n=0; let o={inc:n+1, dbl:(n+1)*2}; return o.inc+","+o.dbl } f()`,        // value expressions
+	`function f(){ let o={}; o.k=9; return Object.keys(o).length + ":" + o.k } f()`,            // empty literal
+	`function f(){ return JSON.stringify({name:"g", vals:[1,2,3], ok:true}) } f()`,             // mixed value types
+	`function f(){ let o={a:1,b:2}; let s=""; for(const k in o) s+=k+o[k]; return s } f()`,     // enumeration order
+
 	// arithmetic / precedence / coercion
 	`function f(){ return 1 + 2 * 3 - 4 / 2 } f()`,
 	`function f(){ return 2 ** 10 % 7 } f()`,

@@ -100,7 +100,9 @@ const (
 	opThrow  // pop → *Throw
 
 	// Aggregate literals.
-	opNewArray // a=count; pop count values (in order) → push array
+	opNewArray  // a=count; pop count values (in order) → push array
+	opNewObject // push a fresh {} (proto %Object.prototype%)
+	opDefField  // a=name index; pop value → writeData(names[a], value) on the object beneath it (kept)
 
 	// Declarations (simple identifier targets only; patterns fall back).
 	opDeclareVar // a=name index; pop value → var-scope assign (declareVarBinding path)

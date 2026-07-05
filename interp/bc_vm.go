@@ -321,6 +321,14 @@ func (i *Interpreter) execCode(ctx context.Context, code *codeObject, env *Envir
 
 		case opNewArray:
 			fr.push(i.newArray(fr.popN(int(in.a))))
+		case opNewObject:
+			fr.push(NewObject(i.objectProto))
+		case opDefField:
+			// The object sits below the just-computed value; define an own data
+			// property (CreateDataProperty semantics, last write wins on a dup key)
+			// and leave the object on the stack — mirrors evalObjectLit's writeData.
+			val := fr.pop()
+			fr.stack[len(fr.stack)-1].(*Object).writeData(StrKey(code.names[in.a]), val)
 
 		case opDeclareVar:
 			v := fr.pop()
