@@ -7,10 +7,10 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/iceisfun/gojs.svg)](https://pkg.go.dev/github.com/iceisfun/gojs)
 
 > [!IMPORTANT]
-> **gojs is pre-1.0 (`v0.x`) and not yet production-ready.** It is tagged and
-> `go get`-able, but still actively evolving: language and library coverage has
-> gaps, and the **public API surface will change** (types, options, and function
-> signatures may break between minor `v0.x` releases without notice).
+> **gojs is not production-ready.** It is a pre-1.0 (`v0.x`), incomplete, and
+> actively evolving implementation: language and library coverage has gaps, and
+> the **public API surface will change** (types, options, and function signatures
+> may break between `v0.x` releases without notice).
 >
 > It is suitable for experiments, prototypes, learning, and other non-serious
 > projects — not for anything where stability or completeness matters. Pin a
