@@ -26,7 +26,7 @@ model, object model, and coroutine machinery unchanged.
 
 | Concern | Mechanism | Ref |
 |---|---|---|
-| Values | Go interface, single `Typeof()`; value-typed primitives + pointer `*Object`/`*Symbol`/`*BigInt`/`*strRope`. No NaN-boxing, no SMI. | `value.go:36` |
+| Values | Go interface, single `Typeof()`; value-typed primitives + pointer `*Object`/`*Symbol`/`*BigInt`/`*vmString`. No NaN-boxing, no SMI. | `value.go:36` |
 | Numbers | uniformly `float64`; BigInt separate `*big.Int` | `value.go:57`, `object.go:49` |
 | Objects | `map[PropertyKey]*Property` + ordered `keys` slice + dense `[]Value` array fast path; no shared shapes/hidden classes | `object.go:130` |
 | Functions | one `CallFn` closure for native **and** JS; JS closure captures its defining `*Environment` by pointer | `object.go:107`, `function_make.go:26` |
