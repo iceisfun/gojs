@@ -25,10 +25,14 @@ capability-gated, provider-based sandboxing philosophy, applied to JavaScript.
 Good fits include plugin systems, user scripting, configuration runtimes,
 automation, and running untrusted snippets under tight host control.
 
-> **Status:** first-pass implementation. The lexer, parser, AST, and a
-> tree-walking interpreter run a large subset of modern JavaScript. Some
-> features are approximated or not yet implemented — see
-> [Limitations](#limitations).
+> **Status:** a full lexer, parser, and AST feed a **bytecode VM** (with a
+> tree-walking evaluator as the fallback and differential oracle) that runs
+> modern JavaScript at high conformance — **~99.99% of the runnable
+> [Test262](https://github.com/tc39/test262) suite** (Proxy, Reflect, the whole
+> TypedArray/ArrayBuffer family, SharedArrayBuffer + multi-agent Atomics, BigInt,
+> WeakRef/FinalizationRegistry, generators, async/await, and a conformant RegExp
+> engine all pass at 100% of runnable). A few areas are intentionally out of
+> scope — see [Limitations](#limitations).
 
 ## Features
 
@@ -41,15 +45,31 @@ automation, and running untrusted snippets under tight host control.
 - **Full statement set** — `if`/`else`, `for`, `for-in`, `for-of`, `while`,
   `do-while`, `switch`, `try`/`catch`/`finally` (incl. optional catch
   binding), `throw`, and Automatic Semicolon Insertion.
-- **Built-ins** — `Object`, `Function`, `Array`, `String`, `Number`,
-  `Boolean`, `Symbol` (well-known symbols), `Map`, `Set`, `WeakMap`, `WeakSet`,
-  `Promise`, `Math`, `JSON`, `RegExp` (RE2), the `Error` hierarchy, and global
-  helpers (`parseInt`, `parseFloat`, `isNaN`, `isFinite`,
-  `encodeURIComponent`, …).
+- **Built-ins** — `Object`, `Function`, `Array`, `String`, `Number`, `Boolean`,
+  `BigInt`, `Symbol` (well-known symbols), `Map`, `Set`, `WeakMap`, `WeakSet`,
+  `WeakRef`, `FinalizationRegistry`, `Promise`, `Proxy`, `Reflect`, the full
+  **TypedArray** family + `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, and
+  `Atomics`, `Math`, `JSON`, a conformant `RegExp` engine, the `Error`
+  hierarchy, and the global helpers (`parseInt`, `parseFloat`, `isNaN`,
+  `isFinite`, `encodeURIComponent`, …).
+- **Own RegExp engine** — a pure-Go, ECMAScript-conformant matcher
+  ([`jsregexp`](jsregexp)) with backreferences, lookahead/lookbehind, named
+  groups, the `u`/`v` Unicode modes, and `\p{…}` property escapes over Unicode
+  17.0 data — the things Go's RE2 deliberately cannot do — with a step budget so
+  untrusted patterns can't hang the host. (An opt-in RE2 backend is available for
+  linear-time matching of simple, trusted patterns.)
+- **Bytecode VM** — hot functions compile to a compact stack bytecode; the
+  original tree-walking evaluator remains as an always-correct fallback (for
+  not-yet-lowered nodes) and as a differential oracle. Both engines produce
+  identical results; the VM is the default.
 - **Generators & async/await** — `function*`, `yield`, `yield*`, `async`
   functions, `await`, and async arrows, all driven cooperatively on the single
   VM thread (an `await` is a `yield` to a promise-driven runner), so ordering
   matches real engines.
+- **Shared memory & multi-agent Atomics** — `SharedArrayBuffer` plus
+  `Atomics.wait`/`waitAsync`/`notify` coordinate across multiple agents (each a
+  separate interpreter on its own goroutine), so worker-style shared-memory code
+  runs correctly.
 - **Event loop & timers** — `setTimeout`, `setInterval`, `clearTimeout`,
   `clearInterval`, `setImmediate`, and `queueMicrotask`, all serialized on a
   single event-loop goroutine so callbacks never race with script code.
@@ -263,10 +283,13 @@ Implemented intrinsics and globals (see [Limitations](#limitations) for gaps):
 | `String`      | full method set incl. `match`/`matchAll`/`replace`/`replaceAll`/`split` (regex-aware), templates, `padStart`/`padEnd` |
 | `Number`/`Math` | numeric methods, `toFixed`/`toPrecision`/`toString(radix)`, the `Math.*` surface |
 | `JSON`        | `parse`/`stringify` with replacer (function + array), reviver, `toJSON`, cycle detection |
-| `RegExp`      | RE2-backed `exec`/`test`, flags, capture groups (no backrefs/lookaround/named groups — see [Limitations](#limitations)) |
-| Collections   | `Map`, `Set`, `WeakMap`, `WeakSet`, and `Promise` (with the microtask queue) |
+| `RegExp`      | own ECMAScript engine: `exec`/`test`/`Symbol.{match,replace,split,…}`, all flags, **backreferences, lookahead/lookbehind, named groups, `u`/`v` modes, `\p{…}`** ([`jsregexp`](jsregexp)); opt-in RE2 backend |
+| `BigInt`      | arbitrary-precision integers, literals, `asIntN`/`asUintN`, mixed-type guards |
+| Binary data   | full `TypedArray` family, `ArrayBuffer` (resizable), `SharedArrayBuffer` (growable), `DataView`, `Atomics` (incl. multi-agent `wait`/`waitAsync`/`notify`) |
+| `Proxy`/`Reflect` | all traps and the corresponding `Reflect.*` operations, realm-aware |
+| Collections   | `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `FinalizationRegistry`, and `Promise` (with the microtask queue) |
 | `Symbol`      | well-known symbols (`iterator`, `asyncIterator`, `hasInstance`, …)          |
-| Errors        | full `Error` hierarchy, subclassable                                        |
+| Errors        | full `Error` hierarchy (incl. `AggregateError`), subclassable                |
 | Globals       | `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURIComponent`, `Date`, `Promise`, timers |
 
 ## TypeScript
@@ -303,8 +326,8 @@ gojs run app.ts        # transpile + run a TypeScript entry file
 Transpilation is **checker-free** (the `isolatedModules` model): type
 annotations, `interface`s, generics, and class visibility are erased/lowered, and
 `enum`/`const enum`/`namespace` are lowered to runnable JavaScript — but the
-program is **not type-checked** (the goal is to *run* TypeScript). Not yet wired:
-`.ts`-origin line numbers in stack traces (source maps). See the
+program is **not type-checked** (the goal is to *run* TypeScript). Runtime error
+stacks are **source-mapped back to the original `.ts` line/column**. See the
 [`typescript`](examples/typescript) example.
 
 ## Examples
@@ -319,8 +342,12 @@ Runnable programs live under [`examples/`](examples), each with its own README:
 | [`providers`](examples/providers)       | Custom `PrintProvider` + timers on the event loop       |
 | [`modules`](examples/modules)           | Intercept `require()` with a `ModuleProvider`           |
 | [`typescript`](examples/typescript)     | Run TypeScript (transpiled in-process) with imports     |
+| [`regexp_engine`](examples/regexp_engine) | Choose the RegExp backend (conformant vs RE2)         |
 | [`limits`](examples/limits)             | Bound recursion and CPU with `Limits`                   |
 | [`sandbox`](examples/sandbox)           | Hardened sandbox: no I/O, no eval, timeout on runaway    |
+| [`fetch`](examples/fetch)               | The `fetch` API over a `NetProvider` ([`host/fetch`](host/fetch)) |
+| [`websocket`](examples/websocket)       | A browser-compatible `WebSocket` client ([`host/websocket`](host/websocket)) |
+| [`sse`](examples/sse)                   | Server-Sent Events / `EventSource` ([`host/sse`](host/sse)) |
 
 ```bash
 go run ./examples/basic
@@ -333,20 +360,27 @@ go run ./examples/providers
 gojs is organized into layered packages with no import cycles:
 
 ```
-Source → lexer → parser → ast → interp (tree-walking evaluator)
+Source → lexer → parser → ast → interp ──► bytecode compiler → VM   (default)
+                                    │
+                                    └────► tree-walking evaluator    (fallback + oracle)
                                     ↑
                                 Providers
 ```
 
-| Package  | Purpose                                                              |
-| -------- | ------------------------------------------------------------------- |
-| `token`  | Lexical token types, categories, keywords, source spans             |
-| `lexer`  | Tokenizes source (regex/division disambiguation, templates, ASI)    |
-| `ast`    | AST node definitions (`Expr`/`Stmt`) with positions                 |
-| `parser` | Recursive-descent + precedence-climbing parser                      |
-| `interp` | The runtime: values, objects, environments, evaluator, built-ins, providers, event loop |
+| Package    | Purpose                                                              |
+| ---------- | ------------------------------------------------------------------- |
+| `token`    | Lexical token types, categories, keywords, source spans             |
+| `lexer`    | Tokenizes source (regex/division disambiguation, templates, ASI)    |
+| `ast`      | AST node definitions (`Expr`/`Stmt`) with positions                 |
+| `parser`   | Recursive-descent + precedence-climbing parser                      |
+| `interp`   | The runtime: values, objects, environments, the bytecode compiler + VM, the tree-walking evaluator, built-ins, providers, event loop |
+| `jsregexp` | Standalone ECMAScript RegExp engine (embeddable on its own)          |
 
-The root package `gojs` re-exports the common surface of `interp`.
+The root package `gojs` re-exports the common surface of `interp`. The bytecode
+VM lowers hot function bodies to a stack machine and falls back to the
+tree-walker per-subtree for not-yet-lowered constructs, so a compiled body is
+always correct; the two engines are validated to produce identical results
+across the whole suite.
 
 ## Project structure
 
@@ -387,26 +421,43 @@ default `go test ./...` stays fast and hermetic.
 The workflow is find-fix-test: when you hit a behavior that diverges from the
 spec, **first reproduce it as a failing test** in `tests/harness`, then fix the
 engine until it passes. Keep `go test ./... -race` green. Intentional
-divergences from the spec (e.g. RE2 regex semantics, rune-indexed strings) are
-recorded so they aren't mistaken for bugs. New built-ins and language features
-should land with harness coverage.
+divergences from the spec (chiefly the code-point-indexed string model) are
+recorded in [`NOTES-divergences.md`](NOTES-divergences.md) so they aren't
+mistaken for bugs. New built-ins and language features should land with harness
+coverage.
 
 ## Limitations
 
-This is a first pass. Notable gaps and approximations:
+Coverage is high (~99.99% of runnable Test262), but some areas are deliberately
+out of scope or approximated:
 
-- **Top-level `await`** outside an `async` function is a best-effort
-  synchronous unwrap rather than a full module-graph suspension.
-- **Strings** are stored as Go UTF-8 and indexed by rune, not UTF-16 code
-  units — an approximation for characters outside the BMP.
-- **Modules** — CommonJS `require()` works through a `ModuleProvider` (see the
-  `modules` and `typescript` examples). Native ES `import`/`export` is not
-  executed directly; TypeScript's ES modules run by transpiling to CommonJS.
-- **`eval` / `Function(...)`** dynamic code is intentionally unsupported
-  (sandbox posture).
-- **`RegExp`** is backed by RE2, so backreferences, lookaround, and named
-  capture groups (`(?<name>…)` / `match.groups`) are not supported.
-- No `Proxy`/`Reflect`, `TypedArray`/`ArrayBuffer`, or `Intl` yet.
+- **Strings** are indexed by Unicode code point, not UTF-16 code unit. This is a
+  deliberate divergence: `.length`, `charCodeAt`, and friends count code points,
+  and astral characters/lone surrogates don't round-trip through UTF-16-observing
+  APIs the way a browser engine's do. See [`NOTES-divergences.md`](NOTES-divergences.md).
+- **ES modules** — CommonJS `require()` works through a `ModuleProvider` (see the
+  `modules` and `typescript` examples), and dynamic `import()` resolves against a
+  module provider. Native top-level ES `import`/`export` module *linking* is not
+  run directly; TypeScript's ES modules run by transpiling to CommonJS.
+- **`eval` / `Function(...)`** dynamic code is supported but gated off by default
+  under the sandbox security posture (`DisableEval` / `DisableFunctionCtor`).
+- **Not implemented (out of scope for now):** `Intl`, `Temporal`, the
+  explicit-resource-management proposal (`DisposableStack`/`using`), and a small
+  set of other stage-track proposals. Tests for these are skipped, not failed.
+- **`Atomics.wait` on a non-blocking agent** (`[[CanBlock]] = false`) is not
+  modeled — a gojs agent always can block.
+
+## Conformance
+
+gojs is measured against the official [Test262](https://github.com/tc39/test262)
+suite. Current standing: **~99.99% of runnable tests pass**, with entire domains
+at 100% of runnable — including `Proxy`, `Reflect`, the `TypedArray`/`ArrayBuffer`
+family, `SharedArrayBuffer` + multi-agent `Atomics`, `RegExp`, `BigInt`,
+`WeakRef`, and `FinalizationRegistry`. The handful of remaining failures are
+deferred non-bugs (a legacy Annex-B `.caller` misfeature and one upstream-broken
+proposal test); the large skip buckets are unimplemented proposals (`Temporal`,
+etc.), not failures. The bytecode VM and the tree-walker are cross-checked to
+produce identical results across the whole suite.
 
 ## License
 

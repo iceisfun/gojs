@@ -13,9 +13,10 @@ It is the default RegExp engine inside [gojs](https://github.com/iceisfun/gojs),
 but has no dependency on the interpreter and can be embedded on its own.
 
 > **Status: pre-1.0, actively evolving.** The public API and the exported AST may
-> change between commits. Conformance is high for common matching but not
-> complete — see **[Limitations](#limitations-read-this)** below. This is not a
-> drop-in replacement for a browser engine yet.
+> change between commits. **Conformance is high** — measured through gojs, the
+> `built-ins/RegExp` Test262 domain passes at ~100% of runnable — with a few known
+> edge-case gaps listed in **[Limitations](#limitations-read-this)** below.
+> Performance (a backtracking matcher, not a bytecode VM) is the main caveat.
 
 ## Install
 
@@ -191,21 +192,24 @@ We would rather be honest than oversell. Known gaps, roughly by impact:
    but capture *values* inside a complex, backtracking lookbehind may differ from
    a spec engine.
 
-4. **Case folding is approximate.** The `i` flag uses `unicode.SimpleFold`
-   (case-pair orbits) — a close approximation of Unicode *simple* case folding,
-   correct for the overwhelming majority of code points but not byte-identical to
-   `CaseFolding.txt`. Full (multi-character) case folding is not applied.
+4. **Case folding.** The `i` flag applies Unicode **simple** case folding: Go's
+   `unicode.SimpleFold` orbits augmented with the `CaseFolding.txt` status-`S`
+   pairs that orbit-folding misses (e.g. `ẞ`↔`ß`, the Greek/Latin ligature pairs),
+   so it matches the spec's `Canonicalize` for the simple mappings. Full
+   *multi-character* case folding (one code point folding to several) is not
+   applied — the spec's regex `Canonicalize` is simple-fold only, so this is
+   conformant for matching.
 
-5. **`\p{}` property escapes are broad but incomplete.** General_Category,
-   Script, and the standard binary properties resolve; but composed properties
-   derive from Go's Unicode tables (currently **15.0**) while the emoji and
-   `Changes_When_*` tables are hardcoded from **Unicode 17.0** — an internal
-   version skew. `Script_Extensions` is approximated by `Script`. Unsupported
-   property names/values return a `SyntaxError` (they do not silently mismatch).
+5. **`\p{}` property escapes** resolve against a generated **Unicode 17.0**
+   Character Database: General_Category, binary properties, **Script**, and
+   **Script_Extensions** (properly, not approximated by `Script`). Unsupported
+   property names/values return a `SyntaxError` rather than silently mismatching.
 
-6. **`v`-mode strings unsupported.** Multi-code-point class strings (`\q{abc}`
-   with length ≠ 1) and the `v`-flag "properties of strings"
-   (`\p{RGI_Emoji}`, …) are rejected at compile time.
+6. **`v`-mode "properties of strings"** — `\p{RGI_Emoji}` and the emoji-sequence
+   sets (`Basic_Emoji`, `Emoji_Keycap_Sequence`, `RGI_Emoji_Modifier_Sequence`,
+   `RGI_Emoji_Flag_Sequence`, `RGI_Emoji_Tag_Sequence`, `RGI_Emoji_ZWJ_Sequence`),
+   plus multi-code-point class strings (`\q{abc}`) and set operations (`&&`,
+   `--`), are supported, over Unicode Emoji 17.0 data.
 
 7. **Unicode input model.** Matching is over UTF-16 code units (correct), but the
    convenience helpers round-trip through Go (UTF-8) strings, so **lone
@@ -217,22 +221,24 @@ We would rather be honest than oversell. Known gaps, roughly by impact:
    array) is the caller's responsibility — the engine itself only reports offsets
    and honors `y` via the `start` argument.
 
-9. **Conformance is not 100%.** The engine passes the large majority of
-   ECMAScript matching behavior (measured via gojs against Test262), but has
-   known edge-case gaps in capture-reset ordering, some Annex-B corners, and the
-   items above. Treat it as "very usable, not a reference implementation."
+9. **A few residual edge-case gaps.** Conformance is high (~100% of the runnable
+   `built-ins/RegExp` Test262 domain via gojs), but a complex, backtracking
+   **lookbehind** can produce wrong capture *values* (item 3), and there are minor
+   Annex-B corners. Treat it as "very usable, close to a reference implementation,
+   with lookbehind captures the notable caveat."
 
 10. **API + AST are pre-1.0.** Signatures and the exported AST node shapes may
     change without notice.
 
 ## Conformance
 
-jsregexp is exercised against the official **Test262** suite through gojs. The
-core matcher (`RegExp.prototype.exec`) sits around the mid-80s percent; the
-remaining regex failures in gojs are mostly interpreter-level object-model
-plumbing (prototype accessor getters, the `Symbol.*` protocol), not the engine.
-The parser passes ~100% of the in-scope parse-phase literal tests. These numbers
-move as the engine matures.
+jsregexp is exercised against the official **Test262** suite through gojs, and
+the `built-ins/RegExp` domain passes at **~100% of runnable** (2816 pass, 0 fail
+at last full run), as do the `RegExp` `Symbol.{match,matchAll,replace,search,
+split}` protocols and the regex-literal parse tests in `language/literals`. The
+residual gaps are the ones enumerated under [Limitations](#limitations-read-this)
+— chiefly complex-lookbehind capture values. These numbers move as the engine
+matures.
 
 ## License
 
