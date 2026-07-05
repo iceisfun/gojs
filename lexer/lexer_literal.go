@@ -498,12 +498,12 @@ func (l *Lexer) scanRegex(start token.Pos, nl bool) token.Token {
 			return l.errorf("unterminated regular expression literal")
 		}
 		if l.ch == '\\' {
-			pattern.WriteRune(l.ch)
+			writeStrCodePoint(&pattern, l.ch)
 			l.readRune()
 			if l.ch == eof || isLineTerminator(l.ch) {
 				return l.errorf("unterminated regular expression literal")
 			}
-			pattern.WriteRune(l.ch)
+			writeStrCodePoint(&pattern, l.ch)
 			l.readRune()
 			continue
 		}
@@ -515,7 +515,7 @@ func (l *Lexer) scanRegex(start token.Pos, nl bool) token.Token {
 			l.readRune() // closing '/'
 			break
 		}
-		pattern.WriteRune(l.ch)
+		writeStrCodePoint(&pattern, l.ch)
 		l.readRune()
 	}
 	// Flags.

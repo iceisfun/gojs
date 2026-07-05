@@ -150,12 +150,26 @@ func (l *Lexer) readRune() {
 		return
 	}
 	l.offset = l.rdOffset
-	r, size := utf8.DecodeRuneInString(l.input[l.rdOffset:])
-	if r == utf8.RuneError && size == 1 {
-		r = rune(l.input[l.rdOffset])
-	}
+	r, size := decodeRune(l.input[l.rdOffset:])
 	l.ch = r
 	l.rdOffset += size
+}
+
+// decodeRune reads the next code point from s. It decodes a WTF-8-encoded lone
+// surrogate (U+D800..U+DFFF, the three-byte form Go's utf8 rejects) as that
+// single surrogate rune, since gojs strings store surrogates in WTF-8 (see
+// writeStrCodePoint); this lets a regex or string literal built from a
+// surrogate-bearing string round-trip its source. An unrelated invalid byte is
+// returned verbatim as a single-byte rune, matching Go's own recovery.
+func decodeRune(s string) (rune, int) {
+	if len(s) >= 3 && s[0] == 0xED && s[1] >= 0xA0 && s[1] <= 0xBF && s[2] >= 0x80 && s[2] <= 0xBF {
+		return rune(s[0]&0x0F)<<12 | rune(s[1]&0x3F)<<6 | rune(s[2]&0x3F), 3
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size == 1 {
+		r = rune(s[0])
+	}
+	return r, size
 }
 
 // peek returns the rune after the current one without advancing.
@@ -163,10 +177,7 @@ func (l *Lexer) peek() rune {
 	if l.rdOffset >= len(l.input) {
 		return eof
 	}
-	r, size := utf8.DecodeRuneInString(l.input[l.rdOffset:])
-	if r == utf8.RuneError && size == 1 {
-		return rune(l.input[l.rdOffset])
-	}
+	r, _ := decodeRune(l.input[l.rdOffset:])
 	return r
 }
 
@@ -176,15 +187,12 @@ func (l *Lexer) peek2() rune {
 	if off >= len(l.input) {
 		return eof
 	}
-	_, size := utf8.DecodeRuneInString(l.input[off:])
+	_, size := decodeRune(l.input[off:])
 	off += size
 	if off >= len(l.input) {
 		return eof
 	}
-	r, size2 := utf8.DecodeRuneInString(l.input[off:])
-	if r == utf8.RuneError && size2 == 1 {
-		return rune(l.input[off])
-	}
+	r, _ := decodeRune(l.input[off:])
 	return r
 }
 
