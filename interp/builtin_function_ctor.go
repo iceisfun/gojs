@@ -91,6 +91,7 @@ func (i *Interpreter) createDynamicFunctionKind(ctx context.Context, kind dynFun
 	// early errors on the whole FunctionExpression are enforced too.
 	sourceString := prefix + "anonymous(" + paramString + "\n) {" + bodyParseString + "}"
 	prog, err := parser.Parse("<anonymous>", sourceString)
+	i.reportEval(EvalFunction, sourceString, prog, err)
 	if err != nil {
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
 	}

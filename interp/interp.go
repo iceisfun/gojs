@@ -271,6 +271,10 @@ type intrinsics struct {
 	// survivors. Read it after the event loop drains.
 	unhandledRejections []rejectionRecord
 
+	// dumpEval, when non-nil (WithDumpEval), observes every eval()/Function()
+	// compilation with its source and parsed AST.
+	dumpEval EvalObserver
+
 	// nativeErrorProtos maps an error name (TypeError, RangeError, ...) to its
 	// prototype, so runtime code can raise the right error kind.
 	nativeErrorProtos map[string]*Object

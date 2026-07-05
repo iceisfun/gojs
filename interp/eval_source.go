@@ -34,6 +34,7 @@ func (i *Interpreter) evalSource(ctx context.Context, code Value) (Value, error)
 	// new.target are all invalid, so parse with an empty context. Its strictness
 	// comes solely from its own Directive Prologue (§19.2.1.1).
 	prog, err := parser.ParseEval("<eval>", string(str), parser.EvalContext{})
+	i.reportEval(EvalIndirect, string(str), prog, err)
 	if err != nil {
 		// A parse failure in eval surfaces as a SyntaxError thrown value.
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
@@ -89,6 +90,7 @@ func (i *Interpreter) directEval(ctx context.Context, code Value, env *Environme
 		InFieldInitializer: env.inFieldInitializer(),
 		PrivateNames:       env.privateNamesInScope(),
 	})
+	i.reportEval(EvalDirect, string(str), prog, err)
 	if err != nil {
 		return nil, i.throwError(ctx, "SyntaxError", err.Error())
 	}

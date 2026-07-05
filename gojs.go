@@ -54,7 +54,7 @@ type NetProvider = interp.NetProvider
 
 // Net provider option and default (pass-through) implementation, re-exported.
 var (
-	WithNetProvider      = interp.WithNetProvider
+	WithNetProvider       = interp.WithNetProvider
 	NewDefaultNetProvider = interp.NewDefaultNetProvider
 )
 
@@ -118,6 +118,29 @@ var (
 	NewDefaultTimeProvider  = interp.NewDefaultTimeProvider
 	NewDefaultTimerProvider = interp.NewDefaultTimerProvider
 )
+
+// Dynamic-code observation: WithDumpEval installs an [EvalObserver] that receives
+// every eval()/Function() compilation (source + parsed AST) before it runs — a
+// lens for unwinding obfuscated, self-generating payloads. See [interp.WithDumpEval].
+type (
+	// EvalObserver receives one [EvalInfo] per dynamic compilation.
+	EvalObserver = interp.EvalObserver
+	// EvalInfo describes a single eval()/Function() compilation.
+	EvalInfo = interp.EvalInfo
+	// EvalKind identifies which entry point compiled a source string.
+	EvalKind = interp.EvalKind
+)
+
+// Eval compilation kinds delivered to a WithDumpEval observer.
+const (
+	EvalIndirect = interp.EvalIndirect // an indirect eval(str)
+	EvalDirect   = interp.EvalDirect   // a direct eval(str)
+	EvalFunction = interp.EvalFunction // Function(...) / fn.constructor(...)
+)
+
+// WithDumpEval installs an observer called for every eval() and Function()
+// compilation, with the source text and parsed AST. See [interp.WithDumpEval].
+var WithDumpEval = interp.WithDumpEval
 
 // RegExpEngine selects the RegExp backend passed to [WithRegExpEngine].
 type RegExpEngine = interp.RegExpEngine
