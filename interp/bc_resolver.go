@@ -73,6 +73,26 @@ func planSlots(def *ast.FuncDef) *slotPlan {
 	return sp
 }
 
+// planSlotsBody plans function-scope slots for a top-level body (a module's
+// statement list) that has no parameters: its function-scope `var` names become
+// slots, exactly as for a function body. Block-scoped let/const are layered on by
+// the compiler. A `var arguments` declines (name mode binds the real arguments
+// object) — though a module top level has none, this keeps parity with planSlots.
+func planSlotsBody(body []ast.Stmt) *slotPlan {
+	varNames := map[string]bool{}
+	collectVarNames(body, varNames)
+	if varNames["arguments"] {
+		return nil
+	}
+	sp := &slotPlan{byName: make(map[string]int)}
+	for n := range varNames {
+		s := len(sp.slotName)
+		sp.byName[n] = s
+		sp.slotName = append(sp.slotName, n)
+	}
+	return sp
+}
+
 // paramHasName reports whether a simple parameter list binds name.
 func paramHasName(params []ast.Expr, name string) bool {
 	for _, p := range params {

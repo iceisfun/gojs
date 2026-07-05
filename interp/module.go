@@ -78,6 +78,14 @@ func (i *Interpreter) makeRequire(referrer string) *Object {
 // returns its exports. Modules are cached by canonical id before evaluation so
 // that circular dependencies see a partially-populated exports object rather
 // than looping.
+// moduleReservedNames are the free variables the module wrapper pre-binds in the
+// module environment. A module whose own top-level declarations shadow one of
+// these declines slot-mode compilation (they must resolve to the env binding, not
+// a frame slot); see compileTopLevelBody.
+var moduleReservedNames = map[string]bool{
+	"module": true, "exports": true, "require": true, "__filename": true, "__dirname": true,
+}
+
 func (i *Interpreter) requireModule(ctx context.Context, specifier, referrer string) (Value, error) {
 	id, err := i.moduleProvider.Resolve(ctx, specifier, referrer)
 	if err != nil {
@@ -133,6 +141,25 @@ func (i *Interpreter) requireModule(ctx context.Context, specifier, referrer str
 	define("require", i.makeRequire(id))
 	define("__filename", String(id))
 	define("__dirname", String(moduleDir(id)))
+
+	// A closure-free module top level compiles to slot-mode bytecode (the same
+	// engine as function bodies), skipping the tree-walker's per-node dispatch and
+	// per-iteration loop environments. Anything the compiler declines (nested
+	// functions — i.e. most real modules — or a binding shadowing a pre-bound free
+	// variable) falls through to the tree-walker below, unchanged.
+	if i.useBytecode {
+		if code, ok := i.compileTopLevelBody(prog.Body, env.isStrict(), moduleReservedNames); ok {
+			locals := make([]Value, code.numSlots)
+			for j := range locals {
+				locals[j] = Undef
+			}
+			if _, err := i.execCode(ctx, code, env, locals); err != nil {
+				delete(i.modules, id)
+				return nil, err
+			}
+			return moduleObj.GetStr(ctx, "exports")
+		}
+	}
 
 	if err := i.hoistDeclarations(ctx, prog.Body, env, true); err != nil {
 		delete(i.modules, id)

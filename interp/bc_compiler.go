@@ -80,13 +80,74 @@ func (i *Interpreter) compileFunctionBody(def *ast.FuncDef, strict bool) (*codeO
 // compileBody compiles the statement list and the implicit trailing `return
 // undefined`, reporting success (no fallback aborted the compile).
 func (c *bcCompiler) compileBody(def *ast.FuncDef) bool {
-	// The function body is itself a lexical scope: hoist its top-level let/const to
-	// slots (in slot mode) before compiling, so a use-before-init hits the TDZ.
+	return c.compileStmtList(def.Body.Body)
+}
+
+// compileTopLevelBody compiles a module's top-level statement list to a
+// slot-mode codeObject, or returns (nil, false) to leave it on the tree-walker.
+// A module top level is function-scoped, so it slots exactly like a function
+// body — with two guards: it must be slot-eligible (closure-free etc., enforced
+// by the compiler's c.fail on nested functions), and no top-level binding may
+// shadow a pre-bound free variable (module/exports/require/__filename/__dirname
+// in `reserved`), which lives in the env rather than a slot. Name mode is not
+// attempted here: a module that declines simply runs on the tree-walker, keeping
+// the new path's blast radius to closure-free bodies only.
+func (i *Interpreter) compileTopLevelBody(body []ast.Stmt, strict bool, reserved map[string]bool) (*codeObject, bool) {
+	if topLevelBindingCollides(body, reserved) {
+		return nil, false
+	}
+	sp := planSlotsBody(body)
+	if sp == nil {
+		return nil, false
+	}
+	c := &bcCompiler{i: i, slots: sp.byName, nextSlot: int32(len(sp.slotName)),
+		code: &codeObject{name: "<module>", strict: strict, numSlots: len(sp.slotName),
+			slotNames: sp.slotName, paramSlots: sp.paramSlot, numParams: sp.numParams}}
+	if c.compileStmtList(body) {
+		c.code.numSlots = int(c.nextSlot)
+		return c.code, true
+	}
+	return nil, false
+}
+
+// topLevelBindingCollides reports whether any module-scope binding shadows a
+// reserved free variable. `var` names are function-scoped (collected through
+// nested blocks); a top-level let/const is module-scoped too. A let/const in a
+// NESTED block that shadows a reserved name is fine — the compiler's lexical
+// scope stack resolves it correctly — so only the direct top-level ones count.
+func topLevelBindingCollides(body []ast.Stmt, reserved map[string]bool) bool {
+	if len(reserved) == 0 {
+		return false
+	}
+	vars := map[string]bool{}
+	collectVarNames(body, vars)
+	for n := range vars {
+		if reserved[n] {
+			return true
+		}
+	}
+	for _, s := range body {
+		if vd, ok := s.(*ast.VarDecl); ok && vd.Kind != token.VAR {
+			for _, d := range vd.Decls {
+				if id, ok := d.Target.(*ast.Ident); ok && reserved[id.Name] {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// compileStmtList compiles a statement list as a body (a function body or a
+// module top level), followed by the implicit trailing `return undefined`. The
+// list is its own lexical scope: its top-level let/const are hoisted to slots (in
+// slot mode) before compiling, so a use-before-init hits the TDZ.
+func (c *bcCompiler) compileStmtList(body []ast.Stmt) bool {
 	if c.slots != nil {
 		c.pushLexScope()
-		c.hoistLexicals(def.Body.Body)
+		c.hoistLexicals(body)
 	}
-	for _, s := range def.Body.Body {
+	for _, s := range body {
 		c.stmt(s)
 		if c.err != nil {
 			return false
