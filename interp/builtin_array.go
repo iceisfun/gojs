@@ -1153,10 +1153,14 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 			return nil, err
 		}
 	}
-	out := ""
+	// Accumulate into a byte builder rather than repeatedly concatenating Go
+	// strings: `out += ...` reallocates and copies the whole accumulator each
+	// iteration, making join O(n²) in the joined length (a 2.4MB result from
+	// 400k elements took ~240s). append keeps it linear.
+	var out []byte
 	for k := 0; k < length; k++ {
 		if k > 0 {
-			out += sep
+			out = append(out, sep...)
 		}
 		v, err := i.getV(ctx, o, StrKey(strconv.Itoa(k)), o)
 		if err != nil {
@@ -1169,9 +1173,9 @@ func (i *Interpreter) arrayJoin(ctx context.Context, this Value, args []Value) (
 		if err != nil {
 			return nil, err
 		}
-		out += s
+		out = append(out, s...)
 	}
-	return String(canonicalizeWTF8(out)), nil
+	return String(canonicalizeWTF8(string(out))), nil
 }
 
 func (i *Interpreter) arrayToString(ctx context.Context, this Value, args []Value) (Value, error) {
