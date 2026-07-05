@@ -300,6 +300,16 @@ func (i *Interpreter) evalBinary(ctx context.Context, e *ast.BinaryExpr, env *En
 
 // applyBinary computes the result of a binary operator on two values.
 func (i *Interpreter) applyBinary(ctx context.Context, op token.Type, left, right Value) (Value, error) {
+	// Fast path: both operands are already Number. Numbers have no observable
+	// ToPrimitive/ToNumeric behaviour, so this is a pure shortcut around the
+	// evalAdd/evalRelational/... ladders — the hot case for numeric loops.
+	if l, ok := left.(Number); ok {
+		if r, ok := right.(Number); ok {
+			if v, done := numberBinary(op, float64(l), float64(r)); done {
+				return v, nil
+			}
+		}
+	}
 	switch op {
 	case token.PLUS:
 		return i.evalAdd(ctx, left, right)
@@ -322,6 +332,53 @@ func (i *Interpreter) applyBinary(ctx context.Context, op token.Type, left, righ
 	default:
 		return nil, i.throwError(ctx, "SyntaxError", "unsupported binary operator")
 	}
+}
+
+// numberBinary evaluates a binary operator on two Number operands directly,
+// bypassing ToPrimitive/ToNumeric. It returns (result, true) for every operator
+// whose Number×Number semantics are self-contained, and (nil, false) only for a
+// non-binary op token. Go's float comparisons already yield the spec's results
+// for NaN (every relational is false; == is false, != is true) and -0 (== 0).
+func numberBinary(op token.Type, l, r float64) (Value, bool) {
+	switch op {
+	case token.PLUS:
+		return numberValue(l + r), true
+	case token.MINUS:
+		return numberValue(l - r), true
+	case token.STAR:
+		return numberValue(l * r), true
+	case token.SLASH:
+		return numberValue(l / r), true
+	case token.PERCENT:
+		return numberValue(math.Mod(l, r)), true
+	case token.EXP:
+		return numberValue(numberExponentiate(l, r)), true
+	case token.LT:
+		return Bool(l < r), true
+	case token.GT:
+		return Bool(l > r), true
+	case token.LE:
+		return Bool(l <= r), true
+	case token.GE:
+		return Bool(l >= r), true
+	case token.EQ, token.STRICT_EQ:
+		return Bool(l == r), true
+	case token.NE, token.STRICT_NE:
+		return Bool(l != r), true
+	case token.BIT_AND:
+		return numberValue(float64(ToInt32(l) & ToInt32(r))), true
+	case token.BIT_OR:
+		return numberValue(float64(ToInt32(l) | ToInt32(r))), true
+	case token.BIT_XOR:
+		return numberValue(float64(ToInt32(l) ^ ToInt32(r))), true
+	case token.SHL:
+		return numberValue(float64(ToInt32(l) << (ToUint32(r) & 31))), true
+	case token.SHR:
+		return numberValue(float64(ToInt32(l) >> (ToUint32(r) & 31))), true
+	case token.USHR:
+		return numberValue(float64(ToUint32(l) >> (ToUint32(r) & 31))), true
+	}
+	return nil, false
 }
 
 // evalAdd implements the addition operator, which concatenates when either
