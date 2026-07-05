@@ -25,11 +25,11 @@ func resolveProperty(name, value string) (*runeSet, error) {
 				return rs, nil
 			}
 		case "Script":
-			if rs := ucdLookup(ucd17Script, resolveScriptName(value)); rs != nil {
+			if rs := lookupScript(ucd17Script, resolveScriptName(value)); rs != nil {
 				return rs, nil
 			}
 		case "Script_Extensions":
-			if rs := ucdLookup(ucd17ScriptExt, resolveScriptName(value)); rs != nil {
+			if rs := lookupScript(ucd17ScriptExt, resolveScriptName(value)); rs != nil {
 				return rs, nil
 			}
 		}
@@ -56,6 +56,24 @@ func resolveProperty(name, value string) (*runeSet, error) {
 		return b.build(), nil
 	}
 	return nil, propErr(name, value)
+}
+
+// lookupScript resolves a Script or Script_Extensions value against a generated
+// table. The special value "Unknown" (alias "Zzzz") is not stored: per UAX #24 it
+// denotes the code points assigned to no explicit script, i.e. the complement of
+// the union of every script's ranges. Both sc=Unknown and scx=Unknown reduce to
+// this same complement, so it is computed on demand rather than tabulated.
+func lookupScript(m map[string][]rrange, key string) *runeSet {
+	if key == "Unknown" {
+		var union setBuilder
+		for _, rs := range m {
+			union.addRanges(rs)
+		}
+		var b setBuilder
+		b.addComplement(union.build().ranges)
+		return b.build()
+	}
+	return ucdLookup(m, key)
 }
 
 // ucdLookup returns a fresh runeSet for key in a generated UCD 17.0 table, or
