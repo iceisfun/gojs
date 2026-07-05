@@ -54,6 +54,20 @@ func (i *Interpreter) initBigInt() {
 		}
 		return &BigInt{Int: v}, nil
 	})
+	// BigInt.prototype.toLocaleString ( [ locales [ , options ] ] ) — §21.2.3.2.
+	// Like Number's, this is locale-formatted through x/text (see
+	// locale_format.go) rather than returning a bare toString.
+	i.defineMethod(proto, "toLocaleString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
+		v, ok := bigOf(this)
+		if !ok {
+			return nil, i.throwError(ctx, "TypeError", "BigInt.prototype.toLocaleString called on non-BigInt")
+		}
+		s, err := i.formatLocaleBigInt(ctx, v, arg(args, 0), arg(args, 1))
+		if err != nil {
+			return nil, err
+		}
+		return String(s), nil
+	})
 
 	// BigInt.prototype[Symbol.toStringTag] = "BigInt" — §21.2.3.5.
 	proto.defineOwn(SymKey(i.symToStringTag), &Property{Value: String("BigInt"), Writable: false, Enumerable: false, Configurable: true})

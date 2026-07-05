@@ -104,12 +104,13 @@ func TestNumberValueProps(t *testing.T) {
 }
 
 // TestNumberToLocaleString checks that Number.prototype.toLocaleString exists,
-// matches toString for the default (no-Intl) case, and rejects a non-number
+// formats per the (default English) locale via the CLDR data in x/text — the
+// spec permits this in lieu of an Intl object — and rejects a non-number
 // receiver.
 func TestNumberToLocaleString(t *testing.T) {
 	Expect(t, `
 		assert.sameValue(Number.prototype.hasOwnProperty("toLocaleString"), true);
-		assert.sameValue((1234.5).toLocaleString(), "1234.5");
+		assert.sameValue((1234.5).toLocaleString(), "1,234.5");
 		assert.sameValue((0).toLocaleString(), "0");
 		assert.sameValue((-0).toLocaleString(), "0");
 		assert.sameValue(NaN.toLocaleString(), "NaN");

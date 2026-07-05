@@ -318,13 +318,18 @@ func (i *Interpreter) initNumber() {
 		return String(toExponentialString(f, int(fc), fdUndefined)), nil
 	})
 	i.defineMethod(proto, "toLocaleString", 0, func(ctx context.Context, this Value, args []Value) (Value, error) {
-		// Without an Intl implementation, Number.prototype.toLocaleString returns
-		// the same String as Number.prototype.toString with no radix (§19).
+		// gojs has no Intl object, but its x/text dependency carries CLDR locale
+		// data, so we format per the requested locale (grouping, fraction digits)
+		// rather than falling back to toString — see locale_format.go.
 		f, ok := num(this)
 		if !ok {
 			return nil, i.throwError(ctx, "TypeError", "Number.prototype.toLocaleString called on non-number")
 		}
-		return String(NumberToString(f)), nil
+		s, err := i.formatLocaleNumber(ctx, f, arg(args, 0), arg(args, 1))
+		if err != nil {
+			return nil, err
+		}
+		return String(s), nil
 	})
 
 	ctor := i.newNativeCtor("Number", 1, func(ctx context.Context, this Value, args []Value) (Value, error) {
